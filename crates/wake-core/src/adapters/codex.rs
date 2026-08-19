@@ -342,7 +342,7 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
                 }
             }
             "compacted" => {
-                messages.push(mk_msg(Role::System, MessageKind::CompactSummary, "── Context compacted ──", ts));
+                messages.push(mk_msg(Role::System, MessageKind::CompactSummary, COMPACT_DIVIDER, ts));
             }
             "world_state" => {}
             _ => unknown_lines += 1,
@@ -371,21 +371,6 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
         updated_at,
         unknown_lines,
     })
-}
-
-fn mk_msg(role: Role, kind: MessageKind, text: &str, ts: i64) -> TranscriptMessage {
-    let (clipped, truncated) = clip(text, MAX_MSG_TEXT);
-    TranscriptMessage {
-        seq: 0,
-        role,
-        kind,
-        text: clipped,
-        truncated,
-        tool_calls: Vec::new(),
-        thinking: None,
-        timestamp: if ts > 0 { Some(ts) } else { None },
-        model: None,
-    }
 }
 
 /// rollout-2026-08-14T11-47-18-<uuid>.jsonl → uuid

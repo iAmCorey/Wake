@@ -3,6 +3,7 @@ pub mod codex;
 pub mod copilot;
 pub mod cursor;
 pub mod gemini;
+pub mod grok;
 pub mod kiro;
 pub mod opencode;
 
@@ -71,6 +72,7 @@ pub fn create_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(opencode::OpencodeAdapter::new()),
         Box::new(kiro::KiroAdapter::new()),
         Box::new(gemini::GeminiAdapter::new()),
+        Box::new(grok::GrokAdapter::new()),
     ];
     all.into_iter().filter(|a| a.detect()).collect()
 }

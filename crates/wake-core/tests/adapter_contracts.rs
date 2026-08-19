@@ -1,4 +1,4 @@
-//! 七家 adapter 的解析契约测试:全部走公开 API(`AgentAdapter` trait),
+//! 各家 adapter 的解析契约测试:全部走公开 API(`AgentAdapter` trait),
 //! fixture 为全合成数据(tests/fixtures/,SQLite 型在临时 HOME 里现建)。
 //!
 //! Copilot/OpenCode 的 parse 只认 `~/.copilot`、`~/.local/share/opencode`
@@ -17,6 +17,7 @@ use wake_core::adapters::codex::CodexAdapter;
 use wake_core::adapters::copilot::CopilotAdapter;
 use wake_core::adapters::cursor::CursorAdapter;
 use wake_core::adapters::gemini::GeminiAdapter;
+use wake_core::adapters::grok::GrokAdapter;
 use wake_core::adapters::kiro::KiroAdapter;
 use wake_core::adapters::opencode::OpencodeAdapter;
 use wake_core::adapters::AgentAdapter;
@@ -207,6 +208,13 @@ fn gemini_ref() -> SessionFileRef {
         AgentId::Gemini,
         &fixture("gemini/tmp/wakefx-gem/chats/session-2026-08-04T12-00-00.jsonl"),
         "session-2026-08-04T12-00-00",
+    )
+}
+fn grok_ref() -> SessionFileRef {
+    fs_ref(
+        AgentId::GrokBuild,
+        &fixture("grok/sessions/%2FUsers%2Ftester%2FGithub%2Fwakefx/66666666-aaaa-bbbb-cccc-000000000006/updates.jsonl"),
+        "66666666-aaaa-bbbb-cccc-000000000006",
     )
 }
 
@@ -481,6 +489,69 @@ fn gemini_parse_contract() {
     assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![0, 1]);
 }
 
+#[test]
+fn grok_parse_contract() {
+    setup();
+    let adapter = GrokAdapter::new();
+    let path = fixture("grok/sessions/%2FUsers%2Ftester%2FGithub%2Fwakefx/66666666-aaaa-bbbb-cccc-000000000006/updates.jsonl");
+    let r = adapter.file_ref(&path).expect("grok file_ref");
+    assert_eq!(r.native_id, "66666666-aaaa-bbbb-cccc-000000000006");
+    // summary.json 应映射到同一会话,不另开一条
+    let summary = path.with_file_name("summary.json");
+    let r2 = adapter.file_ref(&summary).expect("grok file_ref summary");
+    assert_eq!(r2.native_id, r.native_id);
+    assert_eq!(r2.file_path, r.file_path);
+
+    let s = adapter.parse_session(&r).expect("grok parse_session");
+    let t = adapter.parse_transcript(&r).expect("grok parse_transcript");
+
+    // 标题取 summary.generated_title,压过首条用户消息
+    assert_eq!(s.meta.title, "Grok QR debugging");
+    assert_eq!(s.meta.key, "grok-build:66666666-aaaa-bbbb-cccc-000000000006");
+    assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx");
+    assert_eq!(s.meta.project_name, "wakefx");
+    assert_eq!(s.meta.git_branch.as_deref(), Some("feat/qr"));
+    assert_eq!(s.meta.model.as_deref(), Some("grok-4.6"));
+    assert_eq!(s.meta.tokens_used, Some(4321));
+    assert_eq!(s.meta.message_count, 3);
+    assert_eq!(s.meta.created_at, ms("2026-08-06T11:00:00Z"));
+    assert_eq!(s.meta.updated_at, ms("2026-08-06T11:20:00Z"));
+    // wibble-experimental 计 unknown;hook_execution 在已知跳过表内不计
+    assert_eq!(s.unknown_line_count, 1);
+
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text), // thought + text + tool
+            (Role::Assistant, MessageKind::Text), // 新 thought 另开一条
+            (Role::System, MessageKind::CompactSummary),
+        ]
+    );
+    assert_eq!(t.mainline[0].timestamp, Some(ms("2026-08-06T11:00:00Z")));
+
+    let a = &t.mainline[1];
+    assert_eq!(a.text, "我先搜索相关代码。");
+    assert!(a.thinking.as_deref().unwrap_or_default().contains("useEffect"));
+    assert_eq!(a.tool_calls.len(), 1);
+    assert_eq!(a.tool_calls[0].name, "grep");
+    assert!(a.tool_calls[0].output.as_deref().unwrap_or_default().contains("QrScanner"));
+    assert!(!a.tool_calls[0].is_error);
+
+    assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![0, 1, 2]);
+    assert!(s.units[0].text.contains("useEffect"));
+    assert!(s.units[1].text.contains("grep"));
+
+    let untitled = fs_ref(
+        AgentId::GrokBuild,
+        &fixture("grok/sessions/%2FUsers%2Ftester%2FGithub%2Fwakefx/aaaaaaaa-1111-4000-8000-00000000000b/updates.jsonl"),
+        "aaaaaaaa-1111-4000-8000-00000000000b",
+    );
+    let s2 = adapter.parse_session(&untitled).expect("grok untitled parse");
+    assert_eq!(s2.meta.title, UNTITLED);
+    assert_eq!(s2.meta.message_count, 1);
+}
+
 // ---------------------------------------------------------------- seq 契约
 
 /// 跨文件不变量 1:FTS 单元的 seq 必须能在详情页 mainline 中找到同号消息,
@@ -510,7 +581,7 @@ fn assert_seq_contract(adapter: &dyn AgentAdapter, r: &SessionFileRef) {
 }
 
 #[test]
-fn seq_contract_holds_for_all_seven_agents() {
+fn seq_contract_holds_for_all_agents() {
     let env = setup();
     let checks: Vec<(Box<dyn AgentAdapter>, SessionFileRef)> = vec![
         (Box::new(ClaudeAdapter::new()), claude_ref()),
@@ -520,6 +591,7 @@ fn seq_contract_holds_for_all_seven_agents() {
         (Box::new(OpencodeAdapter::new()), db_ref(AgentId::Opencode, &env.opencode_db, "oc-0001")),
         (Box::new(KiroAdapter::new()), kiro_ref()),
         (Box::new(GeminiAdapter::new()), gemini_ref()),
+        (Box::new(GrokAdapter::new()), grok_ref()),
     ];
     for (adapter, r) in &checks {
         assert_seq_contract(adapter.as_ref(), r);

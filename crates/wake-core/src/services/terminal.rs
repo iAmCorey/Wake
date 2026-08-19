@@ -60,6 +60,7 @@ pub fn agent_bin(agent: AgentId) -> Option<&'static str> {
         AgentId::Opencode => Some("opencode"),
         AgentId::Kiro => Some("kiro"),
         AgentId::Gemini => Some("gemini"),
+        AgentId::GrokBuild => Some("grok"),
     }
 }
 
@@ -69,6 +70,7 @@ fn resume_args(agent: AgentId, id: &str) -> Option<(Vec<String>, bool)> {
         AgentId::Codex => Some((vec!["resume".into(), id.into()], false)),
         AgentId::Copilot => Some((vec![format!("--resume={id}")], false)),
         AgentId::Cursor => Some((vec!["--resume".into(), id.into()], false)),
+        AgentId::GrokBuild => Some((vec!["--resume".into(), id.into()], true)),
         _ => None,
     }
 }

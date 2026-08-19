@@ -189,10 +189,17 @@ pub fn scan_files(
 ) {
     // 按 agent 分组:quick_meta 是整库查询(Codex 要开 state DB 读整张 threads),
     // 每组只查一次,不能逐文件调
+    // 同一会话可能由多个被监听文件触发(Grok 的 updates.jsonl + summary.json
+    // 都映射到同一个 ref),watcher 只按路径去重,这里必须按 file_path 再去一次,
+    // 否则一次 turn 会把整段 FTS 删掉重建两遍
     let mut by_agent: std::collections::HashMap<AgentId, Vec<SessionFileRef>> =
         std::collections::HashMap::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for r in refs {
         if store.is_tombstoned(&r.file_path) {
+            continue;
+        }
+        if !seen.insert(r.file_path.clone()) {
             continue;
         }
         by_agent.entry(r.agent).or_default().push(r);

@@ -5,7 +5,7 @@
     python3 scripts/demo-home.py                 # 生成到 /tmp/wake-demo-home
     HOME=/tmp/wake-demo-home dist/Wake.app/Contents/MacOS/Wake
 
-app 的索引库与七家 agent 扫描目录全部落在假 HOME 内,真实数据不显示也不被读。
+app 的索引库与各家 agent 扫描目录全部落在假 HOME 内,真实数据不显示也不被读。
 """
 import json
 import os
@@ -15,6 +15,7 @@ import sys
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 HOME = sys.argv[1] if len(sys.argv) > 1 else "/tmp/wake-demo-home"
 NOW = datetime.now(timezone.utc)
@@ -122,6 +123,55 @@ def codex_session(proj, title_msg, reply, age_min, tool=None):
         "content": [{"type": "output_text", "text": reply}]}})
     with open(os.path.join(d, f"rollout-{stamp}-{s}.jsonl"), "w") as f:
         f.write("\n".join(json.dumps(l, ensure_ascii=False) for l in lines) + "\n")
+
+
+# ---------------------------------------------------------------- Grok Build
+
+def grok_session(proj, title_msg, reply, age_min):
+    s = sid()
+    enc = quote(proj, safe="")
+    d = os.path.join(HOME, ".grok", "sessions", enc, s)
+    os.makedirs(d, exist_ok=True)
+    t0 = iso(age_min)
+    # t1 比最后一条事件(+12s)更晚,adapter 取 max(summary, 流) → updated_at 用它
+    t1 = iso(age_min, 20)
+    base_ms = int((NOW - timedelta(minutes=age_min)).timestamp() * 1000)
+
+    def ev(update, offset):
+        return {
+            "timestamp": base_ms // 1000 + offset,
+            "method": "session/update",
+            "params": {
+                "sessionId": s,
+                "update": update,
+                "_meta": {"agentTimestampMs": base_ms + offset * 1000},
+            },
+        }
+
+    lines = [
+        ev({"sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text": title_msg},
+            "_meta": {"modelId": "grok-4.6"}}, 0),
+        ev({"sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "Scan session layout then add an adapter."},
+            "_meta": {"modelId": "grok-4.6"}}, 5),
+        ev({"sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": reply},
+            "_meta": {"modelId": "grok-4.6"}}, 9),
+        ev({"sessionUpdate": "turn_completed",
+            "usage": {"totalTokens": 1800, "outputTokens": 240}}, 12),
+    ]
+    with open(os.path.join(d, "updates.jsonl"), "w") as f:
+        f.write("\n".join(json.dumps(l, ensure_ascii=False) for l in lines) + "\n")
+    with open(os.path.join(d, "summary.json"), "w") as f:
+        json.dump({
+            "info": {"id": s, "cwd": proj},
+            "generated_title": title_msg[:80],
+            "created_at": t0,
+            "updated_at": t1,
+            "current_model_id": "grok-4.6",
+            "head_branch": "main",
+        }, f)
 
 
 # ---------------------------------------------------------------- 其余五家
@@ -267,6 +317,9 @@ def main():
     os.makedirs(os.path.join(HOME, ".gemini"), exist_ok=True)
     with open(os.path.join(HOME, ".gemini", "projects.json"), "w") as f:
         json.dump({"projects": {f"{g}/blog-engine": "demo-gem"}}, f)
+
+    grok_session(f"{g}/acme-web", "Wire Grok Build into the session library",
+                 "Adapter reads ~/.grok/sessions; resume is grok --resume <id>.", 40)
 
     build_sqlite_agents()
     print(f"demo home ready: {HOME}")

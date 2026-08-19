@@ -1,0 +1,13 @@
+{
+  "info": {
+    "id": "66666666-aaaa-bbbb-cccc-000000000006",
+    "cwd": "/Users/tester/Github/wakefx"
+  },
+  "session_summary": "Grok QR debugging",
+  "generated_title": "Grok QR debugging",
+  "created_at": "2026-08-06T11:00:00Z",
+  "updated_at": "2026-08-06T11:20:00Z",
+  "num_messages": 5,
+  "current_model_id": "grok-4.6",
+  "head_branch": "feat/qr"
+}

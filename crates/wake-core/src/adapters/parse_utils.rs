@@ -1,7 +1,7 @@
 use crate::models::*;
 use serde_json::Value;
 
-/// 文件 mtime → epoch ms(七家 adapter 与 watcher 共用)
+/// 文件 mtime → epoch ms(各家 adapter 与 watcher 共用)
 pub fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
     meta.modified()
         .ok()
@@ -30,6 +30,36 @@ pub fn user_kind(text: &str) -> MessageKind {
     }
 }
 
+/// 上下文压缩分隔条:claude/codex/grok 共用的占位正文(详情页按
+/// `MessageKind::CompactSummary` 另行渲染胶囊,此文本只进索引与导出)
+pub const COMPACT_DIVIDER: &str = "── Context compacted ──";
+
+/// epoch ms → Option(0/负数 = 无时间戳),各家 adapter 共用
+pub fn ts_opt(ts: i64) -> Option<i64> {
+    if ts > 0 {
+        Some(ts)
+    } else {
+        None
+    }
+}
+
+/// 任意 role/kind 的纯文本消息(clip + ts 归一)。`text_msg` 是它的
+/// user 特化版(额外做注入判定)。
+pub fn mk_msg(role: Role, kind: MessageKind, text: &str, ts: i64) -> TranscriptMessage {
+    let (clipped, truncated) = clip(text, MAX_MSG_TEXT);
+    TranscriptMessage {
+        seq: 0,
+        role,
+        kind,
+        text: clipped,
+        truncated,
+        tool_calls: Vec::new(),
+        thinking: None,
+        timestamp: ts_opt(ts),
+        model: None,
+    }
+}
+
 /// 纯文本消息构造(clip + user 注入判定),多家 adapter 共用
 pub fn text_msg(role: Role, text: &str, ts: i64) -> TranscriptMessage {
     let (clipped, truncated) = clip(text.trim(), MAX_MSG_TEXT);
@@ -42,7 +72,7 @@ pub fn text_msg(role: Role, text: &str, ts: i64) -> TranscriptMessage {
         truncated,
         tool_calls: Vec::new(),
         thinking: None,
-        timestamp: if ts > 0 { Some(ts) } else { None },
+        timestamp: ts_opt(ts),
         model: None,
     }
 }
@@ -55,7 +85,7 @@ pub fn assign_seq(messages: &mut [TranscriptMessage]) {
     }
 }
 
-/// 标题推导:首条真实用户消息经清洗,七家共用的回退链
+/// 标题推导:首条真实用户消息经清洗,各家共用的回退链
 pub fn title_from_messages(messages: &[TranscriptMessage]) -> Option<String> {
     messages
         .iter()

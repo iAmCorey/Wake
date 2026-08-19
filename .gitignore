@@ -10,3 +10,6 @@ crates/wake/assets/icon-1024.png
 # agent 指令/配置,本地开发用,不入库
 CLAUDE.md
 .claude/
+
+# Python 字节码缓存(scripts/ 下的 demo 生成器)
+__pycache__/

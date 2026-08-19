@@ -45,6 +45,8 @@ brands!(
     "opencode-light",
     "kiro",
     "gemini",
+    "grok-build",
+    "grok-build-light",
 );
 
 icons!(

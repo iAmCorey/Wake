@@ -10,6 +10,7 @@ pub enum AgentId {
     Opencode,
     Kiro,
     Gemini,
+    GrokBuild,
 }
 
 impl AgentId {
@@ -22,6 +23,7 @@ impl AgentId {
             AgentId::Opencode => "opencode",
             AgentId::Kiro => "kiro",
             AgentId::Gemini => "gemini",
+            AgentId::GrokBuild => "grok-build",
         }
     }
 
@@ -34,7 +36,8 @@ impl AgentId {
             "opencode" => Some(AgentId::Opencode),
             "kiro" => Some(AgentId::Kiro),
             "gemini" => Some(AgentId::Gemini),
-        _ => None,
+            "grok-build" => Some(AgentId::GrokBuild),
+            _ => None,
         }
     }
 
@@ -47,12 +50,13 @@ impl AgentId {
             AgentId::Opencode => "OpenCode",
             AgentId::Kiro => "Kiro",
             AgentId::Gemini => "Gemini CLI",
+            AgentId::GrokBuild => "Grok Build",
         }
     }
 
     /// agent 品牌图标——wake crate `Assets` 内嵌的 PNG 路径(lobe-icons 素材,
     /// 与 kooky 同源)。后缀必须带上(与 SVG 图标同理,漏后缀 = 静默空白)。
-    /// Copilot/Cursor/OpenCode 是单色字形(白色+alpha):深色模式用白色版,
+    /// Copilot/Cursor/OpenCode/Grok Build 是单色字形(白色+alpha):深色模式用白色版,
     /// 浅色模式用 `-light`(深墨 #2B2A26)版——等效 kooky 的 template 染色;
     /// 彩色品牌(Claude/Codex/Gemini/Kiro)保持原色,两模式通用。
     pub fn brand_icon(&self, dark: bool) -> &'static str {
@@ -70,6 +74,9 @@ impl AgentId {
             }
             AgentId::Kiro => "brands/kiro.png",
             AgentId::Gemini => "brands/gemini.png",
+            AgentId::GrokBuild => {
+                if dark { "brands/grok-build.png" } else { "brands/grok-build-light.png" }
+            }
         }
     }
 

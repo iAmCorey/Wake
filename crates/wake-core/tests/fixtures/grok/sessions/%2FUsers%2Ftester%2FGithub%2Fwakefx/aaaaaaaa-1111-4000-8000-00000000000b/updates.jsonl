@@ -1,0 +1,1 @@
+{"timestamp": 1786017600, "method": "session/update", "params": {"sessionId": "aaaaaaaa-1111-4000-8000-00000000000b", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "仅助手消息,标题应回落 Untitled"}}, "_meta": {"agentTimestampMs": 1786017600000}}}

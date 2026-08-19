@@ -7,7 +7,7 @@
 
 A native macOS app that gathers every coding-agent session on your machine into one place — browse, full-text search, and resume any conversation in seconds. Built with **Rust + GPUI** (gpui 0.2 + gpui-component 0.5).
 
-Your agent history is scattered across `~/.claude`, `~/.codex`, and five other private directories. Wake reads them all, read-only, and gives you one fast window into it. Everything stays local: no network requests, ever.
+Your agent history is scattered across `~/.claude`, `~/.codex`, and six other private directories. Wake reads them all, read-only, and gives you one fast window into it. Everything stays local: no network requests, ever.
 
 ![Wake — sessions list and transcript view](imgs/screenshot-1.webp)
 
@@ -32,6 +32,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and five other p
 | OpenCode | `~/.local/share/opencode/opencode.db` |
 | Kiro | `~/.kiro/sessions/cli` |
 | Gemini CLI | `~/.gemini/tmp/**/chats` |
+| Grok Build | `~/.grok/sessions/**/updates.jsonl` (+ `summary.json`; `GROK_HOME` override) |
 
 Cursor IDE chats, Windsurf, and Trae encrypt their local data; Amp, Factory, and Warp keep sessions in the cloud — none of those are supported.
 
@@ -79,7 +80,7 @@ CI runs `cargo test -p wake-core` plus a full app build on every push to main an
 ```
 crates/
 ├── wake-core        # pure data layer, no UI dependencies
-│   ├── adapters/    #   claude / codex / copilot / cursor / opencode / kiro / gemini
+│   ├── adapters/    #   claude / codex / copilot / cursor / opencode / kiro / gemini / grok
 │   │                #   (AgentAdapter trait — add an adapter, get the whole UI for free)
 │   ├── scanner.rs   #   single-pass scan: meta + FTS in one go, mtime incremental
 │   ├── watcher.rs   #   notify-based file watching → per-file incremental updates

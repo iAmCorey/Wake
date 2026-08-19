@@ -177,7 +177,7 @@ fn parse_claude_jsonl(path: &Path, include_sidechain: bool) -> Result<ParseResul
             flush_assistant(&mut pending, &mut messages, &mut tool_index);
             let subtype = row.get("subtype").and_then(|v| v.as_str());
             if subtype == Some("compact_boundary") {
-                messages.push(mk_msg(Role::System, MessageKind::CompactSummary, "── Context compacted ──", ts));
+                messages.push(mk_msg(Role::System, MessageKind::CompactSummary, COMPACT_DIVIDER, ts));
             } else if let Some(content) = row.get("content").and_then(|v| v.as_str()) {
                 if !content.is_empty() {
                     let (text, truncated) = clip(content, MAX_TOOL_IO);
@@ -354,28 +354,6 @@ fn parse_claude_jsonl(path: &Path, include_sidechain: bool) -> Result<ParseResul
         updated_at,
         unknown_lines,
     })
-}
-
-fn ts_opt(ts: i64) -> Option<i64> {
-    if ts > 0 {
-        Some(ts)
-    } else {
-        None
-    }
-}
-
-fn mk_msg(role: Role, kind: MessageKind, text: &str, ts: i64) -> TranscriptMessage {
-    TranscriptMessage {
-        seq: 0,
-        role,
-        kind,
-        text: text.to_string(),
-        truncated: false,
-        tool_calls: Vec::new(),
-        thinking: None,
-        timestamp: ts_opt(ts),
-        model: None,
-    }
 }
 
 fn stringify_tool_result(content: Option<&Value>) -> String {
