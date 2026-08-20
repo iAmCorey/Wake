@@ -1,0 +1,15 @@
+{
+  "info": {
+    "id": "cccccccc-aaaa-bbbb-cccc-0000000000cc",
+    "cwd": "/var/folders/xx/T/grok-501/wt-abcd1234-pr-9"
+  },
+  "session_summary": "Grok worktree review",
+  "created_at": "2026-08-06T12:00:00.000000Z",
+  "updated_at": "2026-08-06T12:10:00.000000Z",
+  "num_messages": 2,
+  "num_chat_messages": 2,
+  "current_model_id": "grok-4.6",
+  "session_kind": "subagent",
+  "generated_title": "Grok worktree review",
+  "head_branch": "execute-plan/abcd1234-pr-9-feat-example"
+}

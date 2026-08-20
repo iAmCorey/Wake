@@ -27,32 +27,67 @@ impl CursorAdapter {
 }
 
 /// "Users-corey-Github-image-translate" → "/Users/corey/Github/image-translate"。
-/// '-' 既可能是路径分隔也可能是目录名字符,按磁盘真实存在的目录 DFS(优先短段);
-/// 项目目录已删时回退直译。
+/// Cursor 把路径里的 `/` 和 `_` 都压成 `-`,所以 slug 的 `-` 可能是路径分隔、
+/// 连字符目录名、或下划线。按磁盘真实存在的目录 DFS(优先短段);
+/// 短段走不通再拼更长名字,项目目录已删时回退直译(`/`)。
 fn decode_slug(slug: &str) -> String {
+    decode_slug_at(Path::new("/"), slug)
+}
+
+fn decode_slug_at(root: &Path, slug: &str) -> String {
     let parts: Vec<&str> = slug.split('-').collect();
     fn dfs(base: PathBuf, parts: &[&str]) -> Option<PathBuf> {
         if parts.is_empty() {
             return Some(base);
         }
-        let mut seg = String::new();
-        for i in 0..parts.len() {
-            if i > 0 {
-                seg.push('-');
-            }
-            seg.push_str(parts[i]);
-            let cand = base.join(&seg);
-            if cand.is_dir() {
-                if let Some(hit) = dfs(cand, &parts[i + 1..]) {
-                    return Some(hit);
+        for n in 1..=parts.len() {
+            for name in dir_name_candidates(&parts[..n]) {
+                let cand = base.join(&name);
+                if cand.is_dir() {
+                    if let Some(hit) = dfs(cand, &parts[n..]) {
+                        return Some(hit);
+                    }
                 }
             }
         }
         None
     }
-    dfs(PathBuf::from("/"), &parts)
+    dfs(root.to_path_buf(), &parts)
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| format!("/{}", slug.replace('-', "/")))
+        .unwrap_or_else(|| {
+            let rest = slug.replace('-', "/");
+            if root == Path::new("/") {
+                format!("/{rest}")
+            } else {
+                root.join(rest.trim_start_matches('/'))
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        })
+}
+
+/// 一段目录名:单段原样;多段把 `-`/`_` 的组合都试一遍(mask=0 为全连字符,保持旧行为优先)。
+fn dir_name_candidates(parts: &[&str]) -> Vec<String> {
+    if parts.is_empty() {
+        return Vec::new();
+    }
+    if parts.len() == 1 {
+        return vec![parts[0].to_string()];
+    }
+    let slots = parts.len() - 1;
+    if slots > 8 {
+        return vec![parts.join("-"), parts.join("_")];
+    }
+    let mut out = Vec::with_capacity(1 << slots);
+    for mask in 0..(1u32 << slots) {
+        let mut s = String::from(parts[0]);
+        for i in 0..slots {
+            s.push(if mask & (1 << i) == 0 { '-' } else { '_' });
+            s.push_str(parts[i + 1]);
+        }
+        out.push(s);
+    }
+    out
 }
 
 /// "Thursday, Jul 23, 2026, 4:00 PM (UTC+8)" → epoch ms,解析失败 = 0
@@ -60,7 +95,8 @@ fn cursor_ts_ms(s: &str) -> i64 {
     (|| -> Option<i64> {
         let (dt_part, tz_part) = s.rsplit_once(" (")?;
         let naive =
-            chrono::NaiveDateTime::parse_from_str(dt_part.trim(), "%A, %b %d, %Y, %I:%M %p").ok()?;
+            chrono::NaiveDateTime::parse_from_str(dt_part.trim(), "%A, %b %d, %Y, %I:%M %p")
+                .ok()?;
         let off = tz_part.trim_end_matches(')').strip_prefix("UTC")?;
         let (sign, rest) = match off.as_bytes().first()? {
             b'+' => (1i32, &off[1..]),
@@ -73,7 +109,12 @@ fn cursor_ts_ms(s: &str) -> i64 {
         };
         let offset = chrono::FixedOffset::east_opt(sign * secs)?;
         use chrono::TimeZone;
-        Some(offset.from_local_datetime(&naive).single()?.timestamp_millis())
+        Some(
+            offset
+                .from_local_datetime(&naive)
+                .single()?
+                .timestamp_millis(),
+        )
     })()
     .unwrap_or(0)
 }
@@ -203,7 +244,13 @@ fn parse_cursor_jsonl(path: &Path) -> Result<CursorParse> {
                             let input = b.get("input").cloned().unwrap_or(Value::Null);
                             let name = b.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
                             // transcript 不落盘工具结果,output 恒 None
-                            p.tool_calls.push(tool_call_view(String::new(), name, &input, None, false));
+                            p.tool_calls.push(tool_call_view(
+                                String::new(),
+                                name,
+                                &input,
+                                None,
+                                false,
+                            ));
                         }
                         _ => {}
                     }
@@ -246,8 +293,16 @@ fn build_meta(r: &SessionFileRef, p: &CursorParse) -> SessionMeta {
         project_path: cwd.clone(),
         project_name: project_name_of(&cwd),
         file_path: r.file_path.clone(),
-        created_at: if p.created_at > 0 { p.created_at } else { r.mtime_ms },
-        updated_at: if p.updated_at > 0 { p.updated_at } else { r.mtime_ms },
+        created_at: if p.created_at > 0 {
+            p.created_at
+        } else {
+            r.mtime_ms
+        },
+        updated_at: if p.updated_at > 0 {
+            p.updated_at
+        } else {
+            r.mtime_ms
+        },
         message_count: p
             .messages
             .iter()
@@ -364,7 +419,11 @@ impl AgentAdapter for CursorAdapter {
         })
     }
 
-    fn load_sidechain(&self, r: &SessionFileRef, sidechain_id: &str) -> Result<Vec<TranscriptMessage>> {
+    fn load_sidechain(
+        &self,
+        r: &SessionFileRef,
+        sidechain_id: &str,
+    ) -> Result<Vec<TranscriptMessage>> {
         let file = subagents_dir(r).join(format!("{sidechain_id}.jsonl"));
         if !file.is_file() {
             return Ok(Vec::new());
@@ -378,5 +437,44 @@ impl AgentAdapter for CursorAdapter {
         } else {
             Vec::new()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_slug_restores_underscores() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("Works").join("app_av4");
+        fs::create_dir_all(&proj).unwrap();
+        let got = decode_slug_at(tmp.path(), "Works-app-av4");
+        assert_eq!(Path::new(&got), proj.as_path());
+    }
+
+    #[test]
+    fn decode_slug_hyphenated_dir_still_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("Github").join("image-translate");
+        fs::create_dir_all(&proj).unwrap();
+        let got = decode_slug_at(tmp.path(), "Github-image-translate");
+        assert_eq!(Path::new(&got), proj.as_path());
+    }
+
+    #[test]
+    fn decode_slug_missing_falls_back_to_slashes() {
+        let got = decode_slug("wakefx-cursor-proj");
+        assert_eq!(got, "/wakefx/cursor/proj");
+    }
+
+    #[test]
+    fn decode_slug_backtracks_when_short_prefix_is_dead_end() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("Works").join("app")).unwrap();
+        let proj = tmp.path().join("Works").join("app_av4");
+        fs::create_dir_all(&proj).unwrap();
+        let got = decode_slug_at(tmp.path(), "Works-app-av4");
+        assert_eq!(Path::new(&got), proj.as_path());
     }
 }

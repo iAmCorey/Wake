@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0] — 2026-08-20
+
+- New: Grok Build subagent sessions nest under their parent in the session list (chevron, or click again when selected)
+- New: deleting a parent session also moves its nested sessions to Trash
+- Fix: Cursor project paths with underscores (e.g. `app_av4`) no longer decode as extra path segments
+- Change: sidebar agent / project / All Sessions counts list top-level rows only; nested children show on the parent row
+
 ## [0.2.1] — 2026-08-20
 
 - Fix: resuming OpenCode sessions in your terminal now works (broken in the 0.2.0 build)

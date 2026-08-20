@@ -1,3 +1,4 @@
+use super::grok_group::{self, GroupCtx};
 use super::parse_utils::*;
 use super::{units_from_messages, AgentAdapter};
 use crate::models::*;
@@ -7,6 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// Grok Build(xAI 的 coding CLI):`~/.grok/sessions/<url编码cwd>/<uuid>/` 一目录
 /// 一会话。主文件 `updates.jsonl` 是 ACP 风格完整流水({timestamp(unix秒),
@@ -16,13 +18,27 @@ use std::path::{Path, PathBuf};
 /// Grok 自己的索引,`prompt_history.jsonl` 在 cwd 目录级——都不是会话文件。
 pub struct GrokAdapter {
     root: PathBuf,
+    grok_home: PathBuf,
+    /// 扫描生命周期内的归组快照;begin_scan 强制重载
+    group: Mutex<Option<Arc<GroupCtx>>>,
 }
 
 impl GrokAdapter {
     pub fn new() -> Self {
+        let grok_home = dirs::home_dir().unwrap_or_default().join(".grok");
         Self {
-            root: dirs::home_dir().unwrap_or_default().join(".grok").join("sessions"),
+            root: grok_home.join("sessions"),
+            grok_home,
+            group: Mutex::new(None),
         }
+    }
+
+    fn group_ctx(&self) -> Arc<GroupCtx> {
+        let mut slot = self.group.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(grok_group::load_group_ctx(&self.root, &self.grok_home));
+        }
+        Arc::clone(slot.as_ref().unwrap())
     }
 }
 
@@ -34,6 +50,7 @@ struct Summary {
     updated_ms: i64,
     git_branch: Option<String>,
     model: Option<String>,
+    git_remotes: Vec<String>,
 }
 
 fn read_summary(updates_path: &Path) -> Summary {
@@ -44,11 +61,16 @@ fn read_summary(updates_path: &Path) -> Summary {
         updated_ms: 0,
         git_branch: None,
         model: None,
+        git_remotes: Vec::new(),
     };
     let path = updates_path.with_file_name("summary.json");
     if let Ok(raw) = fs::read_to_string(&path) {
         if let Ok(v) = serde_json::from_str::<Value>(&raw) {
-            if let Some(c) = v.get("info").and_then(|i| i.get("cwd")).and_then(|x| x.as_str()) {
+            if let Some(c) = v
+                .get("info")
+                .and_then(|i| i.get("cwd"))
+                .and_then(|x| x.as_str())
+            {
                 s.cwd = c.to_string();
             }
             // generated_title 与 session_summary 通常同值,前者更语义化
@@ -76,6 +98,14 @@ fn read_summary(updates_path: &Path) -> Summary {
                 .and_then(|x| x.as_str())
                 .filter(|m| !m.is_empty())
                 .map(String::from);
+            if let Some(arr) = v.get("git_remotes").and_then(|x| x.as_array()) {
+                s.git_remotes = arr
+                    .iter()
+                    .filter_map(|x| x.as_str())
+                    .filter(|r| !r.is_empty())
+                    .map(String::from)
+                    .collect();
+            }
         }
     }
     s
@@ -108,7 +138,9 @@ impl Replay {
     }
 
     fn flush(&mut self) {
-        let Some(role) = self.cur_role.take() else { return };
+        let Some(role) = self.cur_role.take() else {
+            return;
+        };
         let text = std::mem::take(&mut self.cur_text);
         let thinking = std::mem::take(&mut self.cur_thinking);
         let tools = std::mem::take(&mut self.cur_tools);
@@ -139,14 +171,20 @@ impl Replay {
 
 /// user/agent chunk 的 content 文本({content:{type:text,text}}),借用零分配
 fn chunk_text(update: &Value) -> &str {
-    update.pointer("/content/text").and_then(Value::as_str).unwrap_or_default()
+    update
+        .pointer("/content/text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
 }
 
 fn tool_content_text(content: &Value) -> String {
     let mut parts: Vec<String> = Vec::new();
     for item in content.as_array().into_iter().flatten() {
         let inner = item.get("content").unwrap_or(item);
-        let t = inner.get("text").and_then(|x| x.as_str()).unwrap_or_default();
+        let t = inner
+            .get("text")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default();
         if !t.trim().is_empty() {
             parts.push(t.trim().to_string());
         }
@@ -214,10 +252,17 @@ fn parse_grok_updates(path: &Path) -> Result<(Vec<TranscriptMessage>, u32)> {
             }
             Some("tool_call") => {
                 rp.ensure(Role::Assistant, ts);
-                let id = update.get("toolCallId").and_then(|v| v.as_str()).unwrap_or_default();
-                let name = update.get("title").and_then(|v| v.as_str()).unwrap_or_default();
+                let id = update
+                    .get("toolCallId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let name = update
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
                 let input = update.get("rawInput").cloned().unwrap_or(Value::Null);
-                rp.cur_tools.push(tool_call_view(id.to_string(), name, &input, None, false));
+                rp.cur_tools
+                    .push(tool_call_view(id.to_string(), name, &input, None, false));
             }
             Some("tool_call_update") => {
                 let Some(id) = update.get("toolCallId").and_then(|v| v.as_str()) else {
@@ -251,26 +296,45 @@ fn parse_grok_updates(path: &Path) -> Result<(Vec<TranscriptMessage>, u32)> {
     Ok((messages, unknown))
 }
 
-fn build_meta(r: &SessionFileRef, side: &Summary, messages: &[TranscriptMessage]) -> SessionMeta {
+fn build_meta(
+    r: &SessionFileRef,
+    side: &Summary,
+    messages: &[TranscriptMessage],
+    grok_home: &Path,
+    ctx: &GroupCtx,
+) -> SessionMeta {
     let title = Some(clean_title_candidate(&side.title))
         .filter(|t| !t.is_empty())
         .or_else(|| title_from_messages(messages))
         .unwrap_or_else(|| UNTITLED.to_string());
-    let msg_ts_max = messages.iter().filter_map(|m| m.timestamp).max().unwrap_or(0);
+    let msg_ts_max = messages
+        .iter()
+        .filter_map(|m| m.timestamp)
+        .max()
+        .unwrap_or(0);
+    let (project_path, project_name) =
+        grok_group::canonical_project(&side.cwd, &side.git_remotes, grok_home, &r.native_id, ctx);
     SessionMeta {
         key: format!("grok:{}", r.native_id),
         id: r.native_id.clone(),
         agent: AgentId::Grok,
         title,
-        project_path: side.cwd.clone(),
-        project_name: project_name_of(&side.cwd),
+        project_path,
+        project_name,
         file_path: r.file_path.clone(),
-        created_at: if side.created_ms > 0 { side.created_ms } else { r.mtime_ms },
+        created_at: if side.created_ms > 0 {
+            side.created_ms
+        } else {
+            r.mtime_ms
+        },
         updated_at: match side.updated_ms.max(msg_ts_max) {
             t if t > 0 => t,
             _ => r.mtime_ms,
         },
-        message_count: messages.iter().filter(|m| m.kind == MessageKind::Text).count() as i64,
+        message_count: messages
+            .iter()
+            .filter(|m| m.kind == MessageKind::Text)
+            .count() as i64,
         size_bytes: r.size,
         git_branch: side.git_branch.clone(),
         model: side.model.clone(),
@@ -291,6 +355,14 @@ impl AgentAdapter for GrokAdapter {
         self.root.is_dir()
     }
 
+    fn begin_scan(&self) {
+        *self.group.lock().unwrap() = Some(grok_group::load_group_ctx(&self.root, &self.grok_home));
+    }
+
+    fn parent_links(&self) -> Vec<(String, String)> {
+        grok_group::parent_links(&self.group_ctx())
+    }
+
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         let mut refs = Vec::new();
         let Ok(cwds) = fs::read_dir(&self.root) else {
@@ -299,7 +371,9 @@ impl AgentAdapter for GrokAdapter {
         // session_search.sqlite 等根级文件对 read_dir 自然失败跳过;
         // 会话主文件的判定(存在、非空、native_id)统一走 file_ref
         for cwd_dir in cwds.flatten() {
-            let Ok(sessions) = fs::read_dir(cwd_dir.path()) else { continue };
+            let Ok(sessions) = fs::read_dir(cwd_dir.path()) else {
+                continue;
+            };
             for sess in sessions.flatten() {
                 if let Some(r) = self.file_ref(&sess.path().join("updates.jsonl")) {
                     refs.push(r);
@@ -331,7 +405,7 @@ impl AgentAdapter for GrokAdapter {
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
         let (messages, unknown) = parse_grok_updates(Path::new(&r.file_path))?;
         let side = read_summary(Path::new(&r.file_path));
-        let meta = build_meta(r, &side, &messages);
+        let meta = build_meta(r, &side, &messages, &self.grok_home, &self.group_ctx());
         let units = units_from_messages(&messages);
         Ok(ParsedSession {
             meta,
@@ -344,7 +418,7 @@ impl AgentAdapter for GrokAdapter {
         let (messages, unknown) = parse_grok_updates(Path::new(&r.file_path))?;
         let side = read_summary(Path::new(&r.file_path));
         Ok(ParsedTranscript {
-            meta: build_meta(r, &side, &messages),
+            meta: build_meta(r, &side, &messages, &self.grok_home, &self.group_ctx()),
             mainline: messages,
             sidechains: Vec::new(),
             unknown_line_count: unknown,

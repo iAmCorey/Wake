@@ -10,6 +10,7 @@ pub mod kiro;
 pub mod opencode;
 pub mod pi;
 
+mod grok_group;
 pub(crate) mod parse_utils;
 mod sqlite_ro;
 
@@ -32,7 +33,10 @@ pub trait AgentAdapter: Send + Sync {
         parse_utils::default_file_ref(self.agent(), path)
     }
     /// 快路径:不解析文件直接给出 meta(Codex 走 state DB)。None = 无快路径
-    fn quick_meta(&self, _refs: &[SessionFileRef]) -> Option<std::collections::HashMap<String, SessionMeta>> {
+    fn quick_meta(
+        &self,
+        _refs: &[SessionFileRef],
+    ) -> Option<std::collections::HashMap<String, SessionMeta>> {
         None
     }
     /// quick 与 parsed 的合并策略:默认 parsed 为准、quick 补缺。
@@ -54,7 +58,11 @@ pub trait AgentAdapter: Send + Sync {
     /// 详情解析
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript>;
     /// 加载 sidechain 消息(仅 Claude/Cursor subagents)
-    fn load_sidechain(&self, _r: &SessionFileRef, _sidechain_id: &str) -> Result<Vec<TranscriptMessage>> {
+    fn load_sidechain(
+        &self,
+        _r: &SessionFileRef,
+        _sidechain_id: &str,
+    ) -> Result<Vec<TranscriptMessage>> {
         Ok(Vec::new())
     }
     /// 会话在磁盘上的全部归属路径(删除时一并 trash)。默认仅主文件;
@@ -64,6 +72,12 @@ pub trait AgentAdapter: Send + Sync {
     }
     /// 文件监听根目录
     fn watch_paths(&self) -> Vec<std::path::PathBuf>;
+    /// 一轮扫描开始前刷新 adapter 侧缓存(默认 no-op)
+    fn begin_scan(&self) {}
+    /// (child_key, parent_key) 父子链,扫描后由 store 旁写(默认空)
+    fn parent_links(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 pub fn create_adapters() -> Vec<Box<dyn AgentAdapter>> {

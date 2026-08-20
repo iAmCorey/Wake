@@ -89,6 +89,7 @@ fn run_scan_inner(
     let mut queue: Vec<WorkItem> = Vec::new();
 
     for adapter in adapters {
+        adapter.begin_scan();
         let refs: Vec<SessionFileRef> = adapter
             .list_session_files()?
             .into_iter()
@@ -129,7 +130,9 @@ fn run_scan_inner(
                 Some((mtime, size, _)) => *mtime != r.mtime_ms || *size != r.size,
             };
             if full || changed {
-                let quick = quick_map.as_ref().and_then(|m| m.get(&r.file_path).cloned());
+                let quick = quick_map
+                    .as_ref()
+                    .and_then(|m| m.get(&r.file_path).cloned());
                 queue.push(WorkItem {
                     adapter: adapter.as_ref(),
                     r,
@@ -175,6 +178,12 @@ fn run_scan_inner(
         }
     }
 
+    for adapter in adapters {
+        if store.apply_parent_links(adapter.agent(), &adapter.parent_links())? {
+            events.on_sessions_changed();
+        }
+    }
+
     Ok(())
 }
 
@@ -203,6 +212,7 @@ pub fn scan_files(
         let Some(adapter) = adapters.iter().find(|a| a.agent() == agent) else {
             continue;
         };
+        adapter.begin_scan();
         let quick = adapter.quick_meta(&group);
         for r in &group {
             match adapter.parse_session(r) {
@@ -211,12 +221,20 @@ pub fn scan_files(
                         Some(q) => adapter.merge_quick_meta(parsed.meta, q),
                         None => parsed.meta,
                     };
-                    if store.write_session(&meta, r.mtime_ms, &parsed.units).is_ok() {
+                    if store
+                        .write_session(&meta, r.mtime_ms, &parsed.units)
+                        .is_ok()
+                    {
                         changed = true;
                     }
                 }
                 Err(e) => eprintln!("[scanner] incremental parse failed {}: {e}", r.file_path),
             }
+        }
+        match store.apply_parent_links(agent, &adapter.parent_links()) {
+            Ok(true) => changed = true,
+            Ok(false) => {}
+            Err(e) => eprintln!("[scanner] parent links failed: {e}"),
         }
     }
     if changed {

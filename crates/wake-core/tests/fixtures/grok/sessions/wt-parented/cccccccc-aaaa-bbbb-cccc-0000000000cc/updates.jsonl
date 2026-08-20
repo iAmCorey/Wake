@@ -1,0 +1,2 @@
+{"timestamp":1786015200000,"method":"session/update","params":{"sessionId":"cccccccc-aaaa-bbbb-cccc-0000000000cc","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"Review the worktree changes"}}}}
+{"timestamp":1786015201000,"method":"session/update","params":{"sessionId":"cccccccc-aaaa-bbbb-cccc-0000000000cc","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Looks good."}}}}
