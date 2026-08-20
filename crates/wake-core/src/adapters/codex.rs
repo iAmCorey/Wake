@@ -9,11 +9,15 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 pub struct CodexAdapter {
     sessions_dir: PathBuf,
     archived_dir: PathBuf,
     state_db: PathBuf,
+    /// `/rename` 与 App 改名写在 `session_index.jsonl` 的 thread_name,不是 state DB 的 title
+    index_path: PathBuf,
+    names: Mutex<Option<(i64, HashMap<String, String>)>>,
 }
 
 impl CodexAdapter {
@@ -23,8 +27,63 @@ impl CodexAdapter {
             sessions_dir: root.join("sessions"),
             archived_dir: root.join("archived_sessions"),
             state_db: root.join("state_5.sqlite"),
+            index_path: root.join("session_index.jsonl"),
+            names: Mutex::new(None),
         }
     }
+
+    fn thread_name(&self, id: &str) -> Option<String> {
+        self.thread_names().get(id).cloned()
+    }
+
+    fn thread_names(&self) -> HashMap<String, String> {
+        let mtime = fs::metadata(&self.index_path)
+            .map(|m| mtime_ms(&m))
+            .unwrap_or(0);
+        {
+            let cache = self.names.lock().unwrap();
+            if let Some((t, map)) = cache.as_ref() {
+                if *t == mtime {
+                    return map.clone();
+                }
+            }
+        }
+        let map = read_session_index(&self.index_path);
+        *self.names.lock().unwrap() = Some((mtime, map.clone()));
+        map
+    }
+}
+
+/// Codex App/`/rename` 落在 session_index.jsonl,后写覆盖先写。
+fn read_session_index(path: &Path) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Ok(file) = fs::File::open(path) else {
+        return map;
+    };
+    for line in BufReader::new(file).lines().flatten() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let Some(id) = v
+            .get("id")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        if let Some(name) = v
+            .get("thread_name")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            map.insert(id.to_string(), name.to_string());
+        }
+    }
+    map
 }
 
 #[derive(Debug)]
@@ -293,7 +352,10 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
                         }
                     }
                     "function_call_output" | "custom_tool_call_output" => {
-                        let call_id = payload.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
+                        let call_id = payload
+                            .get("call_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
                         if let Some(&(mi, ti)) = tool_index.get(call_id) {
                             let out_text = match payload.get("output") {
                                 Some(Value::String(s)) => s.clone(),
@@ -301,10 +363,13 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
                                     .get("content")
                                     .and_then(|v| v.as_str())
                                     .map(String::from)
-                                    .unwrap_or_else(|| serde_json::to_string(o).unwrap_or_default()),
+                                    .unwrap_or_else(|| {
+                                        serde_json::to_string(o).unwrap_or_default()
+                                    }),
                                 _ => String::new(),
                             };
-                            messages[mi].tool_calls[ti].output = Some(clip(&out_text, MAX_TOOL_IO).0);
+                            messages[mi].tool_calls[ti].output =
+                                Some(clip(&out_text, MAX_TOOL_IO).0);
                         }
                     }
                     _ => {}
@@ -333,8 +398,12 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
                     "agent_message" => {
                         if let Some(m) = payload.get("message").and_then(|v| v.as_str()) {
                             if !m.trim().is_empty() {
-                                event_fallback
-                                    .push(mk_msg(Role::Assistant, MessageKind::Text, m.trim(), ts));
+                                event_fallback.push(mk_msg(
+                                    Role::Assistant,
+                                    MessageKind::Text,
+                                    m.trim(),
+                                    ts,
+                                ));
                             }
                         }
                     }
@@ -342,7 +411,12 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
                 }
             }
             "compacted" => {
-                messages.push(mk_msg(Role::System, MessageKind::CompactSummary, "── Context compacted ──", ts));
+                messages.push(mk_msg(
+                    Role::System,
+                    MessageKind::CompactSummary,
+                    "── Context compacted ──",
+                    ts,
+                ));
             }
             "world_state" => {}
             _ => unknown_lines += 1,
@@ -350,7 +424,9 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
     }
 
     // response_item 完全缺席的会话退回 event_msg 流
-    let has_real = messages.iter().any(|m| m.kind == MessageKind::Text && !m.text.is_empty());
+    let has_real = messages
+        .iter()
+        .any(|m| m.kind == MessageKind::Text && !m.text.is_empty());
     let mut final_messages = if has_real {
         messages
     } else if !event_fallback.is_empty() {
@@ -410,8 +486,16 @@ fn build_meta(r: &SessionFileRef, p: &CodexParse, archived_dir: &Path) -> Sessio
         project_path: p.cwd.clone(),
         project_name,
         file_path: r.file_path.clone(),
-        created_at: if p.created_at > 0 { p.created_at } else { r.mtime_ms },
-        updated_at: if p.updated_at > 0 { p.updated_at } else { r.mtime_ms },
+        created_at: if p.created_at > 0 {
+            p.created_at
+        } else {
+            r.mtime_ms
+        },
+        updated_at: if p.updated_at > 0 {
+            p.updated_at
+        } else {
+            r.mtime_ms
+        },
         message_count: p
             .messages
             .iter()
@@ -420,8 +504,14 @@ fn build_meta(r: &SessionFileRef, p: &CodexParse, archived_dir: &Path) -> Sessio
         size_bytes: r.size,
         git_branch: p.git_branch.clone(),
         model: p.model.clone(),
-        tokens_used: if p.tokens_used > 0 { Some(p.tokens_used) } else { None },
-        archived: r.file_path.starts_with(&archived_dir.to_string_lossy().to_string()),
+        tokens_used: if p.tokens_used > 0 {
+            Some(p.tokens_used)
+        } else {
+            None
+        },
+        archived: r
+            .file_path
+            .starts_with(&archived_dir.to_string_lossy().to_string()),
         source: p.source.clone(),
         favorite: false,
         pinned: false,
@@ -439,7 +529,11 @@ impl AgentAdapter for CodexAdapter {
 
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         let mut refs = list_jsonl_refs(&self.sessions_dir, AgentId::Codex, rollout_native_id);
-        refs.extend(list_jsonl_refs(&self.archived_dir, AgentId::Codex, rollout_native_id));
+        refs.extend(list_jsonl_refs(
+            &self.archived_dir,
+            AgentId::Codex,
+            rollout_native_id,
+        ));
         Ok(refs)
     }
 
@@ -452,11 +546,14 @@ impl AgentAdapter for CodexAdapter {
             let Some(row) = by_path.get(r.file_path.as_str()) else {
                 continue;
             };
-            let title = row
-                .name
-                .as_deref()
-                .filter(|n| !n.trim().is_empty())
-                .map(String::from)
+            let title = self
+                .thread_name(&row.id)
+                .or_else(|| {
+                    row.name
+                        .as_deref()
+                        .filter(|n| !n.trim().is_empty())
+                        .map(String::from)
+                })
                 .or_else(|| {
                     // Codex 自家 state DB 会把注入文本存进 title,同样要过滤
                     if is_injected_user_content(&row.title) {
@@ -505,8 +602,8 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn merge_quick_meta(&self, mut parsed: SessionMeta, quick: &SessionMeta) -> SessionMeta {
-        // state DB 的 title/name 是用户在 Codex 里手动命名,优先于首条消息推导;
-        // UNTITLED 守卫防止占位符覆盖真实标题。key/id 以 state 的线程 id 为准。
+        // session_index.thread_name / state.name / state.title 都经 quick 进来,
+        // 优先于首条消息推导。UNTITLED 守卫防止占位符覆盖真实标题。
         if !quick.title.is_empty() && quick.title != UNTITLED {
             parsed.title = quick.title.clone();
         }
@@ -527,7 +624,10 @@ impl AgentAdapter for CodexAdapter {
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
         let parsed = parse_rollout(Path::new(&r.file_path))?;
-        let meta = build_meta(r, &parsed, &self.archived_dir);
+        let mut meta = build_meta(r, &parsed, &self.archived_dir);
+        if let Some(n) = self.thread_name(&r.native_id) {
+            meta.title = n;
+        }
         let units = units_from_messages(&parsed.messages);
         Ok(ParsedSession {
             meta,
@@ -538,8 +638,12 @@ impl AgentAdapter for CodexAdapter {
 
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript> {
         let parsed = parse_rollout(Path::new(&r.file_path))?;
+        let mut meta = build_meta(r, &parsed, &self.archived_dir);
+        if let Some(n) = self.thread_name(&r.native_id) {
+            meta.title = n;
+        }
         Ok(ParsedTranscript {
-            meta: build_meta(r, &parsed, &self.archived_dir),
+            meta,
             mainline: parsed.messages,
             sidechains: Vec::new(),
             unknown_line_count: parsed.unknown_lines,

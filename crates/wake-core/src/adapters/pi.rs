@@ -50,6 +50,7 @@ fn native_id_of(stem: &str) -> String {
 
 struct PiParse {
     session_id: Option<String>,
+    title: String,
     cwd: String,
     created_at: i64,
     /// 最后一行消息的时间(合并后的消息保留回合首行时间,updated 单独追踪)
@@ -66,6 +67,7 @@ fn parse_pi_jsonl(path: &Path) -> Result<PiParse> {
 
     let mut p = PiParse {
         session_id: None,
+        title: String::new(),
         cwd: String::new(),
         created_at: 0,
         last_ts: 0,
@@ -97,6 +99,15 @@ fn parse_pi_jsonl(path: &Path) -> Result<PiParse> {
                 if let Some(c) = row.get("cwd").and_then(|v| v.as_str()) {
                     p.cwd = c.to_string();
                 }
+                if let Some(t) = row
+                    .get("title")
+                    .or_else(|| row.get("name"))
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    p.title = t.to_string();
+                }
                 if let Some(t) = row.get("timestamp").and_then(|v| v.as_str()) {
                     p.created_at = iso_ms(t);
                 }
@@ -106,7 +117,11 @@ fn parse_pi_jsonl(path: &Path) -> Result<PiParse> {
                     p.unknown_lines += 1;
                     continue;
                 };
-                let ts = row.get("timestamp").and_then(|v| v.as_str()).map(iso_ms).unwrap_or(0);
+                let ts = row
+                    .get("timestamp")
+                    .and_then(|v| v.as_str())
+                    .map(iso_ms)
+                    .unwrap_or(0);
                 p.last_ts = p.last_ts.max(ts);
                 let content = msg.get("content").unwrap_or(&serde_json::Value::Null);
                 match msg.get("role").and_then(|v| v.as_str()) {
@@ -122,9 +137,19 @@ fn parse_pi_jsonl(path: &Path) -> Result<PiParse> {
                         for b in content.as_array().into_iter().flatten() {
                             if b.get("type").and_then(|v| v.as_str()) == Some("toolCall") {
                                 let id = b.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-                                let name = b.get("name").and_then(|v| v.as_str()).unwrap_or_default();
-                                let input = b.get("arguments").cloned().unwrap_or(serde_json::Value::Null);
-                                tools.push(tool_call_view(id.to_string(), name, &input, None, false));
+                                let name =
+                                    b.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+                                let input = b
+                                    .get("arguments")
+                                    .cloned()
+                                    .unwrap_or(serde_json::Value::Null);
+                                tools.push(tool_call_view(
+                                    id.to_string(),
+                                    name,
+                                    &input,
+                                    None,
+                                    false,
+                                ));
                             }
                         }
                         if text.is_empty() && tools.is_empty() {
@@ -202,7 +227,10 @@ fn parse_pi_jsonl(path: &Path) -> Result<PiParse> {
 
 fn build_meta(agent: AgentId, r: &SessionFileRef, p: &PiParse) -> SessionMeta {
     let native = p.session_id.clone().unwrap_or_else(|| r.native_id.clone());
-    let title = title_from_messages(&p.messages).unwrap_or_else(|| UNTITLED.to_string());
+    let title = Some(clean_title_candidate(&p.title))
+        .filter(|t| !t.is_empty())
+        .or_else(|| title_from_messages(&p.messages))
+        .unwrap_or_else(|| UNTITLED.to_string());
     SessionMeta {
         key: format!("{}:{native}", agent.as_str()),
         id: native,
@@ -211,9 +239,17 @@ fn build_meta(agent: AgentId, r: &SessionFileRef, p: &PiParse) -> SessionMeta {
         project_path: p.cwd.clone(),
         project_name: project_name_of(&p.cwd),
         file_path: r.file_path.clone(),
-        created_at: if p.created_at > 0 { p.created_at } else { r.mtime_ms },
+        created_at: if p.created_at > 0 {
+            p.created_at
+        } else {
+            r.mtime_ms
+        },
         updated_at: if p.last_ts > 0 { p.last_ts } else { r.mtime_ms },
-        message_count: p.messages.iter().filter(|m| m.kind == MessageKind::Text).count() as i64,
+        message_count: p
+            .messages
+            .iter()
+            .filter(|m| m.kind == MessageKind::Text)
+            .count() as i64,
         size_bytes: r.size,
         git_branch: None,
         model: p.model.clone(),

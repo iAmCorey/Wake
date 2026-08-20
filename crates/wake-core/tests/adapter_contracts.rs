@@ -72,6 +72,14 @@ fn setup() -> &'static TestEnv {
 
         let kimi_dir = home.path().join(".kimi-code");
         fs::create_dir_all(&kimi_dir).expect("mkdir .kimi-code");
+        let codex_dir = home.path().join(".codex");
+        fs::create_dir_all(&codex_dir).expect("mkdir .codex");
+        fs::write(
+            codex_dir.join("session_index.jsonl"),
+            r#"{"id":"22222222-aaaa-bbbb-cccc-000000000002","thread_name":"扫码登录排查","updated_at":1786000000}
+"#,
+        )
+        .expect("write codex session_index");
         fs::write(
             kimi_dir.join("session_index.jsonl"),
             concat!(
@@ -399,8 +407,8 @@ fn codex_parse_contract() {
         .parse_transcript(&r)
         .expect("codex parse_transcript");
 
-    // 标题取首条真实用户消息(environment_context 注入行归 Meta 被跳过)
-    assert_eq!(s.meta.title, "扫码登录报错,帮我查一下 useEffect() 依赖数组");
+    // 标题取 session_index.thread_name(/rename),压过首条用户消息
+    assert_eq!(s.meta.title, "扫码登录排查");
     assert_eq!(s.meta.key, "codex:22222222-aaaa-bbbb-cccc-000000000002");
     assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx");
     assert_eq!(s.meta.source.as_deref(), Some("CLI")); // originator codex_cli_rs
@@ -722,7 +730,7 @@ fn pi_parse_contract() {
     let s = adapter.parse_session(&r).expect("pi parse_session");
     let t = adapter.parse_transcript(&r).expect("pi parse_transcript");
 
-    assert_eq!(s.meta.title, "Pi 查一下二维码组件的 useEffect() 清理");
+    assert_eq!(s.meta.title, "Pi QR 排查");
     assert_eq!(s.meta.key, "pi:66666666-aaaa-bbbb-cccc-000000000006");
     // cwd 来自 session 首行,不反推有损编码目录名
     assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx");
@@ -765,7 +773,7 @@ fn pi_parse_contract() {
         .expect("omp parse_session");
     assert_eq!(s2.meta.agent, AgentId::Omp);
     assert_eq!(s2.meta.key, "omp:66666666-aaaa-bbbb-cccc-000000000006");
-    assert_eq!(s2.meta.title, "Pi 查一下二维码组件的 useEffect() 清理");
+    assert_eq!(s2.meta.title, "Pi QR 排查");
 }
 
 #[test]

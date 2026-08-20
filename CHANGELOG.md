@@ -2,7 +2,7 @@
 
 ## [0.3.0] — 2026-08-20
 
-- New: Grok Build subagent sessions nest under their parent in the session list (chevron, or click again when selected)
+- New: session list prefers each agent's renamed title (Grok `/rename`, Claude `custom-title`, Codex `thread_name`, Pi session title, …) over the first prompt
 - New: deleting a parent session also moves its nested sessions to Trash
 - Fix: Cursor project paths with underscores (e.g. `app_av4`) no longer decode as extra path segments
 - Change: sidebar agent / project / All Sessions counts list top-level rows only; nested children show on the parent row

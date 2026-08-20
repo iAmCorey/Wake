@@ -73,7 +73,7 @@ fn read_summary(updates_path: &Path) -> Summary {
             {
                 s.cwd = c.to_string();
             }
-            // generated_title 与 session_summary 通常同值,前者更语义化
+            // /rename 写 generated_title 并钉 title_is_manual;session_summary 是自动摘要
             for k in ["generated_title", "session_summary"] {
                 if let Some(t) = v.get(k).and_then(|x| x.as_str()) {
                     if !t.trim().is_empty() {
