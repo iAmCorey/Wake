@@ -1,29 +1,91 @@
 use super::parse_utils::*;
+use super::sqlite_ro::open_sqlite_ro;
 use super::{units_from_messages, AgentAdapter};
 use crate::models::*;
 use anyhow::Result;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// Cursor CLI:`~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl` 明文。
 /// 行结构 {role, message:{content:[{type:text|tool_use}]}} + {type:"turn_ended"}。
 /// user 正文包在 <timestamp>/<user_query> 壳里;transcript 不含 cwd,
-/// 从有损 slug 目录名 DFS 反推真实路径。IDE chats(store.db 加密)不做。
+/// 从有损 slug 目录名 DFS 反推真实路径。IDE chats 正文在 store.db 加密,
+/// 但改过的标题在 Application Support 的 conversation-search.db 明文。
 pub struct CursorAdapter {
     root: PathBuf,
+    titles_db: PathBuf,
+    titles: Mutex<Option<(i64, HashMap<String, String>)>>,
 }
 
 impl CursorAdapter {
     pub fn new() -> Self {
+        let home = dirs::home_dir().unwrap_or_default();
         Self {
-            root: dirs::home_dir()
-                .unwrap_or_default()
-                .join(".cursor")
-                .join("projects"),
+            root: home.join(".cursor").join("projects"),
+            titles_db: dirs::data_dir()
+                .unwrap_or_else(|| home.join("Library").join("Application Support"))
+                .join("Cursor")
+                .join("User")
+                .join("globalStorage")
+                .join("conversation-search.db"),
+            titles: Mutex::new(None),
         }
     }
+
+    fn renamed_title(&self, id: &str) -> Option<String> {
+        self.renamed_titles().get(id).cloned()
+    }
+
+    fn renamed_titles(&self) -> HashMap<String, String> {
+        let mtime = fs::metadata(&self.titles_db)
+            .map(|m| mtime_ms(&m))
+            .unwrap_or(0);
+        {
+            let cache = self.titles.lock().unwrap();
+            if let Some((t, map)) = cache.as_ref() {
+                if *t == mtime {
+                    return map.clone();
+                }
+            }
+        }
+        let map = read_conversation_titles(&self.titles_db);
+        *self.titles.lock().unwrap() = Some((mtime, map.clone()));
+        map
+    }
+
+    fn with_renamed_title(&self, mut meta: SessionMeta) -> SessionMeta {
+        if let Some(t) = self.renamed_title(&meta.id) {
+            meta.title = t;
+        }
+        meta
+    }
+}
+
+/// Cursor IDE `/rename` 写在 conversation-search.db 的 conversations.title
+fn read_conversation_titles(db: &Path) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Some(ro) = open_sqlite_ro(db, "cursor-titles") else {
+        return map;
+    };
+    let Ok(mut stmt) = ro.conn.prepare(
+        "SELECT id, title FROM conversations WHERE title IS NOT NULL AND trim(title) != ''",
+    ) else {
+        return map;
+    };
+    let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+    else {
+        return map;
+    };
+    for row in rows.flatten() {
+        if !row.0.is_empty() && !row.1.trim().is_empty() {
+            map.insert(row.0, row.1.trim().to_string());
+        }
+    }
+    map
 }
 
 /// "Users-corey-Github-image-translate" → "/Users/corey/Github/image-translate"。
@@ -383,7 +445,7 @@ impl AgentAdapter for CursorAdapter {
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
         let parsed = parse_cursor_jsonl(Path::new(&r.file_path))?;
-        let meta = build_meta(r, &parsed);
+        let meta = self.with_renamed_title(build_meta(r, &parsed));
         let units = units_from_messages(&parsed.messages);
         Ok(ParsedSession {
             meta,
@@ -412,7 +474,7 @@ impl AgentAdapter for CursorAdapter {
             }
         }
         Ok(ParsedTranscript {
-            meta: build_meta(r, &parsed),
+            meta: self.with_renamed_title(build_meta(r, &parsed)),
             mainline: parsed.messages,
             sidechains,
             unknown_line_count: parsed.unknown_lines,
@@ -432,11 +494,16 @@ impl AgentAdapter for CursorAdapter {
     }
 
     fn watch_paths(&self) -> Vec<PathBuf> {
+        let mut v = Vec::new();
         if self.detect() {
-            vec![self.root.clone()]
-        } else {
-            Vec::new()
+            v.push(self.root.clone());
         }
+        if let Some(dir) = self.titles_db.parent() {
+            if dir.is_dir() {
+                v.push(dir.to_path_buf());
+            }
+        }
+        v
     }
 }
 

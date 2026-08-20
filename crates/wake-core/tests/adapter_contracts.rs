@@ -92,6 +92,15 @@ fn setup() -> &'static TestEnv {
         .expect("write kimi session_index");
 
         std::env::set_var("HOME", home.path());
+        if let Some(data) = dirs::data_dir() {
+            build_cursor_titles_db(
+                &data
+                    .join("Cursor")
+                    .join("User")
+                    .join("globalStorage")
+                    .join("conversation-search.db"),
+            );
+        }
         TestEnv {
             copilot_db,
             opencode_db,
@@ -125,6 +134,24 @@ fn build_copilot_db(path: &Path) {
         "#,
     )
     .expect("populate copilot fixture db");
+}
+
+/// Cursor IDE 改名写在 conversation-search.db,id 对齐 agent-transcript uuid
+fn build_cursor_titles_db(path: &Path) {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).expect("mkdir cursor titles dir");
+    }
+    let conn = rusqlite::Connection::open(path).expect("create cursor titles db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE conversations (
+            id TEXT PRIMARY KEY, title TEXT
+        );
+        INSERT INTO conversations VALUES
+            ('33333333-aaaa-bbbb-cccc-000000000003', 'Cursor QR 组件');
+        "#,
+    )
+    .expect("populate cursor titles db");
 }
 
 /// OpenCode `opencode.db` 最小同构库,v1 与 v2 两代表并存(v2 迁移后形态):
@@ -503,11 +530,8 @@ fn cursor_parse_contract() {
         .parse_transcript(&r)
         .expect("cursor parse_transcript");
 
-    // 标题取 <user_query> 壳内正文;无壳的注入行(<workspace>)归 Meta 被跳过
-    assert_eq!(
-        s.meta.title,
-        "把二维码扫描组件抽出来,注意 useEffect() 的清理"
-    );
+    // 标题取 Cursor IDE conversation-search.db 的 rename,压过 jsonl 首条
+    assert_eq!(s.meta.title, "Cursor QR 组件");
     // slug 目录 "wakefx-cursor-proj" 磁盘上无对应真实路径 → 直译回退
     assert_eq!(s.meta.project_path, "/wakefx/cursor/proj");
     assert_eq!(s.meta.project_name, "proj");
