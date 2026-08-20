@@ -33,21 +33,26 @@ use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::spinner::Spinner;
 use gpui_component::text::{TextView, TextViewStyle};
 use gpui_component::{
-    h_flex, v_flex, ActiveTheme as _, Icon, IndexPath, Root, Sizable as _,
-    StyledExt as _, TitleBar, WindowExt as _,
+    h_flex, v_flex, ActiveTheme as _, Icon, IndexPath, Root, Sizable as _, StyledExt as _,
+    TitleBar, WindowExt as _,
 };
 
 use wake_core::adapters::{create_adapters, AgentAdapter};
 use wake_core::db::Store;
 use wake_core::models::*;
 use wake_core::scanner::{run_scan, ScanEvents, ScanProgress};
+
+use crate::session_list::SessionsDelegate;
 use wake_core::services::{exporter, terminal};
 use wake_core::watcher::{start_watcher, SessionWatcher};
 
-use crate::ui::*;
 use crate::format::{abs_date, display_file_path, fmt_tokens, one_line, relative_time};
+use crate::ui::*;
 
-actions!(wake, [ToggleSearch, RefreshSessions, PaletteUp, PaletteDown]);
+actions!(
+    wake,
+    [ToggleSearch, RefreshSessions, PaletteUp, PaletteDown]
+);
 
 pub const KEY_CONTEXT: &str = "Workbench";
 /// ⌘K 面板容器的 key context(main.rs 的 ↑↓ 绑定与 dialog 元素共用)
@@ -87,87 +92,6 @@ impl ScanEvents for ChannelEvents {
     }
     fn on_sessions_changed(&self) {
         let _ = self.0.unbounded_send(BgEvent::Changed);
-    }
-}
-
-// ---------------- 会话列表 delegate ----------------
-
-pub struct SessionsDelegate {
-    pub sessions: Vec<SessionMeta>,
-}
-
-impl ListDelegate for SessionsDelegate {
-    type Item = ListItem;
-
-    fn items_count(&self, _section: usize, _cx: &App) -> usize {
-        self.sessions.len()
-    }
-
-    fn render_item(
-        &mut self,
-        ix: IndexPath,
-        _window: &mut Window,
-        cx: &mut Context<ListState<Self>>,
-    ) -> Option<Self::Item> {
-        let s = self.sessions.get(ix.row)?;
-        let theme = cx.theme();
-
-        Some(
-            ListItem::new(ix.row).rounded(theme.radius).mx(SPACE_SM).child(
-                v_flex()
-                    .w_full()
-                    .px(SPACE_XS)
-                    .py(SPACE_SM)
-                    .gap(SPACE_XS)
-                    .child(
-                        h_flex()
-                            .gap_1p5()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(FONT_BODY)
-                                    .font_medium()
-                                    .text_color(theme.foreground)
-                                    .truncate()
-                                    .child(s.title.clone()),
-                            )
-                            .when(s.pinned, |this| {
-                                this.child(
-                                    icon("icons/pin-filled.svg")
-                                        .with_size(px(11.))
-                                        .text_color(theme.primary),
-                                )
-                            })
-                            .when(s.favorite, |this| {
-                                this.child(
-                                    icon("icons/star-filled.svg")
-                                        .with_size(px(11.))
-                                        .text_color(rgb(crate::theme::STAR_YELLOW)),
-                                )
-                            }),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_1p5()
-                            .text_size(FONT_LABEL)
-                            .text_color(theme.muted_foreground)
-                            .child(img(s.agent.brand_icon(theme.mode.is_dark())).size(px(15.)).flex_shrink_0())
-                            .child(badge(s.project_name.clone(), theme.muted, theme.muted_foreground))
-                            .child(div().flex_1())
-                            .child(div().flex_shrink_0().child(relative_time(s.updated_at))),
-                    ),
-            ),
-        )
-    }
-
-    // 点击/回车走 ListEvent::Confirm(ix),无需自存选中态
-    fn set_selected_index(
-        &mut self,
-        _ix: Option<IndexPath>,
-        _window: &mut Window,
-        _cx: &mut Context<ListState<Self>>,
-    ) {
     }
 }
 
@@ -213,7 +137,11 @@ impl ListDelegate for SearchDelegate {
                         h_flex()
                             .gap_2()
                             .text_size(FONT_CAPTION)
-                            .child(img(h.session.agent.brand_icon(theme.mode.is_dark())).size(px(15.)).flex_shrink_0())
+                            .child(
+                                img(h.session.agent.brand_icon(theme.mode.is_dark()))
+                                    .size(px(15.))
+                                    .flex_shrink_0(),
+                            )
                             .child(
                                 div()
                                     .min_w_0()
@@ -267,7 +195,9 @@ impl ListDelegate for SearchDelegate {
             if q.trim().is_empty() {
                 (Vec::new(), false)
             } else {
-                store.search(&q, &[], None, 60).unwrap_or((Vec::new(), false))
+                store
+                    .search(&q, &[], None, 60)
+                    .unwrap_or((Vec::new(), false))
             }
         });
         cx.spawn_in(window, async move |this, cx| {
@@ -430,14 +360,7 @@ impl Workbench {
         let adapters: Arc<Vec<Box<dyn AgentAdapter>>> = Arc::new(create_adapters());
 
         let list_state = cx.new(|cx| {
-            ListState::new(
-                SessionsDelegate {
-                    sessions: Vec::new(),
-                },
-                window,
-                cx,
-            )
-            .searchable(false)
+            ListState::new(SessionsDelegate::new(store.clone()), window, cx).searchable(false)
         });
         let palette_list = cx.new(|cx| {
             ListState::new(
@@ -527,7 +450,10 @@ impl Workbench {
 
         // 终端应用图标后台提取(首次数百 ms,之后命中缓存)
         let icons_task = cx.background_spawn(async {
-            let dir = dirs::data_dir().unwrap_or_default().join("wake").join("app-icons");
+            let dir = dirs::data_dir()
+                .unwrap_or_default()
+                .join("wake")
+                .join("app-icons");
             terminal::ensure_app_icons(&dir)
         });
         cx.spawn_in(window, async move |this, cx| {
@@ -555,6 +481,7 @@ impl Workbench {
             ascending: self.sort_ascending,
             limit: 500,
             offset: 0,
+            roots_only: !self.favorite_only,
         }
     }
 
@@ -562,8 +489,22 @@ impl Workbench {
         let filter = self.current_filter();
         if let Ok((sessions, total)) = self.store.list_sessions(&filter) {
             self.total_sessions = total;
+            let tree_mode = filter.roots_only;
+            let child_counts = if tree_mode {
+                self.store.child_counts().unwrap_or_default()
+            } else {
+                Default::default()
+            };
+            let sort_key = self.sort_key;
+            let ascending = self.sort_ascending;
             self.list_state.update(cx, |state, cx| {
-                state.delegate_mut().sessions = sessions;
+                state.delegate_mut().apply_roots(
+                    sessions,
+                    child_counts,
+                    tree_mode,
+                    sort_key,
+                    ascending,
+                );
                 cx.notify();
             });
         }
@@ -623,16 +564,13 @@ impl Workbench {
                     v_flex()
                         .gap(SPACE_LG)
                         .child(
-                            h_flex()
-                                .gap_2()
-                                .child(Spinner::new().small())
-                                .child(
-                                    div()
-                                        .text_size(FONT_HEADING)
-                                        .font_semibold()
-                                        .text_color(theme.foreground)
-                                        .child("Refreshing sessions"),
-                                ),
+                            h_flex().gap_2().child(Spinner::new().small()).child(
+                                div()
+                                    .text_size(FONT_HEADING)
+                                    .font_semibold()
+                                    .text_color(theme.foreground)
+                                    .child("Refreshing sessions"),
+                            ),
                         )
                         .child(Progress::new().value(pct))
                         .child(
@@ -685,9 +623,9 @@ impl Workbench {
         let key = list
             .read(cx)
             .delegate()
-            .sessions
+            .rows
             .get(ix.row)
-            .map(|s| s.key.clone());
+            .map(|s| s.meta.key.clone());
         if let Some(key) = key {
             self.open_detail(&key, None, window, cx);
         }
@@ -710,12 +648,7 @@ impl Workbench {
         }
     }
 
-    pub fn toggle_search(
-        &mut self,
-        _: &ToggleSearch,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn toggle_search(&mut self, _: &ToggleSearch, window: &mut Window, cx: &mut Context<Self>) {
         if self.refreshing {
             return;
         }
@@ -743,12 +676,18 @@ impl Workbench {
                         // ↑↓ 在 Input 内不被消费,冒泡到这里走 main.rs 的
                         // PALETTE_CONTEXT 键位(Input 拆出 List 后原生 List 绑定够不着)
                         .key_context(PALETTE_CONTEXT)
-                        .on_action(window.listener_for(&this, |wb: &mut Self, _: &PaletteUp, window, cx| {
-                            wb.palette_move(-1, window, cx)
-                        }))
-                        .on_action(window.listener_for(&this, |wb: &mut Self, _: &PaletteDown, window, cx| {
-                            wb.palette_move(1, window, cx)
-                        }))
+                        .on_action(window.listener_for(
+                            &this,
+                            |wb: &mut Self, _: &PaletteUp, window, cx| {
+                                wb.palette_move(-1, window, cx)
+                            },
+                        ))
+                        .on_action(window.listener_for(
+                            &this,
+                            |wb: &mut Self, _: &PaletteDown, window, cx| {
+                                wb.palette_move(1, window, cx)
+                            },
+                        ))
                         // 定高 + 列表 flex_1:输入行/footer 尺寸变化时列表自适应,
                         // 不用手工重算列表高度
                         .h(PALETTE_HEIGHT)
@@ -882,11 +821,7 @@ impl Workbench {
                     this.update_in(cx, |this, window, cx| {
                         this.palette_list.update(cx, |state, cx| {
                             let has_hits = !state.delegate().hits.is_empty();
-                            state.set_selected_index(
-                                has_hits.then(IndexPath::default),
-                                window,
-                                cx,
-                            );
+                            state.set_selected_index(has_hits.then(IndexPath::default), window, cx);
                             // scroll_to_item 自带 notify,列表随之重绘
                             state.scroll_to_item(
                                 IndexPath::default(),
@@ -935,10 +870,7 @@ impl Workbench {
             if n == 0 {
                 return;
             }
-            let cur = state
-                .selected_index()
-                .map(|ix| ix.row as i64)
-                .unwrap_or(-1);
+            let cur = state.selected_index().map(|ix| ix.row as i64).unwrap_or(-1);
             let next = (cur + delta).clamp(0, n - 1) as usize;
             state.set_selected_index(Some(IndexPath::new(next)), window, cx);
             // scroll_to_selected_item 内部 notify,选中高亮随之重绘
@@ -998,8 +930,11 @@ impl Workbench {
                 if let Some(detail) = &mut this.detail {
                     match result {
                         Some((key, messages)) if key == detail.meta.key => {
-                            detail.msg_list =
-                                gpui::ListState::new(messages.len(), gpui::ListAlignment::Bottom, px(512.));
+                            detail.msg_list = gpui::ListState::new(
+                                messages.len(),
+                                gpui::ListAlignment::Bottom,
+                                px(512.),
+                            );
                             // 搜索跳转:seq → 可见消息下标,滚到视口顶。
                             // FTS 命中的行可能被详情过滤(如空文本),用 >= 落到
                             // 其后最近一条;找不到(尾部被滤)则保持默认落底。
@@ -1040,13 +975,18 @@ impl Workbench {
     /// 命中可能不在列表里),中栏定位选中该会话并滚到可见
     fn sync_list_selection(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.show_all_sessions(window, cx);
+        if let Ok(Some(pk)) = self.store.parent_key_of(key) {
+            self.list_state.update(cx, |state, _| {
+                state.delegate_mut().ensure_expanded(&pk);
+            });
+        }
         let row = self
             .list_state
             .read(cx)
             .delegate()
-            .sessions
+            .rows
             .iter()
-            .position(|s| s.key == key);
+            .position(|s| s.meta.key == key);
         if let Some(row) = row {
             self.list_state.update(cx, |state, cx| {
                 state.set_selected_index(Some(IndexPath::new(row)), window, cx);
@@ -1081,7 +1021,12 @@ impl Workbench {
         .detach();
     }
 
-    fn do_resume(&mut self, term: terminal::TerminalApp, window: &mut Window, cx: &mut Context<Self>) {
+    fn do_resume(
+        &mut self,
+        term: terminal::TerminalApp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(detail) = &self.detail else { return };
         self.preferred_terminal = Some(term);
         cx.notify(); // split 按钮左段立即切到本次选择
@@ -1148,30 +1093,45 @@ impl Workbench {
     /// 否则界面在授权框弹出的整段时间里完全冻结。
     fn do_delete(
         &mut self,
-        key: String,
+        keys: Vec<String>,
         targets: Vec<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let store = self.store.clone();
-        let trash_key = key.clone();
+        let n = keys.len();
+        let trash_keys = keys.clone();
         let task = cx.background_spawn(async move {
-            terminal::trash_paths(&targets).and_then(|()| store.remove_session(&trash_key, true))
+            terminal::trash_paths(&targets)?;
+            for k in &trash_keys {
+                store.remove_session(k, true)?;
+            }
+            anyhow::Ok(())
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             this.update_in(cx, |this, window, cx| match result {
                 Ok(()) => {
-                    // 等待期间用户可能已翻到别的会话,只在仍停在被删那条时才清空
-                    if this.detail.as_ref().is_some_and(|d| d.meta.key == key) {
+                    // 等待期间用户可能已翻到别的会话,只在仍停在被删树内时才清空
+                    if this
+                        .detail
+                        .as_ref()
+                        .is_some_and(|d| keys.iter().any(|k| k == &d.meta.key))
+                    {
                         this.detail = None;
                     }
-                    window.push_notification(Notification::success("Session moved to Trash"), cx);
+                    let msg = if n > 1 {
+                        format!("{n} sessions moved to Trash")
+                    } else {
+                        "Session moved to Trash".into()
+                    };
+                    window.push_notification(Notification::success(msg), cx);
                     // 立刻把它从列表摘掉,不等 watcher 那 800ms 去抖
                     this.refresh(window, cx);
                 }
-                Err(e) => window
-                    .push_notification(Notification::error(format!("Delete failed: {e}")), cx),
+                Err(e) => {
+                    window.push_notification(Notification::error(format!("Delete failed: {e}")), cx)
+                }
             })
             .ok();
         })
@@ -1181,27 +1141,53 @@ impl Workbench {
     fn confirm_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(detail) = &self.detail else { return };
         let meta = detail.meta.clone();
+        let children = self.store.all_children(&meta.key).unwrap_or_default();
+        let n_children = children.len();
         // 会话归属哪些磁盘路径(主文件/边车目录)是 adapter 的布局知识
-        let targets = self
-            .adapters
-            .iter()
-            .find(|a| a.agent() == meta.agent)
-            .map(|a| a.session_paths(&meta))
-            .unwrap_or_else(|| vec![meta.file_path.clone()]);
+        let adapter = self.adapters.iter().find(|a| a.agent() == meta.agent);
+        let mut targets = Vec::new();
+        let mut keys = Vec::with_capacity(1 + n_children);
+        let mut push = |m: &SessionMeta| {
+            keys.push(m.key.clone());
+            let paths = adapter
+                .map(|a| a.session_paths(m))
+                .unwrap_or_else(|| vec![m.file_path.clone()]);
+            for p in paths {
+                if !targets.contains(&p) {
+                    targets.push(p);
+                }
+            }
+        };
+        push(&meta);
+        for c in &children {
+            push(c);
+        }
         let entity = cx.entity();
         window.open_dialog(cx, move |dialog, _window, cx| {
-            let meta = meta.clone();
+            let keys = keys.clone();
             let targets = targets.clone();
             let entity = entity.clone();
             let theme = cx.theme();
+            let title = if n_children > 0 {
+                "Delete this session and nested sessions?"
+            } else {
+                "Delete this session?"
+            };
+            let lead = if n_children > 0 {
+                format!(
+                    "This session and {n_children} nested sessions will be moved to Trash. You can restore them anytime:"
+                )
+            } else {
+                "The session file will be moved to Trash. You can restore it anytime:".into()
+            };
             dialog
-                .title(div().font_semibold().child("Delete this session?"))
+                .title(div().font_semibold().child(title))
                 .w(px(440.))
                 .child(
                     v_flex()
                         .gap_2()
                         .text_size(FONT_BODY)
-                        .child("The session file will be moved to Trash. You can restore it anytime:")
+                        .child(lead)
                         .child(
                             div()
                                 .px_2()
@@ -1223,7 +1209,7 @@ impl Workbench {
                 )
                 .on_ok(move |_, window, cx| {
                     entity.update(cx, |this, cx| {
-                        this.do_delete(meta.key.clone(), targets.clone(), window, cx);
+                        this.do_delete(keys.clone(), targets.clone(), window, cx);
                     });
                     true
                 })
@@ -1253,9 +1239,8 @@ impl Workbench {
 
     fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let all_active = self.selected_agent.is_none()
-            && self.selected_project.is_none()
-            && !self.favorite_only;
+        let all_active =
+            self.selected_agent.is_none() && self.selected_project.is_none() && !self.favorite_only;
         // 常态沉默,仅刷新中/监听失效时出现;None 时状态栏整行不渲染。
         // 文案在此按 scan 现算,不另存字段——存下来就会有第二个写入点要维护
         let note = if self.scan.scanning {
@@ -1264,7 +1249,10 @@ impl Workbench {
                 total => format!("Refreshing {}/{}", self.scan.done, total),
             })
         } else {
-            self.scan.error.as_ref().map(|e| format!("Refresh failed: {e}"))
+            self.scan
+                .error
+                .as_ref()
+                .map(|e| format!("Refresh failed: {e}"))
         };
         let status: Option<AnyElement> = if let Some(note) = note {
             Some(
@@ -1272,7 +1260,11 @@ impl Workbench {
                     .w_full()
                     .gap(SPACE_SM)
                     .text_color(theme.muted_foreground)
-                    .child(icon("icons/refresh-cw.svg").with_size(px(12.)).flex_shrink_0())
+                    .child(
+                        icon("icons/refresh-cw.svg")
+                            .with_size(px(12.))
+                            .flex_shrink_0(),
+                    )
                     .child(div().min_w_0().truncate().child(note))
                     .into_any_element(),
             )
@@ -1282,7 +1274,13 @@ impl Workbench {
                     .w_full()
                     .gap(SPACE_SM)
                     .text_color(theme.muted_foreground)
-                    .child(div().size(px(7.)).rounded_full().flex_shrink_0().bg(theme.warning))
+                    .child(
+                        div()
+                            .size(px(7.))
+                            .rounded_full()
+                            .flex_shrink_0()
+                            .bg(theme.warning),
+                    )
                     .child(div().min_w_0().truncate().child("Live updates off"))
                     .into_any_element(),
             )
@@ -1341,22 +1339,11 @@ impl Workbench {
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.toggle_search(&ToggleSearch, window, cx)
                                 }))
-                                .child(
-                                    icon("icons/search.svg")
-                                        .with_size(px(13.))
-                                        .flex_shrink_0(),
-                                )
+                                .child(icon("icons/search.svg").with_size(px(13.)).flex_shrink_0())
                                 // flex_1 + min_w_0 + truncate:空间不足时压这里,
                                 // 绝不把右侧刷新按钮挤出侧栏
-                                .child(
-                                    div().flex_1().min_w_0().truncate().child("Search sessions"),
-                                )
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .text_size(FONT_LABEL)
-                                        .child("⌘K"),
-                                ),
+                                .child(div().flex_1().min_w_0().truncate().child("Search sessions"))
+                                .child(div().flex_shrink_0().text_size(FONT_LABEL).child("⌘K")),
                         )
                         .child({
                             let busy = self.scan.scanning;
@@ -1373,8 +1360,7 @@ impl Workbench {
                                 .when(!busy, |el| {
                                     el.cursor_pointer()
                                         .hover(|s| {
-                                            s.bg(theme.secondary_hover)
-                                                .text_color(theme.foreground)
+                                            s.bg(theme.secondary_hover).text_color(theme.foreground)
                                         })
                                         .active(|s| {
                                             s.bg(theme.secondary_active)
@@ -1416,7 +1402,11 @@ impl Workbench {
                         "fav",
                         RowLead::Icon(icon("icons/star.svg")),
                         "Starred",
-                        if self.starred_count > 0 { Some(self.starred_count) } else { None },
+                        if self.starred_count > 0 {
+                            Some(self.starred_count)
+                        } else {
+                            None
+                        },
                         self.favorite_only,
                         RowLevel::Primary,
                         cx.listener(|this, _, window, cx| {
@@ -1527,7 +1517,7 @@ impl Workbench {
 
     fn render_session_list(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let shown = self.list_state.read(cx).delegate().sessions.len();
+        let shown = self.list_state.read(cx).delegate().rows.len();
         let sort_key = self.sort_key;
         let sort_ascending = self.sort_ascending;
         let sort_entity = cx.entity();
@@ -1547,14 +1537,14 @@ impl Workbench {
             .dropdown_menu(move |menu, _, _| {
                 let mk_key = |label: &'static str, key: SortKey| {
                     let entity = sort_entity.clone();
-                    PopupMenuItem::new(label)
-                        .checked(sort_key == key)
-                        .on_click(move |_, window, cx| {
+                    PopupMenuItem::new(label).checked(sort_key == key).on_click(
+                        move |_, window, cx| {
                             entity.update(cx, |this, cx| {
                                 this.sort_key = key;
                                 this.refresh(window, cx);
                             });
-                        })
+                        },
+                    )
                 };
                 let mk_dir = |label: &'static str, ascending: bool| {
                     let entity = sort_entity.clone();
@@ -1616,7 +1606,10 @@ impl Workbench {
                     ))
                     .into_any_element()
             } else {
-                List::new(&self.list_state).flex_1().min_h_0().into_any_element()
+                List::new(&self.list_state)
+                    .flex_1()
+                    .min_h_0()
+                    .into_any_element()
             })
     }
 
@@ -1624,7 +1617,12 @@ impl Workbench {
 
     /// gpui::list 的行渲染。在布局阶段经 entity.update 调用(render 已返回,
     /// lease 已释放,无 double-lease 风险——与 dialog builder 的时机不同)。
-    fn render_msg_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_msg_row(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme();
         let dark = theme.mode.is_dark();
         let muted_fg = theme.muted_foreground;
@@ -2434,7 +2432,11 @@ fn sidebar_row(
         .flex_shrink_0()
         // 分组项整行右移一档表达从属:行首因此落在轴右侧 SUB_INDENT 处,
         // 压轴的是主导航与组头,不是这里
-        .pl(if sub { LEAD_INSET + SUB_INDENT } else { LEAD_INSET })
+        .pl(if sub {
+            LEAD_INSET + SUB_INDENT
+        } else {
+            LEAD_INSET
+        })
         .pr(SIDEBAR_EDGE)
         .rounded(theme.radius)
         .cursor_pointer()
@@ -2475,9 +2477,7 @@ fn sidebar_row(
                                 .into_any_element(),
                             // 品牌图不着色:img 走 AssetSource 取内嵌 PNG,原色渲染
                             // (侧栏单色化试过,用户否决——保持彩色)
-                            RowLead::Brand(path) => {
-                                img(path).size(LEAD_BOX).into_any_element()
-                            }
+                            RowLead::Brand(path) => img(path).size(LEAD_BOX).into_any_element(),
                         }),
                 )
                 .child(
@@ -2512,7 +2512,9 @@ fn tool_btn(
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Button {
     let ic = if highlighted {
-        icon(filled_icon_path).with_size(px(16.)).text_color(active_color)
+        icon(filled_icon_path)
+            .with_size(px(16.))
+            .text_color(active_color)
     } else {
         icon(icon_path).with_size(px(16.))
     };

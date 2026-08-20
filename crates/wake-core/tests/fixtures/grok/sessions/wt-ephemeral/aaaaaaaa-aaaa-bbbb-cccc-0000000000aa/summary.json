@@ -1,0 +1,18 @@
+{
+  "info": {
+    "id": "aaaaaaaa-aaaa-bbbb-cccc-0000000000aa",
+    "cwd": "/var/folders/xx/T/grok-501/wt-abcd1234-pr-9"
+  },
+  "session_summary": "Grok worktree review",
+  "created_at": "2026-08-06T12:00:00.000000Z",
+  "updated_at": "2026-08-06T12:10:00.000000Z",
+  "num_messages": 4,
+  "num_chat_messages": 2,
+  "current_model_id": "grok-4.6",
+  "generated_title": "Grok worktree review",
+  "git_root_dir": "/private/var/folders/xx/T/grok-501/wt-abcd1234-pr-9/",
+  "git_remotes": [
+    "/Users/tester/Github/wakefx.origin.git"
+  ],
+  "head_branch": "execute-plan/abcd1234-pr-9-feat-example"
+}

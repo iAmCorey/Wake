@@ -103,6 +103,10 @@ fn parse_claude_jsonl(path: &Path, include_sidechain: bool) -> Result<ParseResul
     let mut tool_index: HashMap<String, (usize, usize)> = HashMap::new();
     let mut custom_title = String::new();
     let mut fallback_title = String::new();
+    let file_id = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let mut cwd = String::new();
     let mut git_branch: Option<String> = None;
     let mut model: Option<String> = None;
@@ -133,6 +137,11 @@ fn parse_claude_jsonl(path: &Path, include_sidechain: bool) -> Result<ParseResul
         let typ = row.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
         if typ == "custom-title" {
+            // /rename 带 sessionId;写进当前文件但指向别的会话时不要抢标题
+            let sid = row.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+            if !sid.is_empty() && sid != file_id {
+                continue;
+            }
             if let Some(t) = row.get("customTitle").and_then(|v| v.as_str()) {
                 if !t.trim().is_empty() {
                     custom_title = t.trim().to_string();
@@ -177,7 +186,12 @@ fn parse_claude_jsonl(path: &Path, include_sidechain: bool) -> Result<ParseResul
             flush_assistant(&mut pending, &mut messages, &mut tool_index);
             let subtype = row.get("subtype").and_then(|v| v.as_str());
             if subtype == Some("compact_boundary") {
-                messages.push(mk_msg(Role::System, MessageKind::CompactSummary, "── Context compacted ──", ts));
+                messages.push(mk_msg(
+                    Role::System,
+                    MessageKind::CompactSummary,
+                    "── Context compacted ──",
+                    ts,
+                ));
             } else if let Some(content) = row.get("content").and_then(|v| v.as_str()) {
                 if !content.is_empty() {
                     let (text, truncated) = clip(content, MAX_TOOL_IO);
@@ -216,7 +230,8 @@ fn parse_claude_jsonl(path: &Path, include_sidechain: bool) -> Result<ParseResul
                             }
                             Some("tool_result") => {
                                 had_tool_result = true;
-                                let id = b.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
+                                let id =
+                                    b.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
                                 if let Some(&(mi, ti)) = tool_index.get(id) {
                                     let out = stringify_tool_result(b.get("content"));
                                     let target = &mut messages[mi].tool_calls[ti];
@@ -295,8 +310,14 @@ fn parse_claude_jsonl(path: &Path, include_sidechain: bool) -> Result<ParseResul
             }
         }
         if let Some(usage) = message.get("usage") {
-            tokens_used += usage.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0)
-                + usage.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0)
+            tokens_used += usage
+                .get("input_tokens")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+                + usage
+                    .get("output_tokens")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0)
                 + usage
                     .get("cache_creation_input_tokens")
                     .and_then(|v| v.as_i64())
@@ -321,10 +342,15 @@ fn parse_claude_jsonl(path: &Path, include_sidechain: bool) -> Result<ParseResul
                             }
                         }
                         Some("tool_use") => {
-                            let id = b.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let id = b
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             let input = b.get("input").cloned().unwrap_or(Value::Null);
                             let name = b.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
-                            p.tool_calls.push(tool_call_view(id, name, &input, None, false));
+                            p.tool_calls
+                                .push(tool_call_view(id, name, &input, None, false));
                         }
                         _ => {}
                     }
@@ -405,8 +431,16 @@ fn build_meta(r: &SessionFileRef, p: &ParseResult) -> SessionMeta {
         project_path: p.cwd.clone(),
         project_name,
         file_path: r.file_path.clone(),
-        created_at: if p.created_at > 0 { p.created_at } else { r.mtime_ms },
-        updated_at: if p.updated_at > 0 { p.updated_at } else { r.mtime_ms },
+        created_at: if p.created_at > 0 {
+            p.created_at
+        } else {
+            r.mtime_ms
+        },
+        updated_at: if p.updated_at > 0 {
+            p.updated_at
+        } else {
+            r.mtime_ms
+        },
         message_count: p
             .messages
             .iter()
@@ -415,7 +449,11 @@ fn build_meta(r: &SessionFileRef, p: &ParseResult) -> SessionMeta {
         size_bytes: r.size,
         git_branch: p.git_branch.clone(),
         model: p.model.clone(),
-        tokens_used: if p.tokens_used > 0 { Some(p.tokens_used) } else { None },
+        tokens_used: if p.tokens_used > 0 {
+            Some(p.tokens_used)
+        } else {
+            None
+        },
         archived: false,
         source: None,
         favorite: false,
@@ -451,9 +489,18 @@ fn list_sidechains(r: &SessionFileRef) -> Vec<SidechainInfo> {
         };
         if let Ok(meta_raw) = fs::read_to_string(dir.join(format!("{id}.meta.json"))) {
             if let Ok(meta) = serde_json::from_str::<Value>(&meta_raw) {
-                info.agent_type = meta.get("agentType").and_then(|v| v.as_str()).map(String::from);
-                info.description = meta.get("description").and_then(|v| v.as_str()).map(String::from);
-                info.tool_use_id = meta.get("toolUseId").and_then(|v| v.as_str()).map(String::from);
+                info.agent_type = meta
+                    .get("agentType")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                info.description = meta
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                info.tool_use_id = meta
+                    .get("toolUseId")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
             }
         }
         out.push(info);
@@ -536,7 +583,11 @@ impl AgentAdapter for ClaudeAdapter {
         })
     }
 
-    fn load_sidechain(&self, r: &SessionFileRef, sidechain_id: &str) -> Result<Vec<TranscriptMessage>> {
+    fn load_sidechain(
+        &self,
+        r: &SessionFileRef,
+        sidechain_id: &str,
+    ) -> Result<Vec<TranscriptMessage>> {
         let file = subagents_dir(r).join(format!("{sidechain_id}.jsonl"));
         if !file.is_file() {
             return Ok(Vec::new());
@@ -574,4 +625,3 @@ impl AgentAdapter for ClaudeAdapter {
         }
     }
 }
-

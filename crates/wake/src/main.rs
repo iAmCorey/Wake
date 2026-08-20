@@ -1,5 +1,6 @@
 mod assets;
 mod format;
+mod session_list;
 mod theme;
 mod ui;
 mod workbench;

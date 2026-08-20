@@ -16,6 +16,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and nine other p
 ## Features
 
 - **Unified browsing** — all sessions grouped by agent / project, live file watching for incremental updates
+- **Nested Grok sessions** — Grok Build subagents sit under their parent session; expand to browse, delete the parent to trash the tree
 - **Full-text search** (⌘K) — SQLite FTS5 trigram index; handles CJK text and code substrings (like `useEffect(`) equally well; jumps straight to the matched message in the transcript
 - **Transcript view** — per-message rendering with user/assistant bubbles, collapsible tool-call clusters, thinking summaries, tree-sitter code highlighting (30+ languages)
 - **One-click resume** — reopens the session in Terminal/iTerm at the original project directory (`claude --resume`, `codex resume`, …)

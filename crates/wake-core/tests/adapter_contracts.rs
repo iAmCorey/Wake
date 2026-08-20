@@ -72,6 +72,14 @@ fn setup() -> &'static TestEnv {
 
         let kimi_dir = home.path().join(".kimi-code");
         fs::create_dir_all(&kimi_dir).expect("mkdir .kimi-code");
+        let codex_dir = home.path().join(".codex");
+        fs::create_dir_all(&codex_dir).expect("mkdir .codex");
+        fs::write(
+            codex_dir.join("session_index.jsonl"),
+            r#"{"id":"22222222-aaaa-bbbb-cccc-000000000002","thread_name":"扫码登录排查","updated_at":1786000000}
+"#,
+        )
+        .expect("write codex session_index");
         fs::write(
             kimi_dir.join("session_index.jsonl"),
             concat!(
@@ -84,6 +92,15 @@ fn setup() -> &'static TestEnv {
         .expect("write kimi session_index");
 
         std::env::set_var("HOME", home.path());
+        if let Some(data) = dirs::data_dir() {
+            build_cursor_titles_db(
+                &data
+                    .join("Cursor")
+                    .join("User")
+                    .join("globalStorage")
+                    .join("conversation-search.db"),
+            );
+        }
         TestEnv {
             copilot_db,
             opencode_db,
@@ -117,6 +134,24 @@ fn build_copilot_db(path: &Path) {
         "#,
     )
     .expect("populate copilot fixture db");
+}
+
+/// Cursor IDE 改名写在 conversation-search.db,id 对齐 agent-transcript uuid
+fn build_cursor_titles_db(path: &Path) {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).expect("mkdir cursor titles dir");
+    }
+    let conn = rusqlite::Connection::open(path).expect("create cursor titles db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE conversations (
+            id TEXT PRIMARY KEY, title TEXT
+        );
+        INSERT INTO conversations VALUES
+            ('33333333-aaaa-bbbb-cccc-000000000003', 'Cursor QR 组件');
+        "#,
+    )
+    .expect("populate cursor titles db");
 }
 
 /// OpenCode `opencode.db` 最小同构库,v1 与 v2 两代表并存(v2 迁移后形态):
@@ -210,13 +245,16 @@ fn build_antigravity_db(path: &Path) {
 // ---------------------------------------------------------------- 小工具
 
 fn fixture(rel: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join(rel)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(rel)
 }
 
 /// 文件型 agent 的 SessionFileRef(直接指 fixture,不走 list_session_files)
 fn fs_ref(agent: AgentId, path: &Path, native_id: &str) -> SessionFileRef {
-    let meta = fs::metadata(path)
-        .unwrap_or_else(|e| panic!("fixture missing {}: {e}", path.display()));
+    let meta =
+        fs::metadata(path).unwrap_or_else(|e| panic!("fixture missing {}: {e}", path.display()));
     SessionFileRef {
         agent,
         native_id: native_id.to_string(),
@@ -243,7 +281,9 @@ fn db_ref(agent: AgentId, db: &Path, id: &str) -> SessionFileRef {
 }
 
 fn ms(rfc3339: &str) -> i64 {
-    chrono::DateTime::parse_from_rfc3339(rfc3339).expect("test timestamp").timestamp_millis()
+    chrono::DateTime::parse_from_rfc3339(rfc3339)
+        .expect("test timestamp")
+        .timestamp_millis()
 }
 
 fn roles_kinds(mainline: &[TranscriptMessage]) -> Vec<(Role, MessageKind)> {
@@ -317,7 +357,9 @@ fn claude_parse_contract() {
     let adapter = ClaudeAdapter::new();
     let r = claude_ref();
     let s = adapter.parse_session(&r).expect("claude parse_session");
-    let t = adapter.parse_transcript(&r).expect("claude parse_transcript");
+    let t = adapter
+        .parse_transcript(&r)
+        .expect("claude parse_transcript");
 
     // 标题=最后一条 custom-title,压过首条用户消息推导
     assert_eq!(s.meta.title, "QR login revamp");
@@ -351,11 +393,18 @@ fn claude_parse_contract() {
     assert_eq!(a.tool_calls.len(), 1);
     assert_eq!(a.tool_calls[0].name, "Read");
     // tool_result 在后续 user 行,应回填到 tool_use
-    assert!(a.tool_calls[0].output.as_deref().unwrap_or_default().contains("useEffect"));
+    assert!(a.tool_calls[0]
+        .output
+        .as_deref()
+        .unwrap_or_default()
+        .contains("useEffect"));
     assert!(!a.tool_calls[0].is_error);
 
     // units 只含 Text 消息,tool 名与 input 摘要并入正文
-    assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![1, 2, 3]);
+    assert_eq!(
+        s.units.iter().map(|u| u.seq).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
     assert!(s.units[1].text.contains("Login.tsx"));
 
     // 无真实用户消息的变体 → UNTITLED
@@ -364,7 +413,9 @@ fn claude_parse_contract() {
         &fixture("claude/projects/-Users-tester-Github-wakefx/aaaaaaaa-0000-4000-8000-00000000000a.jsonl"),
         "aaaaaaaa-0000-4000-8000-00000000000a",
     );
-    let s2 = adapter.parse_session(&untitled).expect("claude untitled parse");
+    let s2 = adapter
+        .parse_session(&untitled)
+        .expect("claude untitled parse");
     assert_eq!(s2.meta.title, UNTITLED);
     assert_eq!(s2.meta.message_count, 1);
 }
@@ -379,10 +430,12 @@ fn codex_parse_contract() {
     assert_eq!(r.native_id, "22222222-aaaa-bbbb-cccc-000000000002");
 
     let s = adapter.parse_session(&r).expect("codex parse_session");
-    let t = adapter.parse_transcript(&r).expect("codex parse_transcript");
+    let t = adapter
+        .parse_transcript(&r)
+        .expect("codex parse_transcript");
 
-    // 标题取首条真实用户消息(environment_context 注入行归 Meta 被跳过)
-    assert_eq!(s.meta.title, "扫码登录报错,帮我查一下 useEffect() 依赖数组");
+    // 标题取 session_index.thread_name(/rename),压过首条用户消息
+    assert_eq!(s.meta.title, "扫码登录排查");
     assert_eq!(s.meta.key, "codex:22222222-aaaa-bbbb-cccc-000000000002");
     assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx");
     assert_eq!(s.meta.source.as_deref(), Some("CLI")); // originator codex_cli_rs
@@ -413,10 +466,17 @@ fn codex_parse_contract() {
     assert!(!thinking.contains("OPAQUE-CIPHERTEXT"));
     assert_eq!(host.tool_calls.len(), 1);
     assert_eq!(host.tool_calls[0].name, "shell");
-    assert!(host.tool_calls[0].output.as_deref().unwrap_or_default().contains("QrScanner"));
+    assert!(host.tool_calls[0]
+        .output
+        .as_deref()
+        .unwrap_or_default()
+        .contains("QrScanner"));
 
     // 空文本的 reasoning 宿主凭 tool call 进入 units
-    assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![1, 2, 3]);
+    assert_eq!(
+        s.units.iter().map(|u| u.seq).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
 }
 
 #[test]
@@ -425,7 +485,9 @@ fn copilot_parse_contract() {
     let adapter = CopilotAdapter::new();
     let r = db_ref(AgentId::Copilot, &env.copilot_db, "cop-0001");
     let s = adapter.parse_session(&r).expect("copilot parse_session");
-    let t = adapter.parse_transcript(&r).expect("copilot parse_transcript");
+    let t = adapter
+        .parse_transcript(&r)
+        .expect("copilot parse_transcript");
 
     assert_eq!(s.meta.title, "Copilot QR fix"); // summary 优先
     assert_eq!(s.meta.git_branch.as_deref(), Some("main"));
@@ -446,7 +508,10 @@ fn copilot_parse_contract() {
         ]
     );
     assert_eq!(t.mainline[0].timestamp, Some(ms("2026-08-05T09:05:00Z")));
-    assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![0, 1, 2]);
+    assert_eq!(
+        s.units.iter().map(|u| u.seq).collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
 
     // summary 为空的会话回退首条用户消息作标题
     let r2 = db_ref(AgentId::Copilot, &env.copilot_db, "cop-0002");
@@ -461,10 +526,12 @@ fn cursor_parse_contract() {
     let adapter = CursorAdapter::new();
     let r = cursor_ref();
     let s = adapter.parse_session(&r).expect("cursor parse_session");
-    let t = adapter.parse_transcript(&r).expect("cursor parse_transcript");
+    let t = adapter
+        .parse_transcript(&r)
+        .expect("cursor parse_transcript");
 
-    // 标题取 <user_query> 壳内正文;无壳的注入行(<workspace>)归 Meta 被跳过
-    assert_eq!(s.meta.title, "把二维码扫描组件抽出来,注意 useEffect() 的清理");
+    // 标题取 Cursor IDE conversation-search.db 的 rename,压过 jsonl 首条
+    assert_eq!(s.meta.title, "Cursor QR 组件");
     // slug 目录 "wakefx-cursor-proj" 磁盘上无对应真实路径 → 直译回退
     assert_eq!(s.meta.project_path, "/wakefx/cursor/proj");
     assert_eq!(s.meta.project_name, "proj");
@@ -482,12 +549,18 @@ fn cursor_parse_contract() {
             (Role::User, MessageKind::Text),
         ]
     );
-    assert_eq!(t.mainline[1].timestamp, Some(ms("2026-08-01T09:30:00+08:00")));
+    assert_eq!(
+        t.mainline[1].timestamp,
+        Some(ms("2026-08-01T09:30:00+08:00"))
+    );
     let a = &t.mainline[2];
     assert_eq!(a.tool_calls.len(), 1);
     assert_eq!(a.tool_calls[0].name, "read_file");
     assert_eq!(a.tool_calls[0].output, None); // transcript 不落盘工具结果
-    assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![1, 2, 3]);
+    assert_eq!(
+        s.units.iter().map(|u| u.seq).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
 }
 
 #[test]
@@ -496,7 +569,9 @@ fn opencode_parse_contract() {
     let adapter = OpencodeAdapter::new();
     let r = db_ref(AgentId::Opencode, &env.opencode_db, "oc-0001");
     let s = adapter.parse_session(&r).expect("opencode parse_session");
-    let t = adapter.parse_transcript(&r).expect("opencode parse_transcript");
+    let t = adapter
+        .parse_transcript(&r)
+        .expect("opencode parse_transcript");
 
     assert_eq!(s.meta.title, "OpenCode 二维码排查"); // session 表自带标题
     assert_eq!(s.meta.project_name, "wakefx");
@@ -517,12 +592,23 @@ fn opencode_parse_contract() {
         ]
     );
     let a = &t.mainline[2];
-    assert!(a.thinking.as_deref().unwrap_or_default().contains("先查 effect 依赖"));
+    assert!(a
+        .thinking
+        .as_deref()
+        .unwrap_or_default()
+        .contains("先查 effect 依赖"));
     assert_eq!(a.tool_calls.len(), 1);
     assert_eq!(a.tool_calls[0].name, "grep");
-    assert!(a.tool_calls[0].output.as_deref().unwrap_or_default().contains("QrScanner"));
+    assert!(a.tool_calls[0]
+        .output
+        .as_deref()
+        .unwrap_or_default()
+        .contains("QrScanner"));
     assert!(!a.tool_calls[0].is_error);
-    assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(
+        s.units.iter().map(|u| u.seq).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
 }
 
 #[test]
@@ -544,12 +630,18 @@ fn kiro_parse_contract() {
 
     assert_eq!(
         roles_kinds(&t.mainline),
-        vec![(Role::User, MessageKind::Text), (Role::Assistant, MessageKind::Text)]
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text)
+        ]
     );
     // jsonl 的 timestamp 是 unix 秒,应换算成 ms
     assert_eq!(t.mainline[0].timestamp, Some(1785744300000));
     assert_eq!(t.mainline[1].timestamp, Some(1785744360000));
-    assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![0, 1]);
+    assert_eq!(
+        s.units.iter().map(|u| u.seq).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
 }
 
 #[test]
@@ -558,14 +650,19 @@ fn gemini_parse_contract() {
     let adapter = GeminiAdapter::new();
     let r = gemini_ref();
     let s = adapter.parse_session(&r).expect("gemini parse_session");
-    let t = adapter.parse_transcript(&r).expect("gemini parse_transcript");
+    let t = adapter
+        .parse_transcript(&r)
+        .expect("gemini parse_transcript");
 
     // $set 是覆盖式快照:只认最后一条,旧快照文本不得出现
     assert_eq!(t.mainline.len(), 2);
     assert!(t.mainline.iter().all(|m| !m.text.contains("旧快照")));
     assert_eq!(
         roles_kinds(&t.mainline),
-        vec![(Role::User, MessageKind::Text), (Role::Assistant, MessageKind::Text)]
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text)
+        ]
     );
 
     // id 取 header 的 sessionId(非文件名 stem)
@@ -578,7 +675,10 @@ fn gemini_parse_contract() {
     assert_eq!(s.meta.updated_at, ms("2026-08-04T12:20:00Z"));
     assert_eq!(s.meta.message_count, 2);
     assert_eq!(s.unknown_line_count, 1);
-    assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![0, 1]);
+    assert_eq!(
+        s.units.iter().map(|u| u.seq).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
 }
 
 #[test]
@@ -597,8 +697,12 @@ fn opencode_v2_parse_contract() {
     assert!(ids.contains("oc-0001"), "仅存于 v1 表的会话应被 UNION 回捞");
 
     let r = db_ref(AgentId::Opencode, &env.opencode_db, "ocv2-0001");
-    let s = adapter.parse_session(&r).expect("opencode v2 parse_session");
-    let t = adapter.parse_transcript(&r).expect("opencode v2 parse_transcript");
+    let s = adapter
+        .parse_session(&r)
+        .expect("opencode v2 parse_session");
+    let t = adapter
+        .parse_transcript(&r)
+        .expect("opencode v2 parse_transcript");
 
     assert_eq!(s.meta.title, "OpenCode v2 greeting");
     assert_eq!(s.meta.model.as_deref(), Some("nemotron-3.5-lightning-free"));
@@ -620,9 +724,16 @@ fn opencode_v2_parse_contract() {
     assert_eq!(t.mainline[0].text, "OpenCode v2 看看二维码组件");
     let a = &t.mainline[2];
     assert_eq!(a.text, "看完了,组件没有泄漏。");
-    assert!(a.thinking.as_deref().unwrap_or_default().contains("扫描组件"));
+    assert!(a
+        .thinking
+        .as_deref()
+        .unwrap_or_default()
+        .contains("扫描组件"));
     assert_eq!(a.model.as_deref(), Some("nemotron-3.5-lightning-free"));
-    assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![0, 2]);
+    assert_eq!(
+        s.units.iter().map(|u| u.seq).collect::<Vec<_>>(),
+        vec![0, 2]
+    );
 
     // 仅存于 v1 表的会话不带 v2 标记(resume 走 v1 二进制)
     let s1 = adapter
@@ -643,7 +754,7 @@ fn pi_parse_contract() {
     let s = adapter.parse_session(&r).expect("pi parse_session");
     let t = adapter.parse_transcript(&r).expect("pi parse_transcript");
 
-    assert_eq!(s.meta.title, "Pi 查一下二维码组件的 useEffect() 清理");
+    assert_eq!(s.meta.title, "Pi QR 排查");
     assert_eq!(s.meta.key, "pi:66666666-aaaa-bbbb-cccc-000000000006");
     // cwd 来自 session 首行,不反推有损编码目录名
     assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx");
@@ -658,23 +769,35 @@ fn pi_parse_contract() {
     // 连续 assistant 行(中间只隔 toolResult)合并成一条
     assert_eq!(
         roles_kinds(&t.mainline),
-        vec![(Role::User, MessageKind::Text), (Role::Assistant, MessageKind::Text)]
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text)
+        ]
     );
     let a = &t.mainline[1];
     assert_eq!(a.text, "找到泄漏点,已补清理回调。");
     assert_eq!(a.tool_calls.len(), 1);
     assert_eq!(a.tool_calls[0].name, "bash");
     // toolResult 是独立 role 行,按 toolCallId 回填
-    assert!(a.tool_calls[0].output.as_deref().unwrap_or_default().contains("QrScanner"));
+    assert!(a.tool_calls[0]
+        .output
+        .as_deref()
+        .unwrap_or_default()
+        .contains("QrScanner"));
     assert!(!a.tool_calls[0].is_error);
-    assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![0, 1]);
+    assert_eq!(
+        s.units.iter().map(|u| u.seq).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
 
     // omp 是 pi 的 fork,同一解析核心,只有 key 前缀不同
     let omp = PiAdapter::omp();
-    let s2 = omp.parse_session(&pi_ref(AgentId::Omp)).expect("omp parse_session");
+    let s2 = omp
+        .parse_session(&pi_ref(AgentId::Omp))
+        .expect("omp parse_session");
     assert_eq!(s2.meta.agent, AgentId::Omp);
     assert_eq!(s2.meta.key, "omp:66666666-aaaa-bbbb-cccc-000000000006");
-    assert_eq!(s2.meta.title, "Pi 查一下二维码组件的 useEffect() 清理");
+    assert_eq!(s2.meta.title, "Pi QR 排查");
 }
 
 #[test]
@@ -685,7 +808,9 @@ fn grok_parse_contract() {
     let path = fixture("grok/sessions/%2FUsers%2Ftester%2FGithub%2Fwakefx/77777777-aaaa-bbbb-cccc-000000000007/updates.jsonl");
     let r = adapter.file_ref(&path).expect("grok file_ref");
     assert_eq!(r.native_id, "77777777-aaaa-bbbb-cccc-000000000007");
-    assert!(adapter.file_ref(&path.with_file_name("chat_history.jsonl")).is_none());
+    assert!(adapter
+        .file_ref(&path.with_file_name("chat_history.jsonl"))
+        .is_none());
 
     let s = adapter.parse_session(&r).expect("grok parse_session");
     let t = adapter.parse_transcript(&r).expect("grok parse_transcript");
@@ -702,19 +827,93 @@ fn grok_parse_contract() {
     // chunk 流按角色段合并:两条 user chunk 拼成一条,thought/message/tool 全并入一条 assistant
     assert_eq!(
         roles_kinds(&t.mainline),
-        vec![(Role::User, MessageKind::Text), (Role::Assistant, MessageKind::Text)]
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text)
+        ]
     );
-    assert_eq!(t.mainline[0].text, "Grok 看看二维码扫描,重点 useEffect() 清理");
+    assert_eq!(
+        t.mainline[0].text,
+        "Grok 看看二维码扫描,重点 useEffect() 清理"
+    );
     assert_eq!(t.mainline[0].timestamp, Some(1786014300000));
     let a = &t.mainline[1];
     assert_eq!(a.text, "已定位泄漏,补了清理回调。");
-    assert!(a.thinking.as_deref().unwrap_or_default().contains("effect 泄漏"));
+    assert!(a
+        .thinking
+        .as_deref()
+        .unwrap_or_default()
+        .contains("effect 泄漏"));
     assert_eq!(a.tool_calls.len(), 1);
     assert_eq!(a.tool_calls[0].name, "Grep");
     // tool_call_update 的 content 文本回填 output;字节数组 rawOutput 不碰
-    assert!(a.tool_calls[0].output.as_deref().unwrap_or_default().contains("found 2 matches"));
+    assert!(a.tool_calls[0]
+        .output
+        .as_deref()
+        .unwrap_or_default()
+        .contains("found 2 matches"));
     assert!(!a.tool_calls[0].is_error);
-    assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![0, 1]);
+    assert_eq!(
+        s.units.iter().map(|u| u.seq).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+}
+
+#[test]
+fn grok_worktree_session_groups_under_parent_project() {
+    setup();
+    let adapter = GrokAdapter::new();
+    let path =
+        fixture("grok/sessions/wt-ephemeral/aaaaaaaa-aaaa-bbbb-cccc-0000000000aa/updates.jsonl");
+    let r = adapter.file_ref(&path).expect("grok worktree file_ref");
+    let s = adapter.parse_session(&r).expect("grok worktree parse");
+    // cwd 是 /var/folders/.../wt-abcd1234-pr-9,但 git_remotes 指向 wakefx.origin.git
+    // → 归进父项目 wakefx,与普通 grok 会话同一分组键
+    assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx");
+    assert_eq!(s.meta.project_name, "wakefx");
+    assert_eq!(
+        s.meta.git_branch.as_deref(),
+        Some("execute-plan/abcd1234-pr-9-feat-example")
+    );
+    assert_eq!(s.meta.title, "Grok worktree review");
+}
+
+#[test]
+fn grok_subagent_groups_under_orchestrator_project() {
+    setup();
+    let home = std::env::var("HOME").expect("HOME");
+    let child_id = "cccccccc-aaaa-bbbb-cccc-0000000000cc";
+    let meta_dir = std::path::Path::new(&home)
+        .join(".grok/sessions/%2FUsers%2Ftester%2FDesktop%2FAI%2FGrok")
+        .join("orch-id")
+        .join("subagents")
+        .join(child_id);
+    fs::create_dir_all(&meta_dir).expect("mkdir parent subagents");
+    fs::write(
+        meta_dir.join("meta.json"),
+        format!(
+            r#"{{"parent_session_id":"orch-id","child_session_id":"{child_id}","subagent_id":"{child_id}"}}"#
+        ),
+    )
+    .expect("write meta.json");
+
+    let adapter = GrokAdapter::new();
+    adapter.begin_scan();
+    let child_key = format!("grok:{child_id}");
+    assert!(
+        adapter
+            .parent_links()
+            .iter()
+            .any(|(c, p)| c == &child_key && p == "grok:orch-id"),
+        "parent_links should include orchestrator edge"
+    );
+    let path =
+        fixture("grok/sessions/wt-parented/cccccccc-aaaa-bbbb-cccc-0000000000cc/updates.jsonl");
+    let r = adapter.file_ref(&path).expect("grok parented file_ref");
+    let s = adapter.parse_session(&r).expect("grok parented parse");
+    // cwd 是临时 wt,无 git_remotes;主会话 subagents/meta 指向 Desktop/AI/Grok
+    assert_eq!(s.meta.project_path, "/Users/tester/Desktop/AI/Grok");
+    assert_eq!(s.meta.project_name, "Grok");
 }
 
 #[test]
@@ -730,7 +929,7 @@ fn kimi_parse_contract() {
     let t = adapter.parse_transcript(&r).expect("kimi parse_transcript");
 
     assert_eq!(s.meta.title, "Kimi QR fix"); // state.json 标题优先
-    // cwd 靠假 HOME 的 session_index.jsonl 反查(目录名 hash 不可反推)
+                                             // cwd 靠假 HOME 的 session_index.jsonl 反查(目录名 hash 不可反推)
     assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx");
     assert_eq!(s.meta.created_at, ms("2026-08-06T12:00:00Z"));
     assert_eq!(s.meta.updated_at, ms("2026-08-06T12:30:00Z"));
@@ -740,11 +939,20 @@ fn kimi_parse_contract() {
 
     assert_eq!(
         roles_kinds(&t.mainline),
-        vec![(Role::User, MessageKind::Text), (Role::Assistant, MessageKind::Text)]
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text)
+        ]
     );
-    assert_eq!(t.mainline[0].text, "Kimi 修一下二维码组件的 useEffect() 内存泄漏");
+    assert_eq!(
+        t.mainline[0].text,
+        "Kimi 修一下二维码组件的 useEffect() 内存泄漏"
+    );
     assert!(t.mainline[1].text.contains("QrScanner"));
-    assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![0, 1]);
+    assert_eq!(
+        s.units.iter().map(|u| u.seq).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
 
     // "New Session" 是占位标题,必须回退首条用户消息
     let placeholder = fs_ref(
@@ -752,7 +960,9 @@ fn kimi_parse_contract() {
         &fixture("kimi/sessions/wd_wakefx_abc123/session_99999999-aaaa-bbbb-cccc-000000000009/agents/main/wire.jsonl"),
         "session_99999999-aaaa-bbbb-cccc-000000000009",
     );
-    let s2 = adapter.parse_session(&placeholder).expect("kimi placeholder parse");
+    let s2 = adapter
+        .parse_session(&placeholder)
+        .expect("kimi placeholder parse");
     assert_eq!(s2.meta.title, "占位标题会话应回退到这句");
 }
 
@@ -767,8 +977,12 @@ fn antigravity_parse_contract() {
     assert_eq!(refs[0].native_id, "ag-0001");
 
     let r = db_ref(AgentId::Antigravity, &env.antigravity_db, "ag-0001");
-    let s = adapter.parse_session(&r).expect("antigravity parse_session");
-    let t = adapter.parse_transcript(&r).expect("antigravity parse_transcript");
+    let s = adapter
+        .parse_session(&r)
+        .expect("antigravity parse_session");
+    let t = adapter
+        .parse_transcript(&r)
+        .expect("antigravity parse_transcript");
 
     assert_eq!(s.meta.title, "QR overlay polish"); // 标题在 preview 列
     assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx"); // file:// URI 解码
@@ -779,7 +993,10 @@ fn antigravity_parse_contract() {
     assert!(s.meta.file_path.ends_with("#ag-0001")); // 虚拟路径
 
     // 正文加密:唯一一条 System 消息承载 preview 与说明,FTS 搜得到 preview
-    assert_eq!(roles_kinds(&t.mainline), vec![(Role::System, MessageKind::Text)]);
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![(Role::System, MessageKind::Text)]
+    );
     assert!(t.mainline[0].text.contains("QR overlay polish"));
     assert!(t.mainline[0].text.contains("encrypted"));
     assert_eq!(s.units.len(), 1);
@@ -792,18 +1009,29 @@ fn antigravity_parse_contract() {
 /// 且 mainline seq 从 0 严格递增(搜索跳转按 seq 定位依赖此契约)。
 fn assert_seq_contract(adapter: &dyn AgentAdapter, r: &SessionFileRef) {
     let tag = r.agent.as_str();
-    let s = adapter.parse_session(r).unwrap_or_else(|e| panic!("[{tag}] parse_session: {e}"));
-    let t = adapter.parse_transcript(r).unwrap_or_else(|e| panic!("[{tag}] parse_transcript: {e}"));
+    let s = adapter
+        .parse_session(r)
+        .unwrap_or_else(|e| panic!("[{tag}] parse_session: {e}"));
+    let t = adapter
+        .parse_transcript(r)
+        .unwrap_or_else(|e| panic!("[{tag}] parse_transcript: {e}"));
 
     assert!(!t.mainline.is_empty(), "[{tag}] mainline 不应为空");
     for (i, m) in t.mainline.iter().enumerate() {
         assert_eq!(m.seq, i as i64, "[{tag}] mainline seq 必须从 0 严格递增");
     }
 
-    assert!(!s.units.is_empty(), "[{tag}] fixture 应产出至少一个 FTS 单元");
+    assert!(
+        !s.units.is_empty(),
+        "[{tag}] fixture 应产出至少一个 FTS 单元"
+    );
     let seqs: HashSet<i64> = t.mainline.iter().map(|m| m.seq).collect();
     for u in &s.units {
-        assert!(seqs.contains(&u.seq), "[{tag}] unit seq {} 在 mainline 中不存在", u.seq);
+        assert!(
+            seqs.contains(&u.seq),
+            "[{tag}] unit seq {} 在 mainline 中不存在",
+            u.seq
+        );
         let m = &t.mainline[u.seq as usize];
         assert_eq!(m.role, u.role, "[{tag}] seq {} 两侧角色不一致", u.seq);
     }
@@ -811,7 +1039,10 @@ fn assert_seq_contract(adapter: &dyn AgentAdapter, r: &SessionFileRef) {
     // 两条解析路径共用核心解析器,meta 关键字段必须一致
     assert_eq!(s.meta.key, t.meta.key, "[{tag}] key 两侧不一致");
     assert_eq!(s.meta.title, t.meta.title, "[{tag}] title 两侧不一致");
-    assert_eq!(s.meta.message_count, t.meta.message_count, "[{tag}] message_count 两侧不一致");
+    assert_eq!(
+        s.meta.message_count, t.meta.message_count,
+        "[{tag}] message_count 两侧不一致"
+    );
 }
 
 #[test]
@@ -820,16 +1051,25 @@ fn seq_contract_holds_for_all_agents() {
     let checks: Vec<(Box<dyn AgentAdapter>, SessionFileRef)> = vec![
         (Box::new(ClaudeAdapter::new()), claude_ref()),
         (Box::new(CodexAdapter::new()), codex_ref()),
-        (Box::new(CopilotAdapter::new()), db_ref(AgentId::Copilot, &env.copilot_db, "cop-0001")),
+        (
+            Box::new(CopilotAdapter::new()),
+            db_ref(AgentId::Copilot, &env.copilot_db, "cop-0001"),
+        ),
         (Box::new(CursorAdapter::new()), cursor_ref()),
-        (Box::new(OpencodeAdapter::new()), db_ref(AgentId::Opencode, &env.opencode_db, "oc-0001")),
+        (
+            Box::new(OpencodeAdapter::new()),
+            db_ref(AgentId::Opencode, &env.opencode_db, "oc-0001"),
+        ),
         (Box::new(KiroAdapter::new()), kiro_ref()),
         (Box::new(GeminiAdapter::new()), gemini_ref()),
         (Box::new(PiAdapter::new()), pi_ref(AgentId::Pi)),
         (Box::new(PiAdapter::omp()), pi_ref(AgentId::Omp)),
         (Box::new(GrokAdapter::new()), grok_ref()),
         (Box::new(KimiAdapter::new()), kimi_ref()),
-        (Box::new(AntigravityAdapter::new()), db_ref(AgentId::Antigravity, &env.antigravity_db, "ag-0001")),
+        (
+            Box::new(AntigravityAdapter::new()),
+            db_ref(AgentId::Antigravity, &env.antigravity_db, "ag-0001"),
+        ),
     ];
     for (adapter, r) in &checks {
         assert_seq_contract(adapter.as_ref(), r);
@@ -867,8 +1107,20 @@ fn merge_quick_meta_default_vs_codex_override() {
 
     // 默认实现(以 Claude 为代表):parsed 为准,quick 只补 source/model/tokens 缺口
     let claude = ClaudeAdapter::new();
-    let parsed = mk_meta(AgentId::ClaudeCode, "claude-code:p", "p", "解析出来的标题", None);
-    let mut quick = mk_meta(AgentId::ClaudeCode, "claude-code:q", "q", "手动改名", Some("state"));
+    let parsed = mk_meta(
+        AgentId::ClaudeCode,
+        "claude-code:p",
+        "p",
+        "解析出来的标题",
+        None,
+    );
+    let mut quick = mk_meta(
+        AgentId::ClaudeCode,
+        "claude-code:q",
+        "q",
+        "手动改名",
+        Some("state"),
+    );
     quick.model = Some("model-q".to_string());
     quick.tokens_used = Some(7);
     let merged = claude.merge_quick_meta(parsed, &quick);
@@ -886,8 +1138,20 @@ fn merge_quick_meta_default_vs_codex_override() {
     // Codex 覆写:state DB 的 title 是用户手动命名,压过解析标题;key/id 以
     // state 的线程 id 为准;source 相反(rollout originator 更精确,quick 只兜底)
     let codex = CodexAdapter::new();
-    let parsed = mk_meta(AgentId::Codex, "codex:file-uuid", "file-uuid", "首条消息推导标题", Some("IDE extension"));
-    let mut quick = mk_meta(AgentId::Codex, "codex:thread-1", "thread-1", "用户手动命名", Some("vscode"));
+    let parsed = mk_meta(
+        AgentId::Codex,
+        "codex:file-uuid",
+        "file-uuid",
+        "首条消息推导标题",
+        Some("IDE extension"),
+    );
+    let mut quick = mk_meta(
+        AgentId::Codex,
+        "codex:thread-1",
+        "thread-1",
+        "用户手动命名",
+        Some("vscode"),
+    );
     quick.model = Some("gpt-5.2".to_string());
     quick.tokens_used = Some(999);
     let merged = codex.merge_quick_meta(parsed, &quick);
@@ -899,15 +1163,33 @@ fn merge_quick_meta_default_vs_codex_override() {
     assert_eq!(merged.tokens_used, Some(999));
 
     // UNTITLED 守卫:quick 的占位标题不得覆盖解析标题,但 key/id 仍取 state
-    let parsed = mk_meta(AgentId::Codex, "codex:file-uuid", "file-uuid", "首条消息推导标题", None);
-    let quick = mk_meta(AgentId::Codex, "codex:thread-1", "thread-1", UNTITLED, Some("vscode"));
+    let parsed = mk_meta(
+        AgentId::Codex,
+        "codex:file-uuid",
+        "file-uuid",
+        "首条消息推导标题",
+        None,
+    );
+    let quick = mk_meta(
+        AgentId::Codex,
+        "codex:thread-1",
+        "thread-1",
+        UNTITLED,
+        Some("vscode"),
+    );
     let merged = codex.merge_quick_meta(parsed, &quick);
     assert_eq!(merged.title, "首条消息推导标题");
     assert_eq!(merged.id, "thread-1");
     assert_eq!(merged.source.as_deref(), Some("vscode")); // parsed 无 source 时兜底
 
     // 空标题同样不覆盖
-    let parsed = mk_meta(AgentId::Codex, "codex:file-uuid", "file-uuid", "首条消息推导标题", None);
+    let parsed = mk_meta(
+        AgentId::Codex,
+        "codex:file-uuid",
+        "file-uuid",
+        "首条消息推导标题",
+        None,
+    );
     let quick = mk_meta(AgentId::Codex, "codex:thread-1", "thread-1", "", None);
     let merged = codex.merge_quick_meta(parsed, &quick);
     assert_eq!(merged.title, "首条消息推导标题");

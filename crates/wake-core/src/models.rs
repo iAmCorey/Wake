@@ -51,7 +51,7 @@ impl AgentId {
             "grok" => Some(AgentId::Grok),
             "kimi" => Some(AgentId::Kimi),
             "antigravity" => Some(AgentId::Antigravity),
-        _ => None,
+            _ => None,
         }
     }
 
@@ -82,30 +82,53 @@ impl AgentId {
             AgentId::ClaudeCode => "brands/claude-code.png",
             AgentId::Codex => "brands/codex.png",
             AgentId::Copilot => {
-                if dark { "brands/copilot.png" } else { "brands/copilot-light.png" }
+                if dark {
+                    "brands/copilot.png"
+                } else {
+                    "brands/copilot-light.png"
+                }
             }
             AgentId::Cursor => {
-                if dark { "brands/cursor.png" } else { "brands/cursor-light.png" }
+                if dark {
+                    "brands/cursor.png"
+                } else {
+                    "brands/cursor-light.png"
+                }
             }
             AgentId::Opencode => {
-                if dark { "brands/opencode.png" } else { "brands/opencode-light.png" }
+                if dark {
+                    "brands/opencode.png"
+                } else {
+                    "brands/opencode-light.png"
+                }
             }
             AgentId::Kiro => "brands/kiro.png",
             AgentId::Gemini => "brands/gemini.png",
             AgentId::Pi => {
-                if dark { "brands/pi.png" } else { "brands/pi-light.png" }
+                if dark {
+                    "brands/pi.png"
+                } else {
+                    "brands/pi-light.png"
+                }
             }
             AgentId::Omp => "brands/omp.png",
             AgentId::Grok => {
-                if dark { "brands/grok.png" } else { "brands/grok-light.png" }
+                if dark {
+                    "brands/grok.png"
+                } else {
+                    "brands/grok-light.png"
+                }
             }
             AgentId::Kimi => {
-                if dark { "brands/kimi.png" } else { "brands/kimi-light.png" }
+                if dark {
+                    "brands/kimi.png"
+                } else {
+                    "brands/kimi-light.png"
+                }
             }
             AgentId::Antigravity => "brands/antigravity.png",
         }
     }
-
 }
 
 /// 会话元数据 —— 列表页/索引库统一模型
@@ -133,6 +156,17 @@ pub struct SessionMeta {
     // app 自有状态(user_data 表)
     pub favorite: bool,
     pub pinned: bool,
+}
+
+/// 会话列表一行:顶层或挂在主会话下的子代理
+#[derive(Debug, Clone)]
+pub struct SessionRow {
+    pub meta: SessionMeta,
+    /// 0 = 顶层,1 = 挂在主会话下
+    pub depth: u8,
+    /// 顶层会话收纳的子代理数;0 表示没有可展开的子级
+    pub child_count: usize,
+    pub expanded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,6 +296,8 @@ pub struct SessionFilter {
     pub ascending: bool,
     pub limit: i64,
     pub offset: i64,
+    /// true = 只返回顶层(父不存在时孩子仍可见);搜索/收藏走扁平
+    pub roots_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

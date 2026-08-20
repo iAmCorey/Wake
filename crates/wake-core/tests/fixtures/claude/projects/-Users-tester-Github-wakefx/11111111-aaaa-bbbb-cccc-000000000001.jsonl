@@ -7,4 +7,5 @@
 {"parentUuid":"u-0003","isSidechain":false,"cwd":"/Users/tester/Github/wakefx","sessionId":"11111111-aaaa-bbbb-cccc-000000000001","type":"assistant","message":{"id":"msg_02","type":"message","role":"assistant","model":"claude-opus-4-1","content":[{"type":"text","text":"已完成:登录页现在支持二维码扫描,useEffect() 里做了清理。"}]},"uuid":"a-0003","timestamp":"2026-08-01T10:01:00.000Z"}
 {"type":"system","subtype":"compact_boundary","content":"Conversation compacted","isMeta":false,"cwd":"/Users/tester/Github/wakefx","sessionId":"11111111-aaaa-bbbb-cccc-000000000001","uuid":"s-0001","timestamp":"2026-08-01T10:02:00.000Z"}
 {"type":"custom-title","customTitle":"QR login revamp","sessionId":"11111111-aaaa-bbbb-cccc-000000000001"}
+{"type":"custom-title","customTitle":"Wrong session","sessionId":"99999999-aaaa-bbbb-cccc-000000000099"}
 {"type":"wibble-experimental","payload":{"note":"unknown line type, must be counted"}}
