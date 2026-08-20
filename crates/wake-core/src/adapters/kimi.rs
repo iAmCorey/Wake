@@ -23,7 +23,7 @@ pub struct KimiAdapter {
 
 impl KimiAdapter {
     pub fn new() -> Self {
-        let home = dirs::home_dir().unwrap_or_default().join(".kimi-code");
+        let home = crate::home_dir().join(".kimi-code");
         Self {
             root: home.join("sessions"),
             index_path: home.join("session_index.jsonl"),

@@ -614,10 +614,15 @@ pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// 索引库路径:~/Library/Application Support/wake/wake.db
+/// 索引库路径:macOS/Linux 的 data_dir 或 Windows 的 LocalAppData 下的 wake/wake.db
 /// (从旧 vibex 路径一次性迁移,保留收藏等 user_data)
 pub fn default_db_path() -> std::path::PathBuf {
-    let data = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let data = if cfg!(windows) {
+        dirs::data_local_dir()
+    } else {
+        dirs::data_dir()
+    }
+    .unwrap_or_else(|| std::path::PathBuf::from("."));
     let dir = data.join("wake");
     let db = dir.join("wake.db");
     if !db.exists() {

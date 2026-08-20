@@ -1,6 +1,8 @@
 use chrono::{Local, TimeZone};
 
-pub fn relative_time(ts: i64) -> String {
+use crate::i18n::{Language, TextKey};
+
+pub fn relative_time(ts: i64, language: Language) -> String {
     if ts <= 0 {
         return String::new();
     }
@@ -8,7 +10,7 @@ pub fn relative_time(ts: i64) -> String {
     let diff = now - ts;
     const MIN: i64 = 60_000;
     if diff < MIN {
-        "now".to_string()
+        language.text(TextKey::Now).to_string()
     } else if diff < 60 * MIN {
         format!("{}m", diff / MIN)
     } else if diff < 24 * 60 * MIN {
@@ -48,7 +50,7 @@ pub fn fmt_tokens(n: Option<i64>) -> String {
 
 /// 会话文件路径的展示形态(详情页路径行):SQLite 虚拟路径剥 `#<id>`、
 /// HOME 缩成 `~`、深路径折叠中段(根目录 + … + 文件名)。
-/// 仅用于展示——Reveal in Finder 仍传原始完整路径。
+/// 仅用于展示——Reveal in Finder/Explorer 仍传原始完整路径。
 pub fn display_file_path(path: &str) -> String {
     // 虚拟路径 <db>#<id>:id 不是路径的一部分,展示到库文件为止
     let p = path
@@ -56,11 +58,13 @@ pub fn display_file_path(path: &str) -> String {
         .filter(|(db, _)| db.ends_with(".db"))
         .map(|(db, _)| db)
         .unwrap_or(path);
-    let tilde = dirs::home_dir()
-        .map(|h| h.to_string_lossy().to_string())
-        .filter(|h| !h.is_empty() && p.starts_with(h.as_str()))
-        .map(|h| format!("~{}", &p[h.len()..]))
-        .unwrap_or_else(|| p.to_string());
+    let normalized = p.replace('\\', "/");
+    let home = wake_core::home_dir().to_string_lossy().replace('\\', "/");
+    let tilde = if !home.is_empty() && normalized.starts_with(home.as_str()) {
+        format!("~{}", &normalized[home.len()..])
+    } else {
+        normalized
+    };
     let parts: Vec<&str> = tilde.split('/').collect();
     match (parts.first(), parts.get(1), parts.last()) {
         // 超过 根/次级/…/文件 四段的深路径折叠中段

@@ -83,7 +83,7 @@ fn setup() -> &'static TestEnv {
         )
         .expect("write kimi session_index");
 
-        std::env::set_var("HOME", home.path());
+        std::env::set_var("WAKE_HOME", home.path());
         TestEnv {
             copilot_db,
             opencode_db,

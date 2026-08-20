@@ -21,7 +21,7 @@ pub struct GeminiAdapter {
 
 impl GeminiAdapter {
     pub fn new() -> Self {
-        let home = dirs::home_dir().unwrap_or_default().join(".gemini");
+        let home = crate::home_dir().join(".gemini");
         Self {
             root: home.join("tmp"),
             projects_json: home.join("projects.json"),

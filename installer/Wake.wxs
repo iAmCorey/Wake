@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Wake"
+    Manufacturer="Wake Project"
+    Version="$(var.Version)"
+    UpgradeCode="9B1D5E56-1A39-4FC4-9D5B-5C3A7EF31F06"
+    Scope="perMachine">
+    <SummaryInformation Description="Wake — AI coding session browser" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Wake is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="WakeIcon" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="WakeIcon" />
+
+    <Feature Id="MainFeature" Title="Wake" Level="1">
+      <ComponentGroupRef Id="WakeComponents" />
+    </Feature>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Wake">
+        <Component Id="WakeExecutable" Guid="*">
+          <File Id="WakeExe" Source="$(var.WakeExe)" KeyPath="yes" Checksum="yes" />
+          <Shortcut
+            Id="StartMenuShortcut"
+            Directory="ApplicationProgramsFolder"
+            Name="Wake"
+            Description="Browse AI coding sessions"
+            WorkingDirectory="INSTALLFOLDER"
+            Advertise="yes" />
+          <Shortcut
+            Id="DesktopShortcut"
+            Directory="DesktopFolder"
+            Name="Wake"
+            Description="Browse AI coding sessions"
+            WorkingDirectory="INSTALLFOLDER"
+            Advertise="yes" />
+          <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
+          <RemoveFolder
+            Id="RemoveApplicationProgramsFolder"
+            Directory="ApplicationProgramsFolder"
+            On="uninstall" />
+          <RegistryValue
+            Root="HKLM"
+            Key="Software\Wake"
+            Name="Installed"
+            Type="integer"
+            Value="1"
+            KeyPath="no" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="Wake" />
+    </StandardDirectory>
+    <StandardDirectory Id="DesktopFolder" />
+
+    <ComponentGroup Id="WakeComponents" Directory="INSTALLFOLDER">
+      <ComponentRef Id="WakeExecutable" />
+    </ComponentGroup>
+  </Package>
+</Wix>

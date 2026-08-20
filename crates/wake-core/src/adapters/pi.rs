@@ -22,8 +22,7 @@ impl PiAdapter {
     pub fn new() -> Self {
         Self {
             agent: AgentId::Pi,
-            root: dirs::home_dir()
-                .unwrap_or_default()
+            root: crate::home_dir()
                 .join(".pi")
                 .join("agent")
                 .join("sessions"),
@@ -34,8 +33,7 @@ impl PiAdapter {
     pub fn omp() -> Self {
         Self {
             agent: AgentId::Omp,
-            root: dirs::home_dir()
-                .unwrap_or_default()
+            root: crate::home_dir()
                 .join(".omp")
                 .join("agent")
                 .join("sessions"),

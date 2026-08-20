@@ -18,7 +18,7 @@ pub struct CodexAdapter {
 
 impl CodexAdapter {
     pub fn new() -> Self {
-        let root = dirs::home_dir().unwrap_or_default().join(".codex");
+        let root = crate::home_dir().join(".codex");
         Self {
             sessions_dir: root.join("sessions"),
             archived_dir: root.join("archived_sessions"),

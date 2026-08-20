@@ -1,14 +1,13 @@
 // ============================================================================
 // DIRECTION CONTRACT (impeccable)
-// THESIS: 找回任何一段 agent 对话只需几秒;界面以 macOS 原生语言隐入背景,
+// THESIS: 找回任何一段 agent 对话只需几秒;界面使用平台原生语言,
 //   拒绝"开发者工具=黑底霓虹终端风"的品类默认。
-// OWN-WORLD: Things/Bear + Claude 客户端基准的原生 macOS 质感——暖白/暖黑双模式、
-//   色差分区(无 hairline 依赖)、8px 圆角胶囊选中态(按钮 6px)、系统蓝 accent、
-//   lucide 单线图标、SF 系统字体 14px 基准;agent 品牌色仅作识别圆点。
+// OWN-WORLD: macOS 的暖色层级与 Windows Fluent 的中性灰层级共用同一信息架构——
+//   色差分区、低噪声选中态、系统 accent、lucide 单线图标和清晰的键盘入口。
 // STORY: 打开即见全部会话按时间流动;左栏收窄范围,中栏定位会话,右栏读全文;
-//   ⌘K 直达任意一句话;一键回到终端继续。
-// FIRST VIEWPORT: 全高三栏——240px 侧栏(全局搜索/全部/收藏/智能体/项目)、
-//   372px 会话列表(22px 上下文标题+双行卡),余宽详情(标题+操作+markdown 正文)。
+//   ⌘K/Ctrl+K 直达任意一句话;一键回到终端继续。
+// FIRST VIEWPORT: 全高三栏——平台自适应侧栏(全局搜索/全部/收藏/智能体/项目)、
+//   会话列表(上下文标题+双行卡),余宽详情(标题+操作+markdown 正文)。
 // FORM: brief-pinned canon(用户指定"现代 macOS 设计规范",对标 Things/Bear);
 //   concept tournament 依规跳过,canon at full fidelity。
 // FINISH: unreviewed and undocumented is unfinished; this build ends with the
@@ -46,11 +45,12 @@ use wake_core::watcher::{start_watcher, SessionWatcher};
 
 use crate::ui::*;
 use crate::format::{abs_date, display_file_path, fmt_tokens, one_line, relative_time};
+use crate::i18n::{Language, TextKey};
 
 actions!(wake, [ToggleSearch, RefreshSessions, PaletteUp, PaletteDown]);
 
 pub const KEY_CONTEXT: &str = "Workbench";
-/// ⌘K 面板容器的 key context(main.rs 的 ↑↓ 绑定与 dialog 元素共用)
+/// ⌘K/Ctrl+K 面板容器的 key context(main.rs 的 ↑↓ 绑定与 dialog 元素共用)
 pub const PALETTE_CONTEXT: &str = "WakePalette";
 /// ⌘K 面板内容总高(输入行 + 结果列表 + footer);列表 flex_1 吃剩余空间
 const PALETTE_HEIGHT: Pixels = px(492.);
@@ -94,6 +94,7 @@ impl ScanEvents for ChannelEvents {
 
 pub struct SessionsDelegate {
     pub sessions: Vec<SessionMeta>,
+    pub language: Language,
 }
 
 impl ListDelegate for SessionsDelegate {
@@ -155,7 +156,7 @@ impl ListDelegate for SessionsDelegate {
                             .child(img(s.agent.brand_icon(theme.mode.is_dark())).size(px(15.)).flex_shrink_0())
                             .child(badge(s.project_name.clone(), theme.muted, theme.muted_foreground))
                             .child(div().flex_1())
-                            .child(div().flex_shrink_0().child(relative_time(s.updated_at))),
+                            .child(div().flex_shrink_0().child(relative_time(s.updated_at, self.language))),
                     ),
             ),
         )
@@ -176,6 +177,7 @@ impl ListDelegate for SessionsDelegate {
 pub struct SearchDelegate {
     pub hits: Vec<SearchHit>,
     pub degraded: bool,
+    pub language: Language,
     store: Arc<Store>,
     last_query: String,
 }
@@ -231,7 +233,7 @@ impl ListDelegate for SearchDelegate {
                                     .child(format!(
                                         "{} · {}",
                                         h.session.project_name,
-                                        relative_time(h.timestamp.unwrap_or(0))
+                                         relative_time(h.timestamp.unwrap_or(0), self.language)
                                     )),
                             ),
                     )
@@ -290,6 +292,7 @@ impl ListDelegate for SearchDelegate {
         cx: &mut Context<ListState<Self>>,
     ) -> impl IntoElement {
         let theme = cx.theme();
+        let language = self.language;
         if self.last_query.trim().is_empty() {
             return v_flex()
                 .h(px(250.))
@@ -299,8 +302,8 @@ impl ListDelegate for SearchDelegate {
                     "icons/search.svg",
                     px(48.),
                     px(22.),
-                    "Search full conversation text",
-                    "Matches natural language and code, like \"useEffect(\".",
+                    language.text(TextKey::SearchFullConversation),
+                    language.text(TextKey::SearchMatchesHint),
                     cx,
                 ));
         }
@@ -316,12 +319,16 @@ impl ListDelegate for SearchDelegate {
                 div()
                     .text_size(FONT_BODY)
                     .font_medium()
-                    .child(format!("No results for \"{}\"", self.last_query)),
+                    .child(format!(
+                        "{} \"{}\"",
+                        language.text(TextKey::NoResultsFor),
+                        self.last_query
+                    )),
             )
             .child(
                 div()
                     .text_size(FONT_CAPTION)
-                    .child("Try a different or shorter query."),
+                    .child(language.text(TextKey::TryDifferentQuery)),
             )
     }
 
@@ -340,7 +347,7 @@ impl ListDelegate for SearchDelegate {
                 .pb_1()
                 .text_size(FONT_LABEL)
                 .text_color(cx.theme().muted_foreground)
-                .child("Short query — using fallback search. Longer keywords are faster."),
+                .child(self.language.text(TextKey::ShortQueryFallback)),
         )
     }
 }
@@ -366,6 +373,7 @@ pub struct Workbench {
     focus_handle: FocusHandle,
     store: Arc<Store>,
     adapters: Arc<Vec<Box<dyn AgentAdapter>>>,
+    language: Language,
 
     selected_agent: Option<AgentId>,
     selected_project: Option<String>,
@@ -412,6 +420,7 @@ pub struct Workbench {
 
 impl Workbench {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let language = Language::from_env();
         let db_path = wake_core::db::default_db_path();
         // 库损坏时降级重建而不是崩掉:GUI 秒退什么都不告诉用户,他们也无从知道
         // 删掉那个文件就能自愈。重建也失败说明是目录权限/磁盘问题,那才没救——
@@ -433,6 +442,7 @@ impl Workbench {
             ListState::new(
                 SessionsDelegate {
                     sessions: Vec::new(),
+                    language,
                 },
                 window,
                 cx,
@@ -444,6 +454,7 @@ impl Workbench {
                 SearchDelegate {
                     hits: Vec::new(),
                     degraded: false,
+                    language,
                     store: store.clone(),
                     last_query: String::new(),
                 },
@@ -453,7 +464,7 @@ impl Workbench {
             .searchable(false)
         });
         let palette_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Search everything \u{2014} prose or code")
+            InputState::new(window, cx).placeholder(language.text(TextKey::SearchEverything))
         });
 
         // 后台:全量扫描线程 + 文件监听
@@ -485,6 +496,7 @@ impl Workbench {
             focus_handle: cx.focus_handle(),
             store,
             adapters,
+            language,
             selected_agent: None,
             selected_project: None,
             sort_key: SortKey::Updated,
@@ -604,15 +616,20 @@ impl Workbench {
         );
 
         let shared_progress = self.refresh_progress.clone();
+        let language = self.language;
         window.open_dialog(cx, move |dialog, _window, cx| {
             let progress = shared_progress.get();
             let theme = cx.theme();
             let (pct, note) = match progress {
                 Some((done, total)) if total > 0 => (
                     ((done as f32 / total as f32) * 100.).max(3.),
-                    format!("{done} of {total} sessions"),
+                    if language == Language::English {
+                        format!("{done} of {total} sessions")
+                    } else {
+                        format!("{done}/{total} {}", language.text(TextKey::Sessions))
+                    },
                 ),
-                _ => (3., "Looking for sessions…".to_string()),
+                _ => (3., language.text(TextKey::LookingForSessions).to_string()),
             };
             dialog
                 .w(px(380.))
@@ -631,7 +648,7 @@ impl Workbench {
                                         .text_size(FONT_HEADING)
                                         .font_semibold()
                                         .text_color(theme.foreground)
-                                        .child("Refreshing sessions"),
+                                         .child(language.text(TextKey::RefreshingSessions)),
                                 ),
                         )
                         .child(Progress::new().value(pct))
@@ -656,9 +673,13 @@ impl Workbench {
                 if !p.scanning && self.refreshing {
                     self.refreshing = false;
                     window.close_dialog(cx);
+                    let language = self.language;
                     let note = match &p.error {
-                        None => Notification::success("Sessions refreshed"),
-                        Some(err) => Notification::error(format!("Refresh failed: {err}")),
+                        None => Notification::success(language.text(TextKey::SessionsRefreshed)),
+                        Some(err) => Notification::error(format!(
+                            "{}: {err}",
+                            language.text(TextKey::RefreshFailed)
+                        )),
                     };
                     window.push_notification(note, cx);
                 }
@@ -710,6 +731,24 @@ impl Workbench {
         }
     }
 
+    fn toggle_language(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.language = self.language.toggle();
+        let language = self.language;
+        gpui_component::set_locale(language.code());
+        self.list_state.update(cx, |state, cx| {
+            state.delegate_mut().language = language;
+            cx.notify();
+        });
+        self.palette_list.update(cx, |state, cx| {
+            state.delegate_mut().language = language;
+            cx.notify();
+        });
+        self.palette_input.update(cx, |state, cx| {
+            state.set_placeholder(language.text(TextKey::SearchEverything), window, cx);
+        });
+        cx.notify();
+    }
+
     pub fn toggle_search(
         &mut self,
         _: &ToggleSearch,
@@ -726,6 +765,7 @@ impl Workbench {
         let list = self.palette_list.clone();
         let input = self.palette_input.clone();
         let this = cx.entity();
+        let language = self.language;
         window.open_dialog(cx, move |dialog, window, cx| {
             let theme = cx.theme();
             let has_query = input.read(cx).text().len() > 0;
@@ -827,14 +867,20 @@ impl Workbench {
                                 .justify_between()
                                 .text_size(FONT_LABEL)
                                 .text_color(theme.muted_foreground)
-                                .child("Scope: all sessions")
-                                .child(
-                                    h_flex()
-                                        .gap_3()
-                                        .child("\u{2191}\u{2193} navigate")
-                                        .child("\u{21a9} open")
-                                        .child("esc close"),
-                                ),
+                                 .child(language.text(TextKey::ScopeAllSessions))
+                                 .child(
+                                     h_flex()
+                                         .gap_3()
+                                         .child(format!(
+                                             "\u{2191}\u{2193} {}",
+                                             language.text(TextKey::Navigate)
+                                         ))
+                                         .child(format!(
+                                             "\u{21a9} {}",
+                                             language.text(TextKey::Open)
+                                         ))
+                                         .child(language.text(TextKey::EscClose)),
+                                 ),
                         ),
                 )
         });
@@ -1087,11 +1133,20 @@ impl Workbench {
         cx.notify(); // split 按钮左段立即切到本次选择
         let meta = detail.meta.clone();
         let task = cx.background_spawn(async move { terminal::resume_session_in(&meta, term) });
-        Self::notify_when_done(window, cx, task, |outcome| {
+        let language = self.language;
+        Self::notify_when_done(window, cx, task, move |outcome| {
             if outcome.ok {
-                Notification::success(format!("Opened in terminal: {}", outcome.command))
+                Notification::success(format!(
+                    "{}: {}",
+                    language.text(TextKey::OpenedInTerminal),
+                    outcome.command
+                ))
             } else {
-                Notification::error(outcome.error.unwrap_or_else(|| "Resume failed".into()))
+                Notification::error(
+                    outcome
+                        .error
+                        .unwrap_or_else(|| language.text(TextKey::ResumeFailed).into()),
+                )
             }
         });
     }
@@ -1137,9 +1192,14 @@ impl Workbench {
             std::fs::write(&path, md).ok()?;
             Some(path)
         });
-        Self::notify_when_done(window, cx, task, |path| match path {
-            Some(p) => Notification::success(format!("Exported to {}", p.display())),
-            None => Notification::error("Export failed"),
+        let language = self.language;
+        Self::notify_when_done(window, cx, task, move |path| match path {
+            Some(p) => Notification::success(format!(
+                "{} {}",
+                language.text(TextKey::ExportedTo),
+                p.display()
+            )),
+            None => Notification::error(language.text(TextKey::ExportFailed)),
         });
     }
 
@@ -1166,12 +1226,19 @@ impl Workbench {
                     if this.detail.as_ref().is_some_and(|d| d.meta.key == key) {
                         this.detail = None;
                     }
-                    window.push_notification(Notification::success("Session moved to Trash"), cx);
+                    let moved_label = if cfg!(windows) {
+                        this.language.text(TextKey::SessionMovedToRecycleBin)
+                    } else {
+                        this.language.text(TextKey::SessionMovedToTrash)
+                    };
+                    window.push_notification(Notification::success(moved_label), cx);
                     // 立刻把它从列表摘掉,不等 watcher 那 800ms 去抖
                     this.refresh(window, cx);
                 }
-                Err(e) => window
-                    .push_notification(Notification::error(format!("Delete failed: {e}")), cx),
+                Err(e) => window.push_notification(
+                    Notification::error(format!("{}: {e}", this.language.text(TextKey::DeleteFailed))),
+                    cx,
+                ),
             })
             .ok();
         })
@@ -1189,19 +1256,28 @@ impl Workbench {
             .map(|a| a.session_paths(&meta))
             .unwrap_or_else(|| vec![meta.file_path.clone()]);
         let entity = cx.entity();
+        let language = self.language;
         window.open_dialog(cx, move |dialog, _window, cx| {
             let meta = meta.clone();
             let targets = targets.clone();
             let entity = entity.clone();
             let theme = cx.theme();
             dialog
-                .title(div().font_semibold().child("Delete this session?"))
+                .title(
+                    div()
+                        .font_semibold()
+                        .child(language.text(TextKey::DeleteConfirmTitle)),
+                )
                 .w(px(440.))
                 .child(
                     v_flex()
                         .gap_2()
                         .text_size(FONT_BODY)
-                        .child("The session file will be moved to Trash. You can restore it anytime:")
+                        .child(if cfg!(windows) {
+                            language.text(TextKey::DeleteConfirmRecycleBin)
+                        } else {
+                            language.text(TextKey::DeleteConfirmTrash)
+                        })
                         .child(
                             div()
                                 .px_2()
@@ -1217,7 +1293,7 @@ impl Workbench {
                                 div()
                                     .text_size(FONT_CAPTION)
                                     .text_color(theme.muted_foreground)
-                                    .child("Only the local file is removed — Codex's own records stay intact."),
+                                    .child(language.text(TextKey::CodexRecords)),
                             )
                         }),
                 )
@@ -1232,7 +1308,7 @@ impl Workbench {
 
     fn context_title(&self) -> String {
         if self.favorite_only {
-            return "Starred".to_string();
+            return self.language.text(TextKey::Starred).to_string();
         }
         if let Some(p) = &self.selected_project {
             // 项目显示名以侧栏列表(store 的 ProjectInfo)为准,不再重推
@@ -1241,10 +1317,10 @@ impl Workbench {
                 .iter()
                 .find(|info| info.path == *p)
                 .map(|info| info.name.clone())
-                .unwrap_or_else(|| "Projects".to_string());
+                .unwrap_or_else(|| self.language.text(TextKey::Projects).to_string());
         }
         match self.selected_agent {
-            None => "All Sessions".to_string(),
+            None => self.language.text(TextKey::AllSessions).to_string(),
             Some(one) => one.display_name().to_string(),
         }
     }
@@ -1253,6 +1329,7 @@ impl Workbench {
 
     fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let language = self.language;
         let all_active = self.selected_agent.is_none()
             && self.selected_project.is_none()
             && !self.favorite_only;
@@ -1260,11 +1337,19 @@ impl Workbench {
         // 文案在此按 scan 现算,不另存字段——存下来就会有第二个写入点要维护
         let note = if self.scan.scanning {
             Some(match self.scan.total {
-                0 => "Refreshing…".to_string(),
-                total => format!("Refreshing {}/{}", self.scan.done, total),
+                0 => language.text(TextKey::Refreshing).to_string(),
+                total => format!(
+                    "{} {}/{}",
+                    language.text(TextKey::Refreshing),
+                    self.scan.done,
+                    total
+                ),
             })
         } else {
-            self.scan.error.as_ref().map(|e| format!("Refresh failed: {e}"))
+            self.scan
+                .error
+                .as_ref()
+                .map(|e| format!("{}: {e}", language.text(TextKey::RefreshFailed)))
         };
         let status: Option<AnyElement> = if let Some(note) = note {
             Some(
@@ -1283,7 +1368,12 @@ impl Workbench {
                     .gap(SPACE_SM)
                     .text_color(theme.muted_foreground)
                     .child(div().size(px(7.)).rounded_full().flex_shrink_0().bg(theme.warning))
-                    .child(div().min_w_0().truncate().child("Live updates off"))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(language.text(TextKey::LiveUpdatesOff)),
+                    )
                     .into_any_element(),
             )
         } else {
@@ -1291,12 +1381,16 @@ impl Workbench {
         };
 
         v_flex()
-            .w(px(224.))
+            .w(SIDEBAR_WIDTH)
             .h_full()
             .flex_shrink_0()
             .bg(theme.sidebar)
-            // 压平 titlebar 靠 theme.rs 的 title_bar/title_bar_border token,不再叠加覆写
-            .child(TitleBar::new())
+            .when(cfg!(target_os = "windows"), |this| {
+                this.border_r_1().border_color(theme.sidebar_border)
+            })
+            // macOS 需要自绘交通灯标题栏；Windows 使用系统标题栏，避免在内容区
+            // 再渲染一条重复的窗口控制栏。
+            .when(cfg!(target_os = "macos"), |this| this.child(TitleBar::new()))
             .child(
                 div()
                     .flex_shrink_0()
@@ -1304,13 +1398,28 @@ impl Workbench {
                     .pt(SPACE_SM)
                     .pb(SPACE_MD)
                     .child(
-                        div()
+                        h_flex()
+                            .justify_between()
                             .pl(TITLE_INSET)
                             .pr(SIDEBAR_EDGE)
-                            .text_size(FONT_HEADING)
-                            .font_semibold()
-                            .text_color(theme.foreground)
-                            .child("Wake"),
+                            .child(
+                                div()
+                                    .text_size(FONT_HEADING)
+                                    .font_semibold()
+                                    .text_color(theme.foreground)
+                                    .child("Wake"),
+                            )
+                            .child(
+                                Button::new("language")
+                                    .ghost()
+                                    .small()
+                                    .rounded(theme.radius)
+                                    .label(language.switch_label())
+                                    .tooltip(language.text(TextKey::ToggleLanguage))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.toggle_language(window, cx);
+                                    })),
+                            ),
                     ),
             )
             .child(
@@ -1349,13 +1458,17 @@ impl Workbench {
                                 // flex_1 + min_w_0 + truncate:空间不足时压这里,
                                 // 绝不把右侧刷新按钮挤出侧栏
                                 .child(
-                                    div().flex_1().min_w_0().truncate().child("Search sessions"),
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .child(language.text(TextKey::SearchSessions)),
                                 )
                                 .child(
                                     div()
                                         .flex_shrink_0()
                                         .text_size(FONT_LABEL)
-                                        .child("⌘K"),
+                                        .child(SEARCH_SHORTCUT),
                                 ),
                         )
                         .child({
@@ -1403,7 +1516,7 @@ impl Workbench {
                     .child(sidebar_row(
                         "all",
                         RowLead::Icon(icon("icons/layers.svg")),
-                        "All Sessions",
+                        language.text(TextKey::AllSessions),
                         Some(self.agent_counts.iter().map(|(_, n)| n).sum()),
                         all_active,
                         RowLevel::Primary,
@@ -1415,7 +1528,7 @@ impl Workbench {
                     .child(sidebar_row(
                         "fav",
                         RowLead::Icon(icon("icons/star.svg")),
-                        "Starred",
+                        language.text(TextKey::Starred),
                         if self.starred_count > 0 { Some(self.starred_count) } else { None },
                         self.favorite_only,
                         RowLevel::Primary,
@@ -1442,7 +1555,7 @@ impl Workbench {
                     .gap_1()
                     .child(group_header(
                         "agents-header",
-                        "Agents",
+                        language.text(TextKey::Agents),
                         self.agents_collapsed,
                         cx.listener(|this, _, _window, cx| {
                             this.agents_collapsed = !this.agents_collapsed;
@@ -1476,7 +1589,7 @@ impl Workbench {
                     })
                     .child(group_header(
                         "projects-header",
-                        "Projects",
+                        language.text(TextKey::Projects),
                         self.projects_collapsed,
                         cx.listener(|this, _, _window, cx| {
                             this.projects_collapsed = !this.projects_collapsed;
@@ -1531,19 +1644,24 @@ impl Workbench {
         let sort_key = self.sort_key;
         let sort_ascending = self.sort_ascending;
         let sort_entity = cx.entity();
+        let language = self.language;
         let sort_label = match sort_key {
-            SortKey::Updated => "Date updated",
-            SortKey::Created => "Date created",
-            SortKey::Messages => "Message count",
+            SortKey::Updated => language.text(TextKey::DateUpdated),
+            SortKey::Created => language.text(TextKey::DateCreated),
+            SortKey::Messages => language.text(TextKey::MessageCount),
         };
         // ghost + 当前排序文案(outline/muted 胶囊都试过,用户定的 ghost)
         let sort_menu = Button::new("sort-sessions")
             .ghost()
             .small()
-            .rounded(px(6.))
+            .rounded(if cfg!(target_os = "windows") {
+                theme.radius
+            } else {
+                px(6.)
+            })
             .icon(icon("icons/arrow-up-down.svg").with_size(px(13.)))
             .label(sort_label)
-            .tooltip("Sort sessions")
+            .tooltip(language.text(TextKey::SortSessions))
             .dropdown_menu(move |menu, _, _| {
                 let mk_key = |label: &'static str, key: SortKey| {
                     let entity = sort_entity.clone();
@@ -1568,24 +1686,29 @@ impl Workbench {
                         })
                 };
                 menu.min_w(px(180.))
-                    .item(mk_key("Date updated", SortKey::Updated))
-                    .item(mk_key("Date created", SortKey::Created))
-                    .item(mk_key("Message count", SortKey::Messages))
+                    .item(mk_key(language.text(TextKey::DateUpdated), SortKey::Updated))
+                    .item(mk_key(language.text(TextKey::DateCreated), SortKey::Created))
+                    .item(mk_key(language.text(TextKey::MessageCount), SortKey::Messages))
                     .separator()
-                    .item(mk_dir("Descending", false))
-                    .item(mk_dir("Ascending", true))
+                    .item(mk_dir(language.text(TextKey::Descending), false))
+                    .item(mk_dir(language.text(TextKey::Ascending), true))
             })
             .anchor(Corner::TopRight);
         v_flex()
-            .w(px(336.))
+            .w(LIST_WIDTH)
             .h_full()
             .flex_shrink_0()
             .bg(theme.list)
+            .when(cfg!(target_os = "windows"), |this| {
+                this.border_r_1().border_color(theme.border)
+            })
             .child(
                 v_flex()
                     .id("list-header")
                     .flex_shrink_0()
-                    .window_control_area(WindowControlArea::Drag)
+                    .when(!cfg!(target_os = "windows"), |this| {
+                        this.window_control_area(WindowControlArea::Drag)
+                    })
                     .px(SPACE_LG)
                     .pt(SPACE_XL)
                     .pb(SPACE_MD)
@@ -1610,8 +1733,8 @@ impl Workbench {
                         "icons/inbox.svg",
                         px(48.),
                         px(22.),
-                        "No matching sessions",
-                        "Try different filters or clear the query",
+                        language.text(TextKey::NoMatchingSessions),
+                        language.text(TextKey::TryDifferentFilters),
                         cx,
                     ))
                     .into_any_element()
@@ -1646,7 +1769,7 @@ impl Workbench {
         let is_jump_target = jump_seq == Some(m.seq);
 
         let inner: AnyElement = if m.kind == MessageKind::CompactSummary {
-            centered_pill("Context compacted", cx).into_any_element()
+            centered_pill(self.language.text(TextKey::ContextCompacted), cx).into_any_element()
         } else {
             match m.role {
                 Role::User => h_flex()
@@ -1687,7 +1810,11 @@ impl Workbench {
                                 .italic()
                                 .text_color(muted_fg)
                                 .truncate()
-                                .child(format!("Thinking · {}", one_line(th, 200))),
+                                 .child(format!(
+                                     "{} · {}",
+                                     self.language.text(TextKey::Thinking),
+                                     one_line(th, 200)
+                                 )),
                         );
                     }
                     if !m.text.is_empty() {
@@ -1714,6 +1841,7 @@ impl Workbench {
                             ix,
                             &m.tool_calls,
                             expanded,
+                            self.language,
                             cx.listener(move |this, _, _window, cx| {
                                 if let Some(detail) = &mut this.detail {
                                     if !detail.expanded_rows.insert(ix) {
@@ -1765,7 +1893,16 @@ impl Workbench {
 
     fn render_detail(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
+        let language = self.language;
         let Some(detail) = &self.detail else {
+            let pick_hint = if language == Language::Chinese {
+                format!("{} {SEARCH_SHORTCUT} 搜索。", language.text(TextKey::PickSession))
+            } else {
+                format!(
+                    "{} {SEARCH_SHORTCUT} to search.",
+                    language.text(TextKey::PickSession)
+                )
+            };
             return v_flex()
                 .flex_1()
                 .h_full()
@@ -1783,8 +1920,8 @@ impl Workbench {
                             "icons/message-square.svg",
                             px(58.),
                             px(26.),
-                            "No session selected",
-                            "Pick one from the list, or press ⌘K to search.",
+                            language.text(TextKey::NoSessionSelected),
+                            pick_hint,
                             cx,
                         )),
                 )
@@ -1797,7 +1934,11 @@ impl Workbench {
         let delete_entity = export_entity.clone();
         let more_menu = Button::new("more-actions")
             .ghost()
-            .rounded(px(6.))
+            .rounded(if cfg!(target_os = "windows") {
+                theme.radius
+            } else {
+                px(6.)
+            })
             .icon(icon("icons/more-horizontal.svg").with_size(px(16.)))
             .dropdown_menu(move |menu, _, _| {
                 let export_entity = export_entity.clone();
@@ -1805,7 +1946,7 @@ impl Workbench {
                 let delete_entity = delete_entity.clone();
                 menu.min_w(px(210.))
                     .item(
-                        PopupMenuItem::new(" Export as Markdown")
+                        PopupMenuItem::new(format!(" {}", language.text(TextKey::ExportMarkdown)))
                             .icon(icon("icons/download.svg").with_size(px(15.)))
                             .on_click(move |_, window, cx| {
                                 export_entity.update(cx, |this, cx| {
@@ -1814,7 +1955,11 @@ impl Workbench {
                             }),
                     )
                     .item(
-                        PopupMenuItem::new(" Reveal in Finder")
+                        PopupMenuItem::new(if cfg!(windows) {
+                            format!(" {}", language.text(TextKey::RevealInExplorer))
+                        } else {
+                            format!(" {}", language.text(TextKey::RevealInFinder))
+                        })
                             .icon(icon("icons/folder.svg").with_size(px(15.)))
                             .on_click(move |_, _, cx| {
                                 reveal_entity.update(cx, |this, _| {
@@ -1825,7 +1970,7 @@ impl Workbench {
                             }),
                     )
                     .item(
-                        PopupMenuItem::new(" Copy Session ID")
+                        PopupMenuItem::new(format!(" {}", language.text(TextKey::CopySessionId)))
                             .icon(icon("icons/copy.svg").with_size(px(15.)))
                             .on_click({
                                 let id = session_id.clone();
@@ -1836,7 +1981,11 @@ impl Workbench {
                     )
                     .separator()
                     .item(
-                        PopupMenuItem::new(" Move to Trash")
+                        PopupMenuItem::new(if cfg!(windows) {
+                            format!(" {}", language.text(TextKey::MoveToRecycleBin))
+                        } else {
+                            format!(" {}", language.text(TextKey::MoveToTrash))
+                        })
                             .icon(icon("icons/trash-2.svg").with_size(px(15.)))
                             .on_click(move |_, window, cx| {
                                 delete_entity.update(cx, |this, cx| {
@@ -1856,7 +2005,9 @@ impl Workbench {
                 v_flex()
                     .id("detail-header")
                     .flex_shrink_0()
-                    .window_control_area(WindowControlArea::Drag)
+                    .when(!cfg!(target_os = "windows"), |this| {
+                        this.window_control_area(WindowControlArea::Drag)
+                    })
                     .px(SPACE_LG)
                     .pt(SPACE_XL)
                     .pb(SPACE_MD)
@@ -1916,8 +2067,8 @@ impl Workbench {
                                         // 无常显分隔线,hover 分段高亮暗示两段(Codex 同款);
                                         // 右段 Button 用 custom variant 与左段 hover 完全一致
                                         h_flex()
-                                            .h(px(28.))
-                                            .rounded(px(6.))
+                                            .h(TOOLBAR_HEIGHT)
+                                            .rounded(theme.radius)
                                             .border_1()
                                             .border_color(theme.border)
                                             .bg(theme.secondary)
@@ -1963,13 +2114,13 @@ impl Workbench {
                                                             .active(theme.secondary_active),
                                                     )
                                                     .rounded(px(0.))
-                                                    .h(px(26.))
-                                                    .w(px(22.))
+                                                     .h(TOOLBAR_HEIGHT)
+                                                     .w(px(28.))
                                                     .icon(
                                                         icon("icons/chevron-down.svg")
                                                             .with_size(px(12.)),
                                                     )
-                                                    .tooltip("Open this session in…")
+                                                     .tooltip(language.text(TextKey::OpenSessionIn))
                                                     .dropdown_menu(move |menu, _, _| {
                                                         let mut menu = menu.min_w(px(170.));
                                                         for (term, icon_path) in term_items.clone() {
@@ -2006,10 +2157,10 @@ impl Workbench {
                                         "icons/star.svg",
                                         "icons/star-filled.svg",
                                         rgb(crate::theme::STAR_YELLOW).into(),
-                                        if meta.favorite {
-                                            "Unstar"
+                                            if meta.favorite {
+                                            language.text(TextKey::Unstar)
                                         } else {
-                                            "Star"
+                                            language.text(TextKey::Star)
                                         },
                                         meta.favorite,
                                         cx.listener(|this, _, window, cx| {
@@ -2022,9 +2173,9 @@ impl Workbench {
                                         "icons/pin-filled.svg",
                                         theme.primary,
                                         if meta.pinned {
-                                            "Unpin"
+                                            language.text(TextKey::Unpin)
                                         } else {
-                                            "Pin"
+                                            language.text(TextKey::Pin)
                                         },
                                         meta.pinned,
                                         cx.listener(|this, _, window, cx| {
@@ -2042,7 +2193,7 @@ impl Workbench {
                             .child(icon("icons/folder.svg").with_size(px(12.)).flex_shrink_0())
                             .child(div().min_w_0().truncate().child(
                                 if meta.project_path.is_empty() {
-                                    "Unknown project".to_string()
+                                    language.text(TextKey::UnknownProject).to_string()
                                 } else {
                                     meta.project_path.clone()
                                 },
@@ -2052,10 +2203,18 @@ impl Workbench {
                         // 属性行:model / source outline badge + 统计;空值自动省略
                         let mut stats: Vec<String> = Vec::new();
                         if meta.message_count > 0 {
-                            stats.push(format!("{} messages", meta.message_count));
+                            stats.push(format!(
+                                "{} {}",
+                                meta.message_count,
+                                language.text(TextKey::Messages)
+                            ));
                         }
                         if let Some(tokens) = meta.tokens_used {
-                            stats.push(format!("{} tokens", fmt_tokens(Some(tokens))));
+                            stats.push(format!(
+                                "{} {}",
+                                fmt_tokens(Some(tokens)),
+                                language.text(TextKey::Tokens)
+                            ));
                         }
                         h_flex()
                             .gap_2()
@@ -2086,10 +2245,18 @@ impl Workbench {
                         // 时间行:创建 / 最后活动,精确时间
                         let mut times: Vec<String> = Vec::new();
                         if meta.created_at > 0 {
-                            times.push(format!("Created {}", abs_date(meta.created_at)));
+                            times.push(format!(
+                                "{} {}",
+                                language.text(TextKey::Created),
+                                abs_date(meta.created_at)
+                            ));
                         }
                         if meta.updated_at > 0 {
-                            times.push(format!("Updated {}", abs_date(meta.updated_at)));
+                            times.push(format!(
+                                "{} {}",
+                                language.text(TextKey::Updated),
+                                abs_date(meta.updated_at)
+                            ));
                         }
                         div()
                             .text_size(FONT_LABEL)
@@ -2123,7 +2290,11 @@ impl Workbench {
                     .gap_2()
                     .text_color(theme.muted_foreground)
                     .child(Spinner::new().small())
-                    .child(div().text_size(FONT_BODY).child("Loading session…"))
+                    .child(
+                        div()
+                            .text_size(FONT_BODY)
+                            .child(language.text(TextKey::LoadingSession)),
+                    )
                     .into_any_element()
             } else {
                 let entity = cx.entity().downgrade();
@@ -2276,6 +2447,7 @@ fn tool_cluster(
     ix: usize,
     calls: &[ToolCallView],
     expanded: bool,
+    language: Language,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> Div {
@@ -2289,7 +2461,7 @@ fn tool_cluster(
     let head_label = if calls.len() == 1 {
         names.clone()
     } else {
-        format!("{} tools · {}", calls.len(), names)
+        language.tools_summary(calls.len(), &names)
     };
     let mono = theme.mono_font_family.clone();
 
@@ -2317,7 +2489,7 @@ fn tool_cluster(
                     div()
                         .flex_shrink_0()
                         .text_color(theme.danger)
-                        .child(format!("{failed} failed")),
+                        .child(language.failed_count(failed)),
                 )
             })
             .on_click(on_toggle),
@@ -2443,6 +2615,10 @@ fn sidebar_row(
         .when(active, |s| {
             s.bg(theme.sidebar_accent)
                 .text_color(theme.sidebar_accent_foreground)
+                // Fluent 侧栏用左侧 accent 指示当前范围，减少大面积胶囊底色。
+                .when(cfg!(target_os = "windows"), |s| {
+                    s.border_l_2().border_color(theme.sidebar_primary)
+                })
         })
         .when(!active, |s| {
             s.text_color(theme.sidebar_foreground)
@@ -2518,7 +2694,11 @@ fn tool_btn(
     };
     Button::new(id)
         .ghost()
-        .rounded(px(6.))
+        .rounded(if cfg!(target_os = "windows") {
+            px(4.)
+        } else {
+            px(6.)
+        })
         .icon(ic)
         .tooltip(tooltip)
         .on_click(on_click)

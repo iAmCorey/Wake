@@ -1,5 +1,6 @@
 mod assets;
 mod format;
+mod i18n;
 mod theme;
 mod ui;
 mod workbench;
@@ -7,6 +8,7 @@ mod workbench;
 use assets::Assets;
 use gpui::*;
 use gpui_component::Root;
+use i18n::Language;
 use workbench::{
     PaletteDown, PaletteUp, RefreshSessions, ToggleSearch, Workbench, KEY_CONTEXT, PALETTE_CONTEXT,
 };
@@ -17,7 +19,7 @@ fn main() {
     let app = Application::new().with_assets(Assets);
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
-        gpui_component::set_locale("en");
+        gpui_component::set_locale(Language::from_env().code());
         theme::sync_appearance(None, cx);
 
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -26,12 +28,21 @@ fn main() {
                 w.update(cx, |_, window, _| window.remove_window()).ok();
             }
         });
+        #[cfg(target_os = "macos")]
         cx.bind_keys([
             KeyBinding::new("cmd-k", ToggleSearch, Some(KEY_CONTEXT)),
             KeyBinding::new("cmd-r", RefreshSessions, Some(KEY_CONTEXT)),
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-w", CloseWindow, None),
-            // ⌘K 面板:焦点在搜索输入框,↑↓ 冒泡到面板容器挪选中
+            KeyBinding::new("up", PaletteUp, Some(PALETTE_CONTEXT)),
+            KeyBinding::new("down", PaletteDown, Some(PALETTE_CONTEXT)),
+        ]);
+        #[cfg(not(target_os = "macos"))]
+        cx.bind_keys([
+            KeyBinding::new("ctrl-k", ToggleSearch, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-r", RefreshSessions, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-q", Quit, None),
+            KeyBinding::new("ctrl-w", CloseWindow, None),
             KeyBinding::new("up", PaletteUp, Some(PALETTE_CONTEXT)),
             KeyBinding::new("down", PaletteDown, Some(PALETTE_CONTEXT)),
         ]);
@@ -51,13 +62,24 @@ fn main() {
         ]);
 
         let bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
+        let titlebar = TitlebarOptions {
+            // Windows 使用系统标题栏和原生窗口控制按钮；macOS 继续使用
+            // GPUI 的透明标题栏来承载交通灯按钮。
+            title: if cfg!(target_os = "windows") {
+                Some("Wake".into())
+            } else {
+                None
+            },
+            appears_transparent: !cfg!(target_os = "windows"),
+            traffic_light_position: if cfg!(target_os = "macos") {
+                Some(point(px(20.), px(11.)))
+            } else {
+                None
+            },
+        };
         cx.open_window(
             WindowOptions {
-                titlebar: Some(TitlebarOptions {
-                    title: None,
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(20.), px(11.))),
-                }),
+                titlebar: Some(titlebar),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(940.), px(620.))),
                 ..Default::default()

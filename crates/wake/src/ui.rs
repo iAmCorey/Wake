@@ -4,8 +4,13 @@
 //! 颜色只用三级:foreground(主文字)/muted_foreground(辅助)/primary(强调)。
 use gpui::{px, Hsla, Pixels, Styled};
 
-/// 上下文大标题(中栏头部)——semibold
-pub const FONT_TITLE: Pixels = px(22.);
+/// 上下文大标题(中栏头部)——semibold。
+/// Windows Fluent 标题略收紧，给三栏布局留出更多阅读空间。
+pub const FONT_TITLE: Pixels = if cfg!(target_os = "windows") {
+    px(20.)
+} else {
+    px(22.)
+};
 /// 区块标题(详情页会话标题)——semibold
 pub const FONT_HEADING: Pixels = px(16.);
 /// 界面正文(导航行/列表标题/按钮/输入);列表标题用 medium
@@ -36,8 +41,25 @@ pub const SPACE_LG: Pixels = px(16.);
 pub const SPACE_XL: Pixels = px(20.);
 pub const SPACE_XXL: Pixels = px(24.);
 
-/// 侧栏容器水平内边距(行的 hover/选中胶囊左右各留这么多)。
-pub const SIDEBAR_EDGE: Pixels = px(10.);
+/// Windows 侧栏采用更宽的导航栏，方便鼠标和触控命中；macOS 保持原布局。
+pub const SIDEBAR_WIDTH: Pixels = if cfg!(target_os = "windows") {
+    px(248.)
+} else {
+    px(224.)
+};
+/// 会话列表宽度：Windows 上为标题、筛选和双行摘要预留更稳定的空间。
+pub const LIST_WIDTH: Pixels = if cfg!(target_os = "windows") {
+    px(360.)
+} else {
+    px(336.)
+};
+
+/// 侧栏容器水平内边距(行的 hover/选中背景左右各留这么多)。
+pub const SIDEBAR_EDGE: Pixels = if cfg!(target_os = "windows") {
+    px(12.)
+} else {
+    px(10.)
+};
 
 // ---- 侧栏中轴:LEAD_AXIS = 26.75 ----
 // traffic light 实测左缘 20、直径 13.5,中心即 26.75。侧栏每一行的行首元素
@@ -50,7 +72,11 @@ pub const SIDEBAR_EDGE: Pixels = px(10.);
 /// 于是 14/15px 的小图标中心也落在轴上。
 pub const LEAD_BOX: Pixels = px(18.);
 /// 行左内边距 = 26.75(轴) − 9(槽位半宽) − 10(SIDEBAR_EDGE,容器那一半)
-pub const LEAD_INSET: Pixels = px(7.75);
+pub const LEAD_INSET: Pixels = if cfg!(target_os = "windows") {
+    px(8.)
+} else {
+    px(7.75)
+};
 /// 分组项(agent/项目)相对轴的右缩进,表达从属。
 /// 压轴的只有主导航行与组头;分组项一律偏这么多。
 pub const SUB_INDENT: Pixels = px(12.);
@@ -60,16 +86,46 @@ pub const SUB_INDENT: Pixels = px(12.);
 /// (semibold 时实测需 12.0/12.25,两个组头还对不上同一个值)。
 /// 12.125 实测落位 −0.125;调到 12.25 反而变成 +0.375——2x 屏光栅化步长是
 /// 0.5px,两者落进不同物理像素,别再往小数点后调了。
-pub const GROUP_HEAD_INSET: Pixels = px(12.125);
+pub const GROUP_HEAD_INSET: Pixels = if cfg!(target_os = "windows") {
+    px(12.)
+} else {
+    px(12.125)
+};
 /// 侧栏标题 "Wake" 的左内边距:同样让首字母 W 的字形中心落在轴上。
 /// 实测 16px semibold 的 W 宽 14.25、左承距 0.5,文字左缘需 19.65;
 /// 减去容器的 SIDEBAR_EDGE 得 9.15,取 9.0(2x 屏下 0.5px 以下的差会被光栅化吃掉)。
-pub const TITLE_INSET: Pixels = px(9.);
+pub const TITLE_INSET: Pixels = if cfg!(target_os = "windows") {
+    px(8.)
+} else {
+    px(9.)
+};
 /// 侧栏主导航行高(固定区:All Sessions/Starred;搜索框同高)
-pub const ROW_HEIGHT: Pixels = px(32.);
+pub const ROW_HEIGHT: Pixels = if cfg!(target_os = "windows") {
+    px(36.)
+} else {
+    px(32.)
+};
 /// 侧栏子级行高(分组展开项:agent/项目)——比主导航低一级,
 /// 配 FONT_CAPTION 形成侧栏纵向层级(macOS 原生侧栏惯例)
-pub const ROW_HEIGHT_SUB: Pixels = px(26.);
+pub const ROW_HEIGHT_SUB: Pixels = if cfg!(target_os = "windows") {
+    px(30.)
+} else {
+    px(26.)
+};
+
+/// Windows 控件使用 32px 的标准命中高度；macOS 保持紧凑的工具栏。
+pub const TOOLBAR_HEIGHT: Pixels = if cfg!(target_os = "windows") {
+    px(32.)
+} else {
+    px(28.)
+};
+
+/// 跨平台键盘提示，避免把 macOS 的 ⌘ 符号泄漏到 Windows 界面。
+pub const SEARCH_SHORTCUT: &str = if cfg!(target_os = "macos") {
+    "⌘K"
+} else {
+    "Ctrl+K"
+};
 
 // ---------------- 交互态文字 ----------------
 

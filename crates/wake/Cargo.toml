@@ -19,3 +19,6 @@ gpui-component = { version = "0.5", features = ["tree-sitter-languages"] }
 futures = "0.3"
 chrono.workspace = true
 dirs.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0"

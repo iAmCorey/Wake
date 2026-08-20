@@ -1,5 +1,6 @@
-//! Wake 的双模式主题:Things / Bear 基准的 macOS 原生质感。
-//! 浅色 = 纸感白 + 暖灰侧栏;深色 = 暖黑 + 柔和层次。accent 取系统蓝。
+//! Wake 的双模式主题。
+//! macOS 保留暖色原生风格；Windows 使用更接近 Fluent 的中性灰、蓝色强调和
+//! 低圆角控件层级。
 use gpui::{App, Hsla, Rgba, Window};
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode};
 
@@ -159,11 +160,147 @@ pub fn apply_wake_theme(cx: &mut App) {
         theme.overlay = gpui::hsla(0., 0., 0., 0.25);
     }
 
-    // 系统字体与 macOS 圆角习惯
-    theme.font_family = ".AppleSystemUIFont".into();
+    // Windows 采用 Fluent 的中性灰层级。单独覆盖 token，而不是在组件里散落
+    // 大量平台判断，这样 hover、菜单、输入框和滚动条会保持同一套语义颜色。
+    if cfg!(target_os = "windows") {
+        if dark {
+            theme.background = c(0x202020);
+            theme.foreground = c(0xF5F5F5);
+            theme.border = c(0x3A3A3A);
+            theme.ring = c(0x60CDFF);
+
+            theme.sidebar = c(0x202020);
+            theme.sidebar_foreground = c(0xE6E6E6);
+            theme.sidebar_border = c(0x333333);
+            theme.sidebar_accent = c(0x2D2D2D);
+            theme.sidebar_accent_foreground = c(0xFFFFFF);
+            theme.sidebar_primary = c(0x60CDFF);
+            theme.sidebar_primary_foreground = c(0x001B2E);
+
+            theme.list = c(0x252525);
+            theme.list_hover = c(0x2D2D2D);
+            theme.list_active = c(0x2D4B63);
+            theme.list_active_border = c(0x60CDFF);
+            theme.list_even = c(0x252525);
+            theme.list_head = c(0x252525);
+
+            theme.muted = c(0x2D2D2D);
+            theme.muted_foreground = c(0xB8B8B8);
+            theme.accent = c(0x333333);
+            theme.accent_foreground = c(0xFFFFFF);
+
+            theme.primary = c(0x60CDFF);
+            theme.primary_hover = c(0x78D4FF);
+            theme.primary_active = c(0x4DB8E8);
+            theme.primary_foreground = c(0x001B2E);
+
+            theme.secondary = c(0x2D2D2D);
+            theme.secondary_hover = c(0x383838);
+            theme.secondary_active = c(0x424242);
+            theme.secondary_foreground = c(0xF5F5F5);
+
+            theme.popover = c(0x2B2B2B);
+            theme.popover_foreground = c(0xF5F5F5);
+            theme.group_box = c(0x2B2B2B);
+            theme.group_box_foreground = c(0xF5F5F5);
+            theme.input = c(0x333333);
+            theme.selection = ca(0x60CDFF, 0.26);
+            theme.caret = c(0x60CDFF);
+
+            theme.title_bar = c(0x202020);
+            theme.title_bar_border = c(0x333333);
+            theme.scrollbar_thumb = c(0x555555);
+            theme.scrollbar_thumb_hover = c(0x6B6B6B);
+
+            theme.link = c(0x60CDFF);
+            theme.danger = c(0xFF99A4);
+            theme.danger_hover = c(0xFFB3BB);
+            theme.danger_active = c(0xE87F8B);
+            theme.danger_foreground = c(0x2B0A0E);
+            theme.success = c(0x6CCB8A);
+            theme.success_foreground = c(0x062B15);
+            theme.warning = c(0xF4BF4F);
+            theme.warning_foreground = c(0x2A1B00);
+            theme.overlay = gpui::hsla(0., 0., 0., 0.52);
+        } else {
+            theme.background = c(0xF9F9F9);
+            theme.foreground = c(0x1A1A1A);
+            theme.border = c(0xE5E5E5);
+            theme.ring = c(0x0067C0);
+
+            theme.sidebar = c(0xF3F3F3);
+            theme.sidebar_foreground = c(0x2B2B2B);
+            theme.sidebar_border = c(0xE5E5E5);
+            theme.sidebar_accent = c(0xE5F1FB);
+            theme.sidebar_accent_foreground = c(0x1A1A1A);
+            theme.sidebar_primary = c(0x0067C0);
+            theme.sidebar_primary_foreground = c(0xFFFFFF);
+
+            theme.list = c(0xFFFFFF);
+            theme.list_hover = c(0xF5F5F5);
+            theme.list_active = c(0xE5F1FB);
+            theme.list_active_border = c(0x0067C0);
+            theme.list_even = c(0xFFFFFF);
+            theme.list_head = c(0xFFFFFF);
+
+            theme.muted = c(0xF3F3F3);
+            theme.muted_foreground = c(0x616161);
+            theme.accent = c(0xE5F1FB);
+            theme.accent_foreground = c(0x1A1A1A);
+
+            theme.primary = c(0x0067C0);
+            theme.primary_hover = c(0x005AAB);
+            theme.primary_active = c(0x004A8F);
+            theme.primary_foreground = c(0xFFFFFF);
+
+            theme.secondary = c(0xF3F3F3);
+            theme.secondary_hover = c(0xEDEDED);
+            theme.secondary_active = c(0xE5E5E5);
+            theme.secondary_foreground = c(0x2B2B2B);
+
+            theme.popover = c(0xFFFFFF);
+            theme.popover_foreground = c(0x1A1A1A);
+            theme.group_box = c(0xFFFFFF);
+            theme.group_box_foreground = c(0x1A1A1A);
+            theme.input = c(0xFFFFFF);
+            theme.selection = ca(0x0067C0, 0.18);
+            theme.caret = c(0x0067C0);
+
+            theme.title_bar = c(0xF3F3F3);
+            theme.title_bar_border = c(0xE5E5E5);
+            theme.scrollbar_thumb = c(0xC8C8C8);
+            theme.scrollbar_thumb_hover = c(0xAFAFAF);
+
+            theme.link = c(0x0067C0);
+            theme.danger = c(0xC42B1C);
+            theme.danger_hover = c(0xA5261A);
+            theme.danger_active = c(0x8F2016);
+            theme.danger_foreground = c(0xFFFFFF);
+            theme.success = c(0x107C10);
+            theme.success_foreground = c(0xFFFFFF);
+            theme.warning = c(0x9D5D00);
+            theme.warning_foreground = c(0xFFFFFF);
+            theme.overlay = gpui::hsla(0., 0., 0., 0.28);
+        }
+    }
+
+    // Windows 使用 Segoe UI，避免回退到不匹配的衬线字体。
+    theme.font_family = if cfg!(target_os = "macos") {
+        ".AppleSystemUIFont".into()
+    } else {
+        "Segoe UI".into()
+    };
     theme.font_size = gpui::px(14.);
-    theme.radius = gpui::px(8.);
-    theme.radius_lg = gpui::px(12.);
+    theme.radius = if cfg!(target_os = "windows") {
+        gpui::px(4.)
+    } else {
+        gpui::px(8.)
+    };
+    theme.radius_lg = if cfg!(target_os = "windows") {
+        gpui::px(8.)
+    } else {
+        gpui::px(12.)
+    };
     theme.shadow = true;
 }
 

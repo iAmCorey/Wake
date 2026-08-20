@@ -21,7 +21,7 @@ pub struct GrokAdapter {
 impl GrokAdapter {
     pub fn new() -> Self {
         Self {
-            root: dirs::home_dir().unwrap_or_default().join(".grok").join("sessions"),
+            root: crate::home_dir().join(".grok").join("sessions"),
         }
     }
 }

@@ -68,13 +68,25 @@ fn has_v2(conn: &rusqlite::Connection) -> bool {
 
 impl OpencodeAdapter {
     pub fn new() -> Self {
+        let home = crate::home_dir();
+        let legacy = home
+            .join(".local")
+            .join("share")
+            .join("opencode")
+            .join("opencode.db");
+        // OpenCode follows XDG on Unix and the per-user application-data
+        // directory on Windows. Keep the legacy path as a fallback because
+        // existing Windows installs may have been configured with XDG_DATA_HOME.
+        let platform = dirs::data_dir()
+            .unwrap_or_else(|| home.clone())
+            .join("opencode")
+            .join("opencode.db");
         Self {
-            db: dirs::home_dir()
-                .unwrap_or_default()
-                .join(".local")
-                .join("share")
-                .join("opencode")
-                .join("opencode.db"),
+            db: if cfg!(windows) && !legacy.exists() {
+                platform
+            } else {
+                legacy
+            },
             rows_cache: MtimeCache::new(),
         }
     }

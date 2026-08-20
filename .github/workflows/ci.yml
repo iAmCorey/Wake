@@ -10,8 +10,11 @@ env:
 
 jobs:
   test:
-    name: Test & build (macOS)
-    runs-on: macos-14
+    name: Test & build (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 

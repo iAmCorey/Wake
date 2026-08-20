@@ -170,7 +170,7 @@ impl TerminalApp {
                 return Some(p);
             }
         }
-        let home_app = dirs::home_dir()
+        let home_app = crate::home_dir()
             .unwrap_or_default()
             .join("Applications")
             .join(format!("{}.app", self.display_name()));
