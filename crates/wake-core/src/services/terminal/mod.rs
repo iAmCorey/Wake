@@ -59,7 +59,9 @@ pub struct ResumeOutcome {
     pub error: Option<String>,
 }
 
-/// GUI 进程 PATH 不全(macOS/Linux 缺 ~/.local/bin 等),批量解析并缓存
+/// GUI 进程 PATH 不全(macOS/Linux 缺 ~/.local/bin 等),批量解析;命中
+/// 缓存,miss 不缓存(变率匹配:CLI 安装是分钟级事件且恰发生在用户点击
+/// 之时,与 kooky_cli_path 的活查同一哲学)
 static CLI_CACHE: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
 
 fn resolve_clis(bins: &[&str]) -> HashMap<String, Option<String>> {
@@ -72,8 +74,12 @@ fn resolve_clis(bins: &[&str]) -> HashMap<String, Option<String>> {
         .collect();
     if !missing.is_empty() {
         let found = probe_clis(&missing);
+        // miss 不入缓存:装好 CLI 后不重启必须立刻生效;代价是未装的
+        // agent 每次点击多起一次 login shell(百 ms 级,点击路径可接受)
         for b in missing {
-            map.insert(b.to_string(), found.get(b).cloned());
+            if let Some(p) = found.get(b) {
+                map.insert(b.to_string(), Some(p.clone()));
+            }
         }
     }
     bins.iter()
