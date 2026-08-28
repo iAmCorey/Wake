@@ -18,19 +18,70 @@ fn login_shell() -> String {
         .unwrap_or_else(|| "/bin/bash".to_string())
 }
 
+/// 剥离 ANSI 转义序列与游离 BEL/CR。login shell 的 rc 链会往 stdout 打
+/// 终端标题转义(oh-my-zsh/starship 等,常不带换行),不剥会把
+/// `\x1b]0;…\aomp` 整段粘成 bin 名,`command -v` 找到了也恒判 miss。
+fn strip_ansi(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            // OSC:ESC ] … BEL,或 ESC \(ST) 收尾
+            0x1b if bytes.get(i + 1) == Some(&b']') => {
+                i += 2;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        0x07 => {
+                            i += 1;
+                            break;
+                        }
+                        0x1b if bytes.get(i + 1) == Some(&b'\\') => {
+                            i += 2;
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
+            // CSI / 字符集选择:ESC [ 或 ESC ( 到 0x40..=0x7e 终止字节
+            0x1b if matches!(bytes.get(i + 1), Some(b'[' | b'(')) => {
+                i += 2;
+                while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                    i += 1;
+                }
+                i = (i + 1).min(bytes.len());
+            }
+            // 其余 ESC 序列按双字节处理(ESC 7 / ESC M;尾部孤 ESC 直接越界收敛)
+            0x1b => i += 2,
+            0x07 | b'\r' => i += 1,
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// 批量探测缺失 bin 的绝对路径:login shell 里 `command -v`,把用户 rc 文件
-/// 加进 PATH 的目录一并覆盖(GUI 进程 PATH 不含 ~/.local/bin 等)。
+/// 加进 PATH 的目录一并覆盖(GUI 进程 PATH 不含 ~/.local/bin 等)。rc 链的
+/// stdout 噪声两手防:脚本开头强制换行,吸收非转义的无换行残尾;输出再经
+/// strip_ansi 剥掉转义序列,防 `\x1b]0;…\aomp` 整段粘成 bin 名。
 /// Windows 的对应物在 windows.rs(注册表 PATH 天然完整,纯 Rust 遍历)。
 pub(super) fn probe_clis(missing: &[&str]) -> HashMap<String, String> {
-    let script = missing
-        .iter()
-        .map(|b| format!("printf '%s\\t' {b}; command -v {b} || echo"))
-        .collect::<Vec<_>>()
-        .join("; ");
+    let script = format!(
+        "printf '\\n'; {}",
+        missing
+            .iter()
+            .map(|b| format!("printf '%s\\t' {b}; command -v {b} || echo"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
     let out = Command::new(login_shell()).args(["-lic", &script]).output();
     let stdout = out
         .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .map(|o| strip_ansi(&String::from_utf8_lossy(&o.stdout)))
         .unwrap_or_default();
     let mut found = HashMap::new();
     for line in stdout.lines() {
@@ -111,4 +162,31 @@ pub(crate) fn pipe_to(bin: &str, args: &[&str], text: &str) -> bool {
         let _ = stdin.write_all(text.as_bytes());
     }
     child.wait().map(|s| s.success()).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_ansi_keeps_plain_probe_line() {
+        assert_eq!(
+            strip_ansi("omp\t/usr/local/bin/omp\n"),
+            "omp\t/usr/local/bin/omp\n"
+        );
+    }
+
+    /// 用户机器实测样本:zsh rc 在探测输出前打了不带换行的 OSC 标题
+    /// (`\x1b]0;Wake\a`,标题取 cwd basename),粘掉 bin 名导致恒 miss。
+    #[test]
+    fn strip_ansi_removes_osc_title_glued_onto_probe_line() {
+        let raw = "\x1b]0;Wake\x07omp\t/Users/loosheng/Library/pnpm/omp\n";
+        assert_eq!(strip_ansi(raw), "omp\t/Users/loosheng/Library/pnpm/omp\n");
+    }
+
+    #[test]
+    fn strip_ansi_removes_csi_and_trailing_osc() {
+        let raw = "omp\t/opt/omp\x1b[0m\x1b]2;title\x1b\\";
+        assert_eq!(strip_ansi(raw), "omp\t/opt/omp");
+    }
 }

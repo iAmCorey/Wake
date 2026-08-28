@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed: agent CLI detection could report an installed binary (e.g. `omp`) as missing when the login shell's rc files print ANSI terminal-title escapes or other unterminated output before the probe line; the probe now prefixes a newline to absorb rc leftovers and ANSI-sanitizes output before parsing
+
 ## [0.3.0] — 2026-08-27
 
 - New: Insights page — a new sidebar entry showing your coding agent activity at a glance: sessions, tokens, prompts, agents, projects, and active days
