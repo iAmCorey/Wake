@@ -322,7 +322,10 @@ fn launch_kooky_cli(meta: &SessionMeta) -> ResumeOutcome {
     let Some(exe) = resolve_cli(bin) else {
         return fail(
             String::new(),
-            format!("Command {bin} not found — is it installed?"),
+            format!(
+                "CLI `{bin}` (for {}) not found in shell PATH — is it installed?",
+                meta.agent.display_name()
+            ),
         );
     };
     let cmd = std::iter::once(exe.as_str())

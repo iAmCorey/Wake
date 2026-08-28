@@ -169,8 +169,9 @@ pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome
             ok: false,
             command: String::new(),
             error: Some(format!(
-                "Command {} not found — is it installed?",
-                bin.unwrap_or("?")
+                "CLI `{}` (for {}) not found in shell PATH — is it installed?",
+                bin.unwrap_or("?"),
+                meta.agent.display_name()
             )),
         };
     };
