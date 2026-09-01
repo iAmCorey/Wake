@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.3.5] — 2026-09-02
+
 - New: Open in now offers Claude Desktop for Claude Code sessions and Codex Desktop for Codex sessions, jumping straight to that session in the desktop app
 - New: Open in remembers your last choice per agent and keeps it across restarts
 - Fix: opening a session in Claude Desktop no longer creates a duplicate copy when the conversation already lives there
