@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.3.2] — 2026-09-01
+
 - Fix: in a Codex branch or subagent thread, the parent conversation's transcript is injected as a `user` message — its assistant replies were being shown as if you had typed them, and were indexed for search. They are now treated as injected context, like the other `<environment_context>`-style blocks
 - Update: sessions sorted by newest creation or update time are grouped into Pinned, Today, Yesterday, Earlier this week, and month sections
 - Fix: the session list now loads additional pages near the bottom instead of stopping after the first batch, and search hits beyond that batch are loaded and selected correctly
