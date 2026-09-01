@@ -12,7 +12,7 @@ Rust + gpui 0.2 + gpui-component 0.5(用户既定,workspace: crates/wake-core �
 
 ## Users
 
-Corey 本人(独立开发者,主力工具 Claude Code 与 Codex,中文为主)。已开源(2026-08-18 v0.1.0 首发,当前 v0.3.2 2026-09-01,github.com/iAmCorey/Wake,MIT):面向同时使用多个 coding agent 的开发者。
+Corey 本人(独立开发者,主力工具 Claude Code 与 Codex,中文为主)。已开源(2026-08-18 v0.1.0 首发,当前 v0.3.3 2026-09-01,github.com/iAmCorey/Wake,MIT):面向同时使用多个 coding agent 的开发者。
 
 ## Product Purpose
 

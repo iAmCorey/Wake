@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.3.3] — 2026-09-01
+
 - New: Grok Build `execute-plan` and subagent sessions now nest under their root parent, with expandable child counts, root-level sidebar totals, source-project recovery for worktrees, flat Starred/search results, and cascading Trash deletion
 - Credits: Grok subagent nesting was inspired by [PR #3](https://github.com/iAmCorey/Wake/pull/3). Thanks to [@syanbo](https://github.com/syanbo) for mapping Grok's parent metadata and worktree behavior; the final implementation was independently rebuilt on the current codebase
 
