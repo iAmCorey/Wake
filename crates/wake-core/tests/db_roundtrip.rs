@@ -166,6 +166,42 @@ fn list_sessions_filters_and_counts() {
 }
 
 #[test]
+fn list_sessions_pages_have_stable_tie_order() {
+    let (_dir, store) = temp_store();
+    for suffix in ["d", "a", "e", "b", "c"] {
+        let session = meta(&format!("claude-code:{suffix}"), suffix);
+        store
+            .write_session(&session, session.updated_at, &[])
+            .unwrap();
+    }
+
+    let mut filter = SessionFilter {
+        sort: SortKey::Updated,
+        ascending: false,
+        limit: 2,
+        ..Default::default()
+    };
+    let mut keys = Vec::new();
+    for offset in [0, 2, 4] {
+        filter.offset = offset;
+        let (page, total) = store.list_sessions(&filter).unwrap();
+        assert_eq!(total, 5);
+        keys.extend(page.into_iter().map(|session| session.key));
+    }
+
+    assert_eq!(
+        keys,
+        [
+            "claude-code:a",
+            "claude-code:b",
+            "claude-code:c",
+            "claude-code:d",
+            "claude-code:e",
+        ]
+    );
+}
+
+#[test]
 fn path_counts_respect_agent_and_boundary() {
     // Session locations 面板的计数按数据根归属。两条真实风险:
     // ① 自定义 CODEX_HOME/XDG_DATA_HOME 可以落在别家根之下,只比路径前缀

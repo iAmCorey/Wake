@@ -3,6 +3,18 @@
 ## Unreleased
 
 - Fix: in a Codex branch or subagent thread, the parent conversation's transcript is injected as a `user` message — its assistant replies were being shown as if you had typed them, and were indexed for search. They are now treated as injected context, like the other `<environment_context>`-style blocks
+- Update: sessions sorted by newest creation or update time are grouped into Pinned, Today, Yesterday, Earlier this week, and month sections
+- Fix: the session list now loads additional pages near the bottom instead of stopping after the first batch, and search hits beyond that batch are loaded and selected correctly
+- Fix: long mixed-language titles now end with a Unicode-width-aware ellipsis in the session list while wrapping in full in the detail header
+- Update: the project badge in session detail opens its folder, while empty, `HEAD`, and detached branch labels stay hidden
+- Fix: session detail now shows the concrete missing-adapter or transcript parsing error instead of a blank reader, with an action to reveal the source file
+- Update: conversation Markdown now has clearer h1–h4 hierarchy and framed code blocks with language labels, copy actions, and immediate light/dark syntax colors
+- Update: conversation text has roomier line spacing and window-level selection, including Shift extension across messages and edge auto-scroll while dragging a selection
+- Update: the destructive session action in the detail overflow menu now uses the danger color for both its trash icon and label
+- Fix: Codex code-review results now render as a readable review with findings, locations, and confidence instead of exposing the structured JSON payload
+- Update: Thinking attached to assistant replies is now a collapsible panel with a one-line summary and full expanded content, independently of tool-call expansion
+- Update: tool calls now use expandable cards with Unicode-width-aware summaries, complete available inputs, successful and failed outputs, and full-content copy actions beyond the 600-character preview
+- Update: Insights uses 28px overview values, 24px leaderboard rows, 32px section spacing, and one shared 2px radius for chart and heatmap cells
 
 ## [0.3.1] — 2026-08-30
 

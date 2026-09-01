@@ -143,6 +143,8 @@ pub const RADIUS_BUTTON: Pixels = px(6.);
 pub const RADIUS_KBD: Pixels = px(5.);
 /// 小胶囊 badge(项目名 / model / source / 各处计数共用)
 pub const RADIUS_BADGE: Pixels = px(4.);
+/// 数据可视化小色块(热力图、分布柱、图例)，统一保持方格读数感。
+pub const RADIUS_CELL: Pixels = px(2.);
 
 // ---------------- 组件度量派生 ----------------
 

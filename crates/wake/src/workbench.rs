@@ -16,19 +16,25 @@
 // ============================================================================
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
+use chrono::{Datelike as _, Local, NaiveDate, TimeZone as _};
 use futures::StreamExt;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_component::highlighter::HighlightTheme;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::notification::Notification;
-use gpui_component::scroll::ScrollableElement as _;
+use gpui_component::scroll::{AutoScroll, ScrollableElement as _};
 use gpui_component::spinner::Spinner;
 use gpui_component::text::{TextView, TextViewStyle};
 use gpui_component::{
@@ -40,13 +46,15 @@ use wake_core::adapters::{
     adapter_for, create_adapter_roster_for, path_owns, AdapterLocation, AgentAdapter,
 };
 use wake_core::db::Store;
+use wake_core::models::Role as MessageRole;
 use wake_core::models::*;
 use wake_core::scanner::{run_scan, ScanEvents, ScanProgress};
 use wake_core::services::{exporter, terminal};
 use wake_core::watcher::{start_watcher, SessionWatcher};
 
 use crate::format::{
-    abs_date, expand_tilde, fmt_tokens, month_year, one_line, smart_time, thousands, tilde_path,
+    abs_date, clip_display, expand_tilde, fmt_tokens, month_year, one_line, smart_time, thousands,
+    tilde_path,
 };
 use crate::settings::{SettingsPage, SettingsView};
 use crate::ui::*;
@@ -78,6 +86,14 @@ const WINDOW_TITLEBAR_HEIGHT: Pixels = px(44.);
 const LIBRARY_IDENTITY_HEIGHT: Pixels = px(88.);
 /// 侧栏底部常态工具栏内容高；加上父容器 1px 顶部分隔线，总高 44px。
 const SIDEBAR_FOOTER_ROW_HEIGHT: Pixels = px(43.);
+/// 三栏固定结构宽度；工具摘要需要从窗口宽度反算真实可用空间。
+const SIDEBAR_WIDTH: Pixels = px(224.);
+const SESSION_STREAM_WIDTH: Pixels = px(336.);
+const READER_MAX_WIDTH: Pixels = px(720.);
+/// FONT_MSG_THINKING 使用等宽字体时，一个 ASCII 显示格的实测近似宽度。
+const TOOL_MONO_CELL_WIDTH: f32 = 6.9;
+/// Insights 主区块间距，明确落在 4px 网格上。
+const INSIGHTS_SECTION_GAP: Pixels = px(32.);
 
 type SharedAdapters = Arc<Vec<Box<dyn AgentAdapter>>>;
 type SharedLocations = Arc<Vec<AdapterLocation>>;
@@ -119,15 +135,243 @@ impl ScanEvents for ChannelEvents {
 
 // ---------------- 会话列表 delegate ----------------
 
+/// 336px 会话流在 14px 系统字体下约容纳 42 个西文显示单元；CJK 字符由
+/// unicode-width 按两个单元计算。尾部每个状态图标再预留三个单元。
+const SESSION_TITLE_MAX_WIDTH: usize = 42;
+/// 会话流首批与后续每页的条数。列表组件会在距末尾 20 行时预取下一页。
+const SESSION_PAGE_SIZE: i64 = 100;
+static SESSION_PAGINATION_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionGroup {
+    label: SharedString,
+    range: Range<usize>,
+}
+
+struct SessionPagination {
+    store: Arc<Store>,
+    filter: SessionFilter,
+    total: i64,
+    next_offset: i64,
+    generation: u64,
+    loading: bool,
+    failed: bool,
+}
+
+fn session_group_timestamp(session: &SessionMeta, sort: SortKey) -> i64 {
+    match sort {
+        SortKey::Created => session.created_at,
+        SortKey::Updated | SortKey::Messages => session.updated_at,
+    }
+}
+
+fn session_group_label(ts: i64, today: NaiveDate) -> SharedString {
+    let Some(date) = Local
+        .timestamp_millis_opt(ts)
+        .single()
+        .map(|dt| dt.date_naive())
+    else {
+        return "Undated".into();
+    };
+
+    if date >= today {
+        return "Today".into();
+    }
+    if date == today.pred_opt().unwrap_or(today) {
+        return "Yesterday".into();
+    }
+
+    let week_start =
+        today - chrono::Duration::days(i64::from(today.weekday().num_days_from_monday()));
+    if date >= week_start {
+        return "Earlier this week".into();
+    }
+    if date.year() == today.year() {
+        return date.format("%B").to_string().into();
+    }
+    date.format("%B %Y").to_string().into()
+}
+
+fn build_session_groups_at(
+    sessions: &[SessionMeta],
+    sort: SortKey,
+    ascending: bool,
+    today: NaiveDate,
+) -> Vec<SessionGroup> {
+    let time_descending = !ascending && matches!(sort, SortKey::Updated | SortKey::Created);
+    if sessions.is_empty() || !time_descending {
+        return vec![SessionGroup {
+            label: "".into(),
+            range: 0..sessions.len(),
+        }];
+    }
+
+    let mut groups = Vec::new();
+    let pinned_count = sessions.iter().take_while(|session| session.pinned).count();
+    if pinned_count > 0 {
+        groups.push(SessionGroup {
+            label: "Pinned".into(),
+            range: 0..pinned_count,
+        });
+    }
+
+    let mut start = pinned_count;
+    while start < sessions.len() {
+        let label = session_group_label(session_group_timestamp(&sessions[start], sort), today);
+        let mut end = start + 1;
+        while end < sessions.len()
+            && session_group_label(session_group_timestamp(&sessions[end], sort), today) == label
+        {
+            end += 1;
+        }
+        groups.push(SessionGroup {
+            label,
+            range: start..end,
+        });
+        start = end;
+    }
+    groups
+}
+
+fn same_session_query(left: &SessionFilter, right: &SessionFilter) -> bool {
+    left.agents == right.agents
+        && left.project_path == right.project_path
+        && left.favorite_only == right.favorite_only
+        && left.include_archived == right.include_archived
+        && left.title_query == right.title_query
+        && left.sort == right.sort
+        && left.ascending == right.ascending
+}
+
+fn session_matches_filter(session: &SessionMeta, filter: &SessionFilter) -> bool {
+    (filter.agents.is_empty() || filter.agents.contains(&session.agent))
+        && filter
+            .project_path
+            .as_ref()
+            .is_none_or(|project| project == &session.project_path)
+        && (!filter.favorite_only || session.favorite)
+        && (filter.include_archived || !session.archived)
+        && filter
+            .title_query
+            .as_deref()
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+            .is_none_or(|query| {
+                let query = query.to_lowercase();
+                session.title.to_lowercase().contains(&query)
+                    || session.project_name.to_lowercase().contains(&query)
+            })
+}
+
 pub struct SessionsDelegate {
     pub sessions: Vec<SessionMeta>,
+    groups: Vec<SessionGroup>,
+    grouped_on: NaiveDate,
+    sort: SortKey,
+    ascending: bool,
+    pagination: Option<SessionPagination>,
+}
+
+impl SessionsDelegate {
+    fn new(sessions: Vec<SessionMeta>, sort: SortKey, ascending: bool) -> Self {
+        Self::new_at(sessions, sort, ascending, Local::now().date_naive())
+    }
+
+    fn new_at(
+        sessions: Vec<SessionMeta>,
+        sort: SortKey,
+        ascending: bool,
+        grouped_on: NaiveDate,
+    ) -> Self {
+        let groups = build_session_groups_at(&sessions, sort, ascending, grouped_on);
+        Self {
+            sessions,
+            groups,
+            grouped_on,
+            sort,
+            ascending,
+            pagination: None,
+        }
+    }
+
+    fn paged(
+        sessions: Vec<SessionMeta>,
+        filter: SessionFilter,
+        total: i64,
+        store: Arc<Store>,
+    ) -> Self {
+        let mut delegate = Self::new(sessions, filter.sort, filter.ascending);
+        delegate.pagination = Some(SessionPagination {
+            store,
+            total: total.max(0),
+            next_offset: i64::try_from(delegate.sessions.len()).unwrap_or(i64::MAX),
+            filter,
+            generation: SESSION_PAGINATION_GENERATION.fetch_add(1, Ordering::Relaxed),
+            loading: false,
+            failed: false,
+        });
+        delegate
+    }
+
+    fn rebuild_groups(&mut self) {
+        let today = Local::now().date_naive();
+        self.groups = build_session_groups_at(&self.sessions, self.sort, self.ascending, today);
+        self.grouped_on = today;
+    }
+
+    fn rebuild_groups_at(&mut self, today: NaiveDate) -> bool {
+        if self.grouped_on == today {
+            return false;
+        }
+        let groups = build_session_groups_at(&self.sessions, self.sort, self.ascending, today);
+        let changed = groups != self.groups;
+        self.groups = groups;
+        self.grouped_on = today;
+        changed
+    }
+
+    fn append_sessions(&mut self, page: Vec<SessionMeta>) {
+        let mut keys: HashSet<String> = self
+            .sessions
+            .iter()
+            .map(|session| session.key.clone())
+            .collect();
+        self.sessions.extend(
+            page.into_iter()
+                .filter(|session| keys.insert(session.key.clone())),
+        );
+        self.rebuild_groups();
+    }
+
+    /// 把组件发出的分组坐标还原为 `sessions` 的平铺下标。
+    fn flat_index(&self, ix: IndexPath) -> Option<usize> {
+        let group = self.groups.get(ix.section)?;
+        let flat = group.range.start.checked_add(ix.row)?;
+        (flat < group.range.end).then_some(flat)
+    }
+
+    /// 搜索跳转仍以 `sessions` 平铺下标定位；进入列表前转成分组坐标。
+    fn index_path(&self, flat: usize) -> Option<IndexPath> {
+        self.groups
+            .iter()
+            .enumerate()
+            .find(|(_, group)| group.range.contains(&flat))
+            .map(|(section, group)| IndexPath::new(flat - group.range.start).section(section))
+    }
 }
 
 impl ListDelegate for SessionsDelegate {
     type Item = ListItem;
 
-    fn items_count(&self, _section: usize, _cx: &App) -> usize {
-        self.sessions.len()
+    fn sections_count(&self, _cx: &App) -> usize {
+        self.groups.len()
+    }
+
+    fn items_count(&self, section: usize, _cx: &App) -> usize {
+        self.groups
+            .get(section)
+            .map(|group| group.range.len())
+            .unwrap_or_default()
     }
 
     fn render_item(
@@ -136,80 +380,176 @@ impl ListDelegate for SessionsDelegate {
         _window: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> Option<Self::Item> {
-        let s = self.sessions.get(ix.row)?;
+        let flat_ix = self.flat_index(ix)?;
+        let s = self.sessions.get(flat_ix)?;
         let theme = cx.theme();
-        let updated_time: SharedString = smart_time(s.updated_at).into();
-        let updated_tooltip: SharedString = abs_date(s.updated_at).into();
+        let shown_ts = session_group_timestamp(s, self.sort);
+        let shown_time: SharedString = smart_time(shown_ts).into();
+        let shown_tooltip: SharedString = abs_date(shown_ts).into();
+        let title_tooltip: SharedString = s.title.clone().into();
+        let icon_width = 3 * (usize::from(s.pinned) + usize::from(s.favorite));
+        let title: SharedString =
+            clip_display(&s.title, SESSION_TITLE_MAX_WIDTH.saturating_sub(icon_width)).into();
 
         Some(
-            ListItem::new(ix.row)
-                .rounded(theme.radius)
-                .mx(SPACE_SM)
-                .child(
-                    v_flex()
-                        .w_full()
-                        .px(SPACE_XS)
-                        .py(SPACE_SM)
-                        .gap(SPACE_XS)
-                        .child(
-                            h_flex()
-                                .gap(px(6.))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_size(FONT_BODY)
-                                        .font_medium()
-                                        .text_color(theme.foreground)
-                                        .truncate()
-                                        .child(s.title.clone()),
-                                )
-                                .when(s.pinned, |this| {
-                                    this.child(
-                                        icon("icons/pin-filled.svg")
-                                            .with_size(px(11.))
-                                            .text_color(theme.primary),
-                                    )
-                                })
-                                .when(s.favorite, |this| {
-                                    this.child(
-                                        icon("icons/star-filled.svg")
-                                            .with_size(px(11.))
-                                            .text_color(rgb(crate::theme::STAR_YELLOW)),
-                                    )
-                                }),
-                        )
-                        .child(
-                            h_flex()
-                                .gap(px(6.))
-                                .text_size(FONT_LABEL)
-                                .text_color(theme.muted_foreground)
-                                .child(
-                                    img(s.agent.brand_icon(theme.mode.is_dark()))
-                                        .size(px(15.))
-                                        .flex_shrink_0(),
-                                )
-                                .child(badge(
-                                    s.project_name.clone(),
-                                    theme.muted,
-                                    theme.muted_foreground,
-                                ))
-                                .child(div().flex_1())
-                                .child(
-                                    div()
-                                        .id(("session-updated-time", ix.row))
-                                        .flex_shrink_0()
-                                        .child(updated_time)
-                                        .tooltip(move |window, cx| {
-                                            gpui_component::tooltip::Tooltip::new(
-                                                updated_tooltip.clone(),
-                                            )
+            ListItem::new(ix).rounded(theme.radius).mx(SPACE_SM).child(
+                v_flex()
+                    .w_full()
+                    .px(SPACE_XS)
+                    .py(SPACE_SM)
+                    .gap(SPACE_XS)
+                    .child(
+                        h_flex()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .id(("session-title", flat_ix))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_size(FONT_BODY)
+                                    .font_medium()
+                                    .text_color(theme.foreground)
+                                    .child(title)
+                                    .tooltip(move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(title_tooltip.clone())
                                             .build(window, cx)
-                                        }),
-                                ),
-                        ),
-                ),
+                                    }),
+                            )
+                            .when(s.pinned, |this| {
+                                this.child(
+                                    icon("icons/pin-filled.svg")
+                                        .with_size(px(11.))
+                                        .text_color(theme.primary),
+                                )
+                            })
+                            .when(s.favorite, |this| {
+                                this.child(
+                                    icon("icons/star-filled.svg")
+                                        .with_size(px(11.))
+                                        .text_color(rgb(crate::theme::STAR_YELLOW)),
+                                )
+                            }),
+                    )
+                    .child(
+                        h_flex()
+                            .gap(px(6.))
+                            .text_size(FONT_LABEL)
+                            .text_color(theme.muted_foreground)
+                            .child(
+                                img(s.agent.brand_icon(theme.mode.is_dark()))
+                                    .size(px(15.))
+                                    .flex_shrink_0(),
+                            )
+                            .child(badge(
+                                s.project_name.clone(),
+                                theme.muted,
+                                theme.muted_foreground,
+                            ))
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .id(("session-time", flat_ix))
+                                    .flex_shrink_0()
+                                    .child(shown_time)
+                                    .tooltip(move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(shown_tooltip.clone())
+                                            .build(window, cx)
+                                    }),
+                            ),
+                    ),
+            ),
         )
+    }
+
+    fn render_section_header(
+        &mut self,
+        section: usize,
+        _window: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) -> Option<impl IntoElement> {
+        let label = self.groups.get(section)?.label.clone();
+        if label.is_empty() {
+            return None;
+        }
+        let theme = cx.theme();
+
+        Some(
+            h_flex()
+                .h(px(32.))
+                .w_full()
+                .items_center()
+                .gap(SPACE_SM)
+                .px(SPACE_MD)
+                .pt(SPACE_XS)
+                .text_size(FONT_LABEL)
+                .font_medium()
+                .text_color(theme.muted_foreground)
+                .child(div().flex_shrink_0().child(label))
+                .child(div().h(px(1.)).flex_1().bg(theme.border.opacity(0.72))),
+        )
+    }
+
+    // 还有下一页时返回 true。失败后停住，等待用户刷新重建 delegate，
+    // 避免触底重试风暴。
+    fn has_more(&self, _cx: &App) -> bool {
+        self.pagination
+            .as_ref()
+            .is_some_and(|page| !page.loading && !page.failed && page.next_offset < page.total)
+    }
+
+    fn load_more(&mut self, window: &mut Window, cx: &mut Context<ListState<Self>>) {
+        let Some(page) = self.pagination.as_mut() else {
+            return;
+        };
+        if page.loading || page.failed || page.next_offset >= page.total {
+            return;
+        }
+
+        page.loading = true;
+        let generation = page.generation;
+        let query_offset = page.next_offset;
+        let store = page.store.clone();
+        let mut filter = page.filter.clone();
+        filter.limit = SESSION_PAGE_SIZE;
+        filter.offset = query_offset;
+
+        let query = cx.background_spawn(async move { store.list_sessions(&filter) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = query.await;
+            this.update(cx, |state, cx| {
+                let delegate = state.delegate_mut();
+                let Some(current) = delegate.pagination.as_mut() else {
+                    return;
+                };
+                if current.generation != generation {
+                    return;
+                }
+                current.loading = false;
+
+                match result {
+                    Ok((sessions, total)) => {
+                        let received = i64::try_from(sessions.len()).unwrap_or(i64::MAX);
+                        current.total = total.max(0);
+                        let next_offset = if received == 0 {
+                            current.total
+                        } else {
+                            query_offset.saturating_add(received).min(current.total)
+                        };
+                        // 搜索定位可能同时批量翻过更多页，较晚完成的单页请求
+                        // 不能把它已经推进的 offset 倒退。
+                        current.next_offset =
+                            current.next_offset.max(next_offset).min(current.total);
+                        delegate.append_sessions(sessions);
+                    }
+                    Err(_) => current.failed = true,
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     // 点击/回车走 ListEvent::Confirm(ix),无需自存选中态
@@ -219,6 +559,319 @@ impl ListDelegate for SessionsDelegate {
         _window: &mut Window,
         _cx: &mut Context<ListState<Self>>,
     ) {
+    }
+}
+
+#[cfg(test)]
+mod session_group_tests {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    use chrono::{Local, NaiveDate, TimeZone as _};
+    use gpui_component::IndexPath;
+    use wake_core::adapters::AgentAdapter;
+    use wake_core::models::{
+        AgentId, ParsedSession, ParsedTranscript, SessionFileRef, SessionFilter, SessionMeta,
+        SortKey, ToolCallView,
+    };
+
+    use super::{
+        build_session_groups_at, clip_tool_text, load_visible_transcript, non_blank_tool_text,
+        same_session_query, session_group_label, session_matches_filter, toggle_expanded_row,
+        tool_cluster_heading, visible_git_branch, SessionsDelegate, SESSION_PAGE_SIZE,
+    };
+
+    struct FailingAdapter;
+
+    impl AgentAdapter for FailingAdapter {
+        fn agent(&self) -> AgentId {
+            AgentId::Codex
+        }
+
+        fn list_session_files(&self) -> anyhow::Result<Vec<SessionFileRef>> {
+            Ok(Vec::new())
+        }
+
+        fn parse_session(&self, _r: &SessionFileRef) -> anyhow::Result<ParsedSession> {
+            Err(anyhow::anyhow!("unused session parser"))
+        }
+
+        fn parse_transcript(&self, _r: &SessionFileRef) -> anyhow::Result<ParsedTranscript> {
+            Err(anyhow::anyhow!("broken transcript fixture"))
+        }
+
+        fn data_roots(&self) -> Vec<PathBuf> {
+            vec![PathBuf::from("/tmp/wake-test")]
+        }
+
+        fn with_custom_root(&self, _dir: PathBuf) -> Box<dyn AgentAdapter> {
+            Box::new(FailingAdapter)
+        }
+    }
+
+    fn local_ms(year: i32, month: u32, day: u32) -> i64 {
+        Local
+            .with_ymd_and_hms(year, month, day, 12, 0, 0)
+            .single()
+            .expect("test date should be unambiguous in the local timezone")
+            .timestamp_millis()
+    }
+
+    fn session(key: &str, updated_at: i64, pinned: bool) -> SessionMeta {
+        SessionMeta {
+            key: key.to_string(),
+            id: key.to_string(),
+            agent: AgentId::Codex,
+            title: key.to_string(),
+            project_path: "/tmp/wake-test".to_string(),
+            project_name: "wake-test".to_string(),
+            file_path: "/tmp/wake-test/session.jsonl".to_string(),
+            created_at: updated_at,
+            updated_at,
+            message_count: 1,
+            size_bytes: 1,
+            git_branch: None,
+            model: None,
+            tokens_used: None,
+            archived: false,
+            source: None,
+            favorite: false,
+            pinned,
+        }
+    }
+
+    fn tool_call(name: &str, input_preview: &str) -> ToolCallView {
+        ToolCallView {
+            id: name.to_string(),
+            name: name.to_string(),
+            input_preview: input_preview.to_string(),
+            input: Some(input_preview.to_string()),
+            output: None,
+            is_error: false,
+            sidechain_ref: None,
+        }
+    }
+
+    #[test]
+    fn date_labels_respect_calendar_week_boundaries() {
+        let wednesday = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+        assert_eq!(
+            session_group_label(local_ms(2026, 9, 1), wednesday),
+            "Yesterday"
+        );
+        assert_eq!(
+            session_group_label(local_ms(2026, 8, 31), wednesday),
+            "Earlier this week"
+        );
+        assert_eq!(
+            session_group_label(local_ms(2026, 8, 30), wednesday),
+            "August"
+        );
+
+        let monday = NaiveDate::from_ymd_opt(2026, 9, 7).unwrap();
+        assert_eq!(
+            session_group_label(local_ms(2026, 9, 6), monday),
+            "Yesterday"
+        );
+        assert_eq!(
+            session_group_label(local_ms(2026, 9, 5), monday),
+            "September"
+        );
+    }
+
+    #[test]
+    fn time_descending_groups_pinned_and_calendar_ranges() {
+        let sessions = vec![
+            session("pinned", local_ms(2025, 1, 1), true),
+            session("today", local_ms(2026, 9, 2), false),
+            session("yesterday", local_ms(2026, 9, 1), false),
+            session("week", local_ms(2026, 8, 31), false),
+            session("month", local_ms(2026, 8, 30), false),
+        ];
+        let groups = build_session_groups_at(
+            &sessions,
+            SortKey::Updated,
+            false,
+            NaiveDate::from_ymd_opt(2026, 9, 2).unwrap(),
+        );
+
+        let labels: Vec<&str> = groups.iter().map(|group| group.label.as_ref()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Pinned",
+                "Today",
+                "Yesterday",
+                "Earlier this week",
+                "August"
+            ]
+        );
+        assert_eq!(groups[0].range, 0..1);
+        assert_eq!(groups[3].range, 3..4);
+
+        let delegate = SessionsDelegate {
+            sessions,
+            groups,
+            grouped_on: NaiveDate::from_ymd_opt(2026, 9, 2).unwrap(),
+            sort: SortKey::Updated,
+            ascending: false,
+            pagination: None,
+        };
+        assert_eq!(delegate.flat_index(IndexPath::new(0).section(3)), Some(3));
+        assert_eq!(delegate.index_path(4), Some(IndexPath::new(0).section(4)));
+    }
+
+    #[test]
+    fn non_time_descending_sorts_stay_flat() {
+        let sessions = vec![
+            session("one", local_ms(2026, 9, 2), false),
+            session("two", local_ms(2026, 9, 1), false),
+        ];
+        for (sort, ascending) in [(SortKey::Messages, false), (SortKey::Updated, true)] {
+            let groups = build_session_groups_at(
+                &sessions,
+                sort,
+                ascending,
+                NaiveDate::from_ymd_opt(2026, 9, 2).unwrap(),
+            );
+            assert_eq!(groups.len(), 1);
+            assert!(groups[0].label.is_empty());
+            assert_eq!(groups[0].range, 0..2);
+        }
+    }
+
+    #[test]
+    fn appended_pages_deduplicate_and_rebuild_flat_indexes() {
+        let one = session("one", local_ms(2026, 9, 2), false);
+        let duplicate = one.clone();
+        let two = session("two", local_ms(2026, 9, 1), false);
+        let mut delegate = SessionsDelegate::new(vec![one], SortKey::Messages, false);
+
+        delegate.append_sessions(vec![duplicate, two]);
+
+        assert_eq!(delegate.sessions.len(), 2);
+        assert_eq!(delegate.sessions[0].key, "one");
+        assert_eq!(delegate.sessions[1].key, "two");
+        assert_eq!(delegate.groups[0].range, 0..2);
+        assert_eq!(delegate.index_path(1), Some(IndexPath::new(1)));
+    }
+
+    #[test]
+    fn date_change_rebuilds_groups_and_stable_indexes() {
+        let september_second = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+        let september_third = NaiveDate::from_ymd_opt(2026, 9, 3).unwrap();
+        let sessions = vec![
+            session("recent", local_ms(2026, 9, 2), false),
+            session("older", local_ms(2026, 9, 1), false),
+        ];
+        let mut delegate =
+            SessionsDelegate::new_at(sessions, SortKey::Updated, false, september_second);
+
+        assert_eq!(delegate.groups[0].label.as_ref(), "Today");
+        assert!(delegate.rebuild_groups_at(september_third));
+        assert_eq!(delegate.groups[0].label.as_ref(), "Yesterday");
+        assert_eq!(delegate.groups[1].label.as_ref(), "Earlier this week");
+        assert_eq!(delegate.index_path(1), Some(IndexPath::new(0).section(1)));
+        assert!(!delegate.rebuild_groups_at(september_third));
+    }
+
+    #[test]
+    fn refresh_query_comparison_ignores_only_page_extent() {
+        let mut current = SessionFilter {
+            limit: SESSION_PAGE_SIZE,
+            ..Default::default()
+        };
+        let mut reloaded = current.clone();
+        reloaded.limit = SESSION_PAGE_SIZE * 3;
+        reloaded.offset = SESSION_PAGE_SIZE * 2;
+        assert!(same_session_query(&current, &reloaded));
+
+        current.favorite_only = true;
+        assert!(!same_session_query(&current, &reloaded));
+    }
+
+    #[test]
+    fn archived_search_hits_are_not_visible_in_active_list() {
+        let mut archived = session("archived", local_ms(2026, 9, 2), false);
+        archived.archived = true;
+        let active_filter = SessionFilter::default();
+        assert!(!session_matches_filter(&archived, &active_filter));
+
+        let archived_filter = SessionFilter {
+            include_archived: true,
+            ..Default::default()
+        };
+        assert!(session_matches_filter(&archived, &archived_filter));
+    }
+
+    #[test]
+    fn meaningless_git_branches_are_hidden() {
+        assert_eq!(visible_git_branch(None), None);
+        assert_eq!(visible_git_branch(Some("")), None);
+        assert_eq!(visible_git_branch(Some(" HEAD ")), None);
+        assert_eq!(visible_git_branch(Some("detached")), None);
+        assert_eq!(visible_git_branch(Some("(detached HEAD)")), None);
+        assert_eq!(
+            visible_git_branch(Some("feature/session-detail")),
+            Some("feature/session-detail")
+        );
+    }
+
+    #[test]
+    fn detail_load_reports_missing_adapter_and_parse_reason() {
+        let meta = session("broken", local_ms(2026, 9, 2), false);
+
+        let missing = load_visible_transcript(&[], &meta).expect_err("adapter should be missing");
+        assert!(missing.contains("No Codex adapter"));
+
+        let adapters: Vec<Box<dyn AgentAdapter>> = vec![Box::new(FailingAdapter)];
+        let parse_error = load_visible_transcript(&adapters, &meta)
+            .expect_err("fixture transcript should fail to parse");
+        assert!(parse_error.contains("broken transcript fixture"));
+    }
+
+    #[test]
+    fn thinking_and_tools_keep_independent_expansion_state() {
+        let mut thinking = HashSet::new();
+        let mut tools = HashSet::new();
+
+        toggle_expanded_row(&mut thinking, 4);
+        assert!(thinking.contains(&4));
+        assert!(!tools.contains(&4));
+
+        toggle_expanded_row(&mut tools, 4);
+        assert!(thinking.contains(&4));
+        assert!(tools.contains(&4));
+
+        toggle_expanded_row(&mut thinking, 4);
+        assert!(!thinking.contains(&4));
+        assert!(tools.contains(&4));
+    }
+
+    #[test]
+    fn tool_summaries_use_unicode_width_and_long_sections_are_marked() {
+        let calls = vec![tool_call("Bash", "搜索中文项目路径")];
+        let (name, argument) = tool_cluster_heading(&calls, 8);
+        assert_eq!(name.as_ref(), "Bash");
+        assert_eq!(
+            argument.as_ref().map(|value| value.as_ref()),
+            Some("搜索中…")
+        );
+
+        let (shown, truncated) = clip_tool_text("abcdef", 3);
+        assert_eq!(shown, "abc…");
+        assert!(truncated);
+
+        let (shown, truncated) = clip_tool_text("abc", 3);
+        assert_eq!(shown, "abc");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn tool_copy_source_preserves_edge_whitespace() {
+        let original = "\n  result  \n";
+        assert_eq!(non_blank_tool_text(original), Some(original));
+        assert_eq!(non_blank_tool_text(" \n\t "), None);
     }
 }
 
@@ -410,17 +1063,280 @@ impl ListDelegate for SearchDelegate {
 
 // ---------------- 详情状态 ----------------
 
+fn visible_git_branch(branch: Option<&str>) -> Option<&str> {
+    let branch = branch?.trim();
+    let normalized = branch.trim_matches(['(', ')']).trim();
+    (!normalized.is_empty()
+        && !normalized.eq_ignore_ascii_case("head")
+        && !normalized.eq_ignore_ascii_case("detached")
+        && !normalized.eq_ignore_ascii_case("detached head"))
+    .then_some(branch)
+}
+
+fn load_visible_transcript(
+    adapters: &[Box<dyn AgentAdapter>],
+    meta: &SessionMeta,
+) -> Result<Vec<TranscriptMessage>, String> {
+    // adapter_for 按文件路径挑实例：自定义 location 的会话必须由拥有其根的
+    // 实例解析；完全找不到对应 agent 时保留可读错误，不再静默变成空详情。
+    let adapter = adapter_for(adapters, meta.agent, &meta.file_path).ok_or_else(|| {
+        format!(
+            "No {} adapter is available for this session path.",
+            meta.agent.display_name()
+        )
+    })?;
+    let session_ref = SessionFileRef::from_meta(meta);
+    let transcript = adapter.parse_transcript(&session_ref).map_err(|error| {
+        format!(
+            "Failed to parse {} session data: {error:#}",
+            meta.agent.display_name()
+        )
+    })?;
+
+    Ok(transcript
+        .mainline
+        .into_iter()
+        .filter(|message| {
+            message.kind != MessageKind::Meta
+                && (!message.text.trim().is_empty()
+                    || !message.tool_calls.is_empty()
+                    || message.thinking.is_some()
+                    || message.kind == MessageKind::CompactSummary)
+        })
+        .collect())
+}
+
+fn toggle_expanded_row(rows: &mut HashSet<usize>, ix: usize) {
+    if !rows.insert(ix) {
+        rows.remove(&ix);
+    }
+}
+
 struct DetailState {
     meta: SessionMeta,
     /// 过滤后的可见消息。Rc 让行渲染以引用计数克隆代替整条消息深拷贝
     transcript: Rc<Vec<TranscriptMessage>>,
     loading: bool,
+    /// 详情解析的具体失败原因；None 表示加载中或成功。
+    error: Option<SharedString>,
     /// 逐消息不等高列表(gpui 原生 ListState,惰性测量)
     msg_list: gpui::ListState,
-    /// 展开的工具簇/thinking(按消息在 transcript 里的下标)
-    expanded_rows: HashSet<usize>,
+    /// 展开的工具簇(按消息在 transcript 里的下标)
+    expanded_tools: HashSet<usize>,
+    /// 展开的 Thinking。与工具簇分开存，避免其中一个把另一个一起展开。
+    expanded_thinking: HashSet<usize>,
     /// 搜索跳转目标(FTS seq,契约=消息 seq);解析完成后滚到该消息并保持高亮
     jump_seq: Option<i64>,
+}
+
+#[cfg(test)]
+mod detail_selection_tests {
+    use std::time::Duration;
+
+    use gpui::{
+        div, list, point, px, AppContext as _, Context, Element as _, InteractiveElement as _,
+        IntoElement, ListAlignment, ListState, Modifiers, MouseButton, MouseMoveEvent,
+        ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext, Window,
+    };
+    use gpui_component::{scroll::AutoScroll, text::TextView, Root, WindowExt as _};
+
+    struct VirtualMessageList {
+        list: ListState,
+    }
+
+    struct AutoScrollingVirtualMessageList {
+        list: ListState,
+        auto_scroll: AutoScroll,
+    }
+
+    impl Render for VirtualMessageList {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            list(self.list.clone(), |ix, _, _| {
+                let text = if ix == 0 {
+                    "First message"
+                } else {
+                    "Second message"
+                };
+                div()
+                    .h(px(60.))
+                    .w_full()
+                    .child(TextView::markdown(("selection-message", ix), text).selectable(true))
+                    .into_any()
+            })
+            .size_full()
+        }
+    }
+
+    impl Render for AutoScrollingVirtualMessageList {
+        #[allow(deprecated)]
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let list_state = self.list.clone();
+            div()
+                .size_full()
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                    let bounds = this.list.viewport_bounds();
+                    let delta = (event.dragging() && window.has_text_selection(cx))
+                        .then(|| AutoScroll::compute_delta(event.position.y, bounds))
+                        .flatten();
+                    this.auto_scroll.set(delta, cx, |delta, this, cx| {
+                        this.list.scroll_by(delta);
+                        cx.notify();
+                    });
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, _| this.auto_scroll.stop()),
+                )
+                .child(
+                    list(list_state, |ix, _, _| {
+                        div()
+                            .h(px(60.))
+                            .w_full()
+                            .child(
+                                TextView::markdown(
+                                    ("auto-scroll-selection-message", ix),
+                                    format!("Message {ix}"),
+                                )
+                                .selectable(true),
+                            )
+                            .into_any()
+                    })
+                    .size_full(),
+                )
+        }
+    }
+
+    #[gpui::test]
+    #[allow(deprecated)]
+    fn window_selection_spans_text_views_inside_gpui_list(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|_| VirtualMessageList {
+                list: ListState::new(2, ListAlignment::Top, px(60.)),
+            });
+            Root::new(view, window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.simulate_mouse_down(
+            point(px(1.), px(15.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(300.), px(75.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(300.), px(75.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let selected = cx.update(|window, cx| window.selected_text(cx));
+        assert!(selected.contains("First message"), "got {selected:?}");
+        assert!(selected.contains("Second message"), "got {selected:?}");
+    }
+
+    #[gpui::test]
+    #[allow(deprecated)]
+    fn shift_click_extends_across_messages_inside_gpui_list(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|_| VirtualMessageList {
+                list: ListState::new(2, ListAlignment::Top, px(60.)),
+            });
+            Root::new(view, window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.simulate_mouse_down(
+            point(px(1.), px(15.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(1.), px(15.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        cx.simulate_mouse_down(point(px(300.), px(75.)), MouseButton::Left, shift);
+        cx.simulate_mouse_up(point(px(300.), px(75.)), MouseButton::Left, shift);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let selected = cx.update(|window, cx| window.selected_text(cx));
+        assert!(selected.contains("First message"), "got {selected:?}");
+        assert!(selected.contains("Second message"), "got {selected:?}");
+    }
+
+    #[gpui::test]
+    fn dragging_selection_at_viewport_edge_auto_scrolls_gpui_list(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|_| AutoScrollingVirtualMessageList {
+                list: ListState::new(100, ListAlignment::Top, px(60.)),
+                auto_scroll: AutoScroll::default(),
+            });
+            Root::new(view, window, cx)
+        });
+        let view = root.read_with(cx, |root, _| {
+            root.view()
+                .clone()
+                .downcast::<AutoScrollingVirtualMessageList>()
+                .unwrap()
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let bounds = view.read_with(cx, |view, _| view.list.viewport_bounds());
+        let x = bounds.left() + px(10.);
+        let anchor = point(x, bounds.top() + px(15.));
+
+        cx.simulate_mouse_down(anchor, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            point(x, bounds.bottom() - px(20.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(x, bounds.bottom() - px(1.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        assert!(view.read_with(cx, |view, _| view.auto_scroll.is_active()));
+
+        cx.executor().advance_clock(Duration::from_millis(32));
+        cx.run_until_parked();
+        let scroll_top = view.read_with(cx, |view, _| view.list.logical_scroll_top());
+        assert!(scroll_top.item_ix > 0 || scroll_top.offset_in_item > px(0.));
+
+        cx.simulate_mouse_up(
+            point(x, bounds.bottom() - px(1.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        assert!(!view.read_with(cx, |view, _| view.auto_scroll.is_active()));
+    }
 }
 
 // ---------------- Workbench ----------------
@@ -468,7 +1384,16 @@ pub struct Workbench {
     palette_input: Entity<InputState>,
     /// 进行中的搜索任务;新输入覆盖旧值即取消过期搜索
     _palette_search_task: Option<Task<()>>,
+    /// 搜索命中不在首批会话时，按页补齐到命中项；新搜索覆盖旧任务。
+    _list_seek_task: Option<Task<()>>,
+    /// delegate 刷新或日期分组变化后，旧 IndexPath 已失效；下一帧按稳定 key
+    /// 恢复选择，必要时继续分页找到目标。
+    pending_list_selection: Option<String>,
+    /// 每分钟触发一次轻量重绘，让跨午夜的 Today/Yesterday 分组自动换日。
+    _calendar_task: Option<Task<()>>,
 
+    /// 文本拖选靠近详情视口边缘时，持续推动外层消息列表。
+    detail_selection_auto_scroll: AutoScroll,
     detail: Option<DetailState>,
 
     /// Insights 页(侧栏底部入口):打开时替换中栏+右栏。与其他导航目的地
@@ -674,9 +1599,7 @@ impl Workbench {
 
         let list_state = cx.new(|cx| {
             ListState::new(
-                SessionsDelegate {
-                    sessions: Vec::new(),
-                },
+                SessionsDelegate::new(Vec::new(), SortKey::Updated, false),
                 window,
                 cx,
             )
@@ -764,6 +1687,10 @@ impl Workbench {
             palette_list,
             palette_input,
             _palette_search_task: None,
+            _list_seek_task: None,
+            pending_list_selection: None,
+            _calendar_task: None,
+            detail_selection_auto_scroll: AutoScroll::default(),
             detail: None,
             insights_open: false,
             insights: None,
@@ -778,6 +1705,14 @@ impl Workbench {
             _subs: subs,
         };
         this.refresh(cx);
+        this._calendar_task = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(60))
+                .await;
+            if this.update(cx, |_, cx| cx.notify()).is_err() {
+                break;
+            }
+        }));
 
         // 索引重建过就告诉用户一声——收藏/置顶没了,总得让人知道为什么。
         // defer 到下一帧:此刻 Root 还没建好,notification 层挂不上
@@ -818,19 +1753,47 @@ impl Workbench {
             title_query: None,
             sort: self.sort_key,
             ascending: self.sort_ascending,
-            limit: 500,
+            limit: SESSION_PAGE_SIZE,
             offset: 0,
         }
     }
 
+    fn selected_list_key(&self, cx: &App) -> Option<String> {
+        let list = self.list_state.read(cx);
+        let delegate = list.delegate();
+        list.selected_index()
+            .and_then(|path| delegate.flat_index(path))
+            .and_then(|flat| delegate.sessions.get(flat))
+            .map(|session| session.key.clone())
+    }
+
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        let filter = self.current_filter();
+        let mut filter = self.current_filter();
+        let selected_key = self
+            .pending_list_selection
+            .clone()
+            .or_else(|| self.selected_list_key(cx));
+        let previously_loaded = {
+            let list = self.list_state.read(cx);
+            let delegate = list.delegate();
+            delegate
+                .pagination
+                .as_ref()
+                .filter(|page| same_session_query(&page.filter, &filter))
+                .map(|_| delegate.sessions.len())
+                .unwrap_or_default()
+        };
+        if previously_loaded > SESSION_PAGE_SIZE as usize {
+            filter.limit = i64::try_from(previously_loaded).unwrap_or(i64::MAX);
+        }
         if let Ok((sessions, total)) = self.store.list_sessions(&filter) {
             self.total_sessions = total;
+            let store = self.store.clone();
             self.list_state.update(cx, |state, cx| {
-                state.delegate_mut().sessions = sessions;
+                *state.delegate_mut() = SessionsDelegate::paged(sessions, filter, total, store);
                 cx.notify();
             });
+            self.pending_list_selection = selected_key;
         }
         let mut counts: Vec<(AgentId, i64)> = self
             .store
@@ -849,6 +1812,33 @@ impl Workbench {
         // 路径都会让页面数据跟上,不设第二条失效通道
         self.reload_insights(cx);
         cx.notify();
+    }
+
+    fn refresh_session_group_date(&mut self, cx: &mut Context<Self>) {
+        let today = Local::now().date_naive();
+        let selected_key = self
+            .pending_list_selection
+            .clone()
+            .or_else(|| self.selected_list_key(cx));
+        let changed = self.list_state.update(cx, |state, cx| {
+            let changed = state.delegate_mut().rebuild_groups_at(today);
+            if changed {
+                cx.notify();
+            }
+            changed
+        });
+        if changed {
+            self.pending_list_selection = selected_key;
+        }
+    }
+
+    fn restore_pending_list_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.pending_list_selection.take() else {
+            return;
+        };
+        if !self.select_list_key(&key, false, window, cx) {
+            self.seek_list_key(&key, window, cx);
+        }
     }
 
     /// 侧栏底部入口。再点一次(或点任意导航行)退回会话列表
@@ -1106,7 +2096,7 @@ impl Workbench {
                     .detach();
                 crate::theme::sync_appearance(Some(window), cx);
                 let settings = cx.new(|cx| SettingsView::new(settings_workbench, window, cx));
-                window.focus(&settings.read(cx).focus_handle(cx));
+                window.focus(&settings.read(cx).focus_handle(cx), cx);
                 cx.new(|cx| Root::new(settings, window, cx))
             },
         ) {
@@ -1463,15 +2453,22 @@ impl Workbench {
                     })
                 });
             if dirty {
-                dialog.footer(move |ok, cancel, window, cx| {
-                    vec![h_flex()
+                dialog.footer(
+                    gpui_component::dialog::DialogFooter::new()
                         .w_full()
-                        .justify_end()
-                        .gap(SPACE_SM)
                         .px(field_inset)
-                        .child(cancel(window, cx))
-                        .child(ok(window, cx))]
-                })
+                        .child(
+                            gpui_component::dialog::DialogClose::new()
+                                .child(Button::new("location-cancel").label("Cancel").outline()),
+                        )
+                        .child(
+                            gpui_component::dialog::DialogAction::new().child(
+                                Button::new("location-save")
+                                    .label(ok_label.clone())
+                                    .primary(),
+                            ),
+                        ),
+                )
             } else {
                 dialog
             }
@@ -1807,13 +2804,17 @@ impl Workbench {
             ListEvent::Select(ix) | ListEvent::Confirm(ix) => *ix,
             ListEvent::Cancel => return,
         };
-        let key = list
-            .read(cx)
-            .delegate()
-            .sessions
-            .get(ix.row)
-            .map(|s| s.key.clone());
+        let key = {
+            let list = list.read(cx);
+            let delegate = list.delegate();
+            delegate
+                .flat_index(ix)
+                .and_then(|flat| delegate.sessions.get(flat))
+                .map(|session| session.key.clone())
+        };
         if let Some(key) = key {
+            // 用户手动选择优先于尚未完成的搜索定位，避免旧任务稍后抢回高亮。
+            self._list_seek_task = None;
             self.open_detail(&key, None, window, cx);
         }
     }
@@ -2078,9 +3079,11 @@ impl Workbench {
             meta: meta.clone(),
             transcript: Rc::new(Vec::new()),
             loading: true,
+            error: None,
             // Bottom 对齐 = 聊天语义:打开落在最新消息,向上翻历史
             msg_list: gpui::ListState::new(0, gpui::ListAlignment::Bottom, px(512.)),
-            expanded_rows: HashSet::new(),
+            expanded_tools: HashSet::new(),
+            expanded_thinking: HashSet::new(),
             jump_seq,
         });
         // 搜索路径:中栏列表同步选中并滚到该会话。
@@ -2092,53 +3095,46 @@ impl Workbench {
 
         let adapters = self.adapters.clone();
         let task = cx.background_spawn(async move {
-            // adapter_for 按文件路径挑实例:自定义 location 的会话必须由
-            // 拥有其根的实例解析(gemini/kimi 的 cwd 反查是实例相对侧档)
-            let adapter = adapter_for(&adapters, meta.agent, &meta.file_path)?;
-            let r = SessionFileRef::from_meta(&meta);
-            let t = adapter.parse_transcript(&r).ok()?;
-            let visible: Vec<TranscriptMessage> = t
-                .mainline
-                .into_iter()
-                .filter(|m| {
-                    m.kind != MessageKind::Meta
-                        && (!m.text.trim().is_empty()
-                            || !m.tool_calls.is_empty()
-                            || m.thinking.is_some()
-                            || m.kind == MessageKind::CompactSummary)
-                })
-                .collect();
-            Some((meta.key.clone(), visible))
+            let result = load_visible_transcript(&adapters, &meta);
+            (meta.key.clone(), result)
         });
         cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
+            let (key, result) = task.await;
             this.update_in(cx, |this, _window, cx| {
                 if let Some(detail) = &mut this.detail {
-                    match result {
-                        Some((key, messages)) if key == detail.meta.key => {
-                            detail.msg_list = gpui::ListState::new(
-                                messages.len(),
-                                gpui::ListAlignment::Bottom,
-                                px(512.),
-                            );
-                            // 搜索跳转:seq → 可见消息下标,滚到视口顶。
-                            // FTS 命中的行可能被详情过滤(如空文本),用 >= 落到
-                            // 其后最近一条;找不到(尾部被滤)则保持默认落底。
-                            // jump_seq 归一为落点消息的实际 seq——高亮按精确相等
-                            // 渲染,不归一则命中被滤时滚动与高亮指向不同行
-                            if let Some(seq) = detail.jump_seq {
-                                if let Some(ix) = messages.iter().position(|m| m.seq >= seq) {
-                                    detail.jump_seq = Some(messages[ix].seq);
-                                    detail.msg_list.scroll_to(gpui::ListOffset {
-                                        item_ix: ix,
-                                        offset_in_item: px(0.),
-                                    });
+                    if key == detail.meta.key {
+                        detail.loading = false;
+                        match result {
+                            Ok(messages) => {
+                                detail.msg_list = gpui::ListState::new(
+                                    messages.len(),
+                                    gpui::ListAlignment::Bottom,
+                                    px(512.),
+                                );
+                                // 搜索跳转:seq → 可见消息下标,滚到视口顶。
+                                // FTS 命中的行可能被详情过滤(如空文本),用 >= 落到
+                                // 其后最近一条;找不到(尾部被滤)则保持默认落底。
+                                // jump_seq 归一为落点消息的实际 seq——高亮按精确相等
+                                // 渲染,不归一则命中被滤时滚动与高亮指向不同行
+                                if let Some(seq) = detail.jump_seq {
+                                    if let Some(ix) = messages.iter().position(|m| m.seq >= seq) {
+                                        detail.jump_seq = Some(messages[ix].seq);
+                                        detail.msg_list.scroll_to(gpui::ListOffset {
+                                            item_ix: ix,
+                                            offset_in_item: px(0.),
+                                        });
+                                    }
                                 }
+                                detail.transcript = Rc::new(messages);
+                                detail.error = None;
                             }
-                            detail.transcript = Rc::new(messages);
-                            detail.loading = false;
+                            Err(error) => {
+                                detail.transcript = Rc::new(Vec::new());
+                                detail.msg_list =
+                                    gpui::ListState::new(0, gpui::ListAlignment::Bottom, px(512.));
+                                detail.error = Some(error.into());
+                            }
                         }
-                        _ => detail.loading = false,
                     }
                 }
                 cx.notify();
@@ -2173,17 +3169,130 @@ impl Workbench {
     /// 搜索命中打开:侧栏切回 All Sessions(搜索是全库范围,过滤视图下
     /// 命中可能不在列表里),中栏定位选中该会话并滚到可见
     fn sync_list_selection(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self._list_seek_task = None;
+        // 全文搜索包含归档会话，而 All Sessions 明确排除归档。归档命中仍可在
+        // 右栏打开，但不能为了一个永远不可见的 key 把所有活动页全部读进内存。
+        if !self
+            .store
+            .get_session(key)
+            .ok()
+            .flatten()
+            .is_some_and(|session| !session.archived)
+        {
+            return;
+        }
         self.show_all_sessions(window, cx);
-        let row = self
-            .list_state
-            .read(cx)
-            .delegate()
-            .sessions
-            .iter()
-            .position(|s| s.key == key);
-        if let Some(row) = row {
-            self.list_state.update(cx, |state, cx| {
-                state.set_selected_index(Some(IndexPath::new(row)), window, cx);
+        // show_all_sessions 的通用刷新会暂存刷新前的旧选择；搜索有更明确的新
+        // 目标，不能让下一帧的恢复逻辑把刚选中的搜索命中覆盖回去。
+        self.pending_list_selection = None;
+        if !self.select_list_key(key, true, window, cx) {
+            self.seek_list_key(key, window, cx);
+        }
+    }
+
+    /// 搜索命中可能落在尚未加载的页。后台逐页补齐到命中项，再用分组后的
+    /// IndexPath 选中；generation 防止筛选/排序变化后旧任务污染新列表。
+    fn seek_list_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let request = {
+            let list = self.list_state.read(cx);
+            let Some(page) = list.delegate().pagination.as_ref() else {
+                return;
+            };
+            if page.next_offset >= page.total {
+                return;
+            }
+            (
+                page.generation,
+                page.filter.clone(),
+                page.next_offset,
+                page.total,
+            )
+        };
+        let (generation, mut filter, mut offset, mut total) = request;
+        if !self
+            .store
+            .get_session(key)
+            .ok()
+            .flatten()
+            .is_some_and(|session| session_matches_filter(&session, &filter))
+        {
+            return;
+        }
+        let store = self.store.clone();
+        let key = key.to_string();
+        let wanted_key = key.clone();
+        let query = cx.background_spawn(async move {
+            let mut loaded = Vec::new();
+            let mut found = false;
+            while offset < total {
+                filter.limit = SESSION_PAGE_SIZE;
+                filter.offset = offset;
+                let (page, current_total) = store.list_sessions(&filter).ok()?;
+                total = current_total.max(0);
+                let received = i64::try_from(page.len()).unwrap_or(i64::MAX);
+                if received == 0 {
+                    offset = total;
+                    break;
+                }
+                found |= page.iter().any(|session| session.key == wanted_key);
+                offset = offset.saturating_add(received).min(total);
+                loaded.extend(page);
+                if found {
+                    break;
+                }
+            }
+            Some((generation, loaded, total, offset, found))
+        });
+
+        self._list_seek_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let Some((generation, sessions, total, next_offset, found)) = query.await else {
+                return;
+            };
+            this.update_in(cx, |this, window, cx| {
+                let applied = this.list_state.update(cx, |state, cx| {
+                    let delegate = state.delegate_mut();
+                    let Some(page) = delegate.pagination.as_mut() else {
+                        return false;
+                    };
+                    if page.generation != generation {
+                        return false;
+                    }
+                    page.total = total;
+                    page.next_offset = page.next_offset.max(next_offset).min(total);
+                    page.failed = false;
+                    delegate.append_sessions(sessions);
+                    cx.notify();
+                    true
+                });
+                if applied && found {
+                    this.select_list_key(&key, true, window, cx);
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// 按稳定 session key 恢复列表选择；排序、置顶和分组都可能改变 IndexPath。
+    fn select_list_key(
+        &mut self,
+        key: &str,
+        scroll: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let path = {
+            let list = self.list_state.read(cx);
+            let delegate = list.delegate();
+            delegate
+                .sessions
+                .iter()
+                .position(|session| session.key == key)
+                .and_then(|flat| delegate.index_path(flat))
+        };
+        self.list_state.update(cx, |state, cx| {
+            state.set_selected_index(path, window, cx);
+            if scroll {
+                let Some(path) = path else { return };
                 // 组件无 strict-Top:非 Center 策略都是"最小滚动恰好可见",
                 // 目标从下方进入会贴底。先把 offset 拉到超底,deferred 消费时
                 // 目标位于视口上方,最小滚动分支即把它对齐到视口顶。
@@ -2191,9 +3300,10 @@ impl Workbench {
                 // scroll_strict 字段目前写死 false 未被读——它被接通之日,
                 // 换成 strict-Top 调用并删掉这行 set_offset
                 state.scroll_handle().set_offset(point(px(0.), px(-1e9)));
-                state.scroll_to_item(IndexPath::new(row), ScrollStrategy::Top, window, cx);
-            });
-        }
+                state.scroll_to_item(path, ScrollStrategy::Top, window, cx);
+            }
+        });
+        path.is_some()
     }
 
     // ---------- 操作 ----------
@@ -2241,21 +3351,25 @@ impl Workbench {
         });
     }
 
-    fn toggle_favorite(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_favorite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(detail) = &mut self.detail {
+            let key = detail.meta.key.clone();
             let v = !detail.meta.favorite;
             let _ = self.store.set_user_data(&detail.meta.key, Some(v), None);
             detail.meta.favorite = v;
             self.refresh(cx);
+            self.select_list_key(&key, false, window, cx);
         }
     }
 
-    fn toggle_pinned(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_pinned(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(detail) = &mut self.detail {
+            let key = detail.meta.key.clone();
             let v = !detail.meta.pinned;
             let _ = self.store.set_user_data(&detail.meta.key, None, Some(v));
             detail.meta.pinned = v;
             self.refresh(cx);
+            self.select_list_key(&key, true, window, cx);
         }
     }
 
@@ -2332,7 +3446,7 @@ impl Workbench {
             .map(|a| a.session_paths(&meta))
             .unwrap_or_else(|| vec![meta.file_path.clone()]);
         let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, cx| {
+        window.open_alert_dialog(cx, move |dialog, _window, cx| {
             let meta = meta.clone();
             let targets = targets.clone();
             let entity = entity.clone();
@@ -2344,7 +3458,7 @@ impl Workbench {
                         .font_semibold()
                         .child("Delete this session?"),
                 )
-                .w(px(440.))
+                .width(px(440.))
                 // 破坏性确认:主按钮点名动作并用 danger 形态,不留裸 "OK"。
                 // .confirm() 必须显式调用——Dialog 只在设了 footer 时才渲染
                 // 按钮行,只挂 on_ok 的弹窗实际无按钮(仅回车可确认)
@@ -2474,7 +3588,7 @@ impl Workbench {
         let show_titlebar = cfg!(target_os = "macos")
             || matches!(window.window_decorations(), Decorations::Client { .. });
         v_flex()
-            .w(px(224.))
+            .w(SIDEBAR_WIDTH)
             .h_full()
             .flex_shrink_0()
             .bg(theme.sidebar)
@@ -2766,10 +3880,15 @@ impl Workbench {
                 let mk_key = |label: &'static str, key: SortKey| {
                     let entity = sort_entity.clone();
                     PopupMenuItem::new(label).checked(sort_key == key).on_click(
-                        move |_, _window, cx| {
+                        move |_, window, cx| {
                             entity.update(cx, |this, cx| {
+                                let selected =
+                                    this.detail.as_ref().map(|detail| detail.meta.key.clone());
                                 this.sort_key = key;
                                 this.refresh(cx);
+                                if let Some(selected) = selected {
+                                    this.select_list_key(&selected, true, window, cx);
+                                }
                             });
                         },
                     )
@@ -2778,10 +3897,15 @@ impl Workbench {
                     let entity = sort_entity.clone();
                     PopupMenuItem::new(label)
                         .checked(sort_ascending == ascending)
-                        .on_click(move |_, _window, cx| {
+                        .on_click(move |_, window, cx| {
                             entity.update(cx, |this, cx| {
+                                let selected =
+                                    this.detail.as_ref().map(|detail| detail.meta.key.clone());
                                 this.sort_ascending = ascending;
                                 this.refresh(cx);
+                                if let Some(selected) = selected {
+                                    this.select_list_key(&selected, true, window, cx);
+                                }
                             });
                         })
                 };
@@ -2793,12 +3917,12 @@ impl Workbench {
                     .item(mk_dir("Descending", false))
                     .item(mk_dir("Ascending", true))
             })
-            .anchor(Corner::TopRight);
+            .anchor(Anchor::TopRight);
         v_flex()
-            .w(px(336.))
+            .w(SESSION_STREAM_WIDTH)
             .h_full()
             .flex_shrink_0()
-            .bg(theme.list)
+            .bg(theme.colors.list)
             .child(
                 v_flex()
                     .id("list-header")
@@ -2918,9 +4042,16 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // 详情宽度随窗口变化；工具头要用当前可用像素反算显示格数，再交给
+        // unicode-width 截断，避免窄窗口溢出、宽窗口仍停在固定长度。
+        let reader_width =
+            (window.viewport_size().width - SIDEBAR_WIDTH - SESSION_STREAM_WIDTH - SPACE_XXL * 2.)
+                .clamp(px(220.), READER_MAX_WIDTH);
+        let tool_summary_width = (reader_width - px(156.)).max(px(80.));
+        let tool_arg_cells =
+            ((f32::from(tool_summary_width) / TOOL_MONO_CELL_WIDTH) as usize).max(8);
         let theme = cx.theme();
         let dark = theme.mode.is_dark();
-        let muted_fg = theme.muted_foreground;
         // 尾部要用的 Copy 值提前取出,theme 借用不跨越 inner 构建期的 &mut cx
         let jump_bg = theme.primary.opacity(0.09);
         let jump_radius = theme.radius;
@@ -2928,7 +4059,8 @@ impl Workbench {
             return div().into_any_element();
         };
         let total = detail.transcript.len();
-        let expanded = detail.expanded_rows.contains(&ix);
+        let tools_open = detail.expanded_tools.contains(&ix);
+        let thinking_open = detail.expanded_thinking.contains(&ix);
         let jump_seq = detail.jump_seq;
         // Rc 克隆只加引用计数;逐行借用,避免每帧深拷贝整条消息(text 可达 32KB)
         let transcript = detail.transcript.clone();
@@ -2937,7 +4069,7 @@ impl Workbench {
         };
         // 只有 thinking、没有回复正文或工具调用的中间事件属于运行日志，
         // 连续铺在阅读视图里会把真正的对话切碎；完整原始记录仍保留在源文件中。
-        if matches!(m.role, Role::Assistant)
+        if matches!(m.role, MessageRole::Assistant)
             && m.text.is_empty()
             && m.tool_calls.is_empty()
             && m.thinking.is_some()
@@ -2951,7 +4083,7 @@ impl Workbench {
             centered_pill("Context compacted", cx).into_any_element()
         } else {
             match m.role {
-                Role::User => h_flex()
+                MessageRole::User => h_flex()
                     .w_full()
                     .justify_end()
                     .child(
@@ -2963,68 +4095,60 @@ impl Workbench {
                             .px(px(14.))
                             .py(SPACE_SM)
                             .text_size(FONT_MSG_USER)
-                            .child(
-                                TextView::markdown(
-                                    SharedString::from(format!("dmsg-{}", m.seq)),
-                                    m.text.clone(),
-                                    window,
-                                    cx,
-                                )
-                                .style(TextViewStyle {
-                                    heading_base_font_size: FONT_MSG_USER,
-                                    paragraph_gap: gpui::rems(0.5),
-                                    is_dark: dark,
-                                    ..Default::default()
-                                })
-                                .line_height(relative(1.45))
-                                .selectable(true),
-                            ),
+                            .line_height(relative(1.85))
+                            .child(markdown_body(
+                                format!("dmsg-{}", m.seq).into(),
+                                m.text.clone(),
+                                FONT_MSG_USER,
+                                gpui::rems(0.5),
+                                dark,
+                                window,
+                                cx,
+                            )),
                     )
                     .into_any_element(),
-                Role::Assistant => {
+                MessageRole::Assistant => {
                     let mut col = v_flex().w_full().min_w_0().gap(SPACE_SM);
-                    if !m.text.is_empty() {
-                        if let Some(th) = &m.thinking {
-                            col = col.child(
-                                div()
-                                    .text_size(FONT_MSG_THINKING)
-                                    .italic()
-                                    .text_color(muted_fg)
-                                    .truncate()
-                                    .child(format!("Thinking · {}", one_line(th, 200))),
-                            );
-                        }
+                    if let Some(thinking) = &m.thinking {
+                        col = col.child(thinking_panel(
+                            ix,
+                            thinking,
+                            thinking_open,
+                            cx.listener(move |this, _, _window, cx| {
+                                if let Some(detail) = &mut this.detail {
+                                    toggle_expanded_row(&mut detail.expanded_thinking, ix);
+                                    detail.msg_list.splice(ix..ix + 1, 1);
+                                }
+                                cx.notify();
+                            }),
+                            cx,
+                        ));
                     }
                     if !m.text.is_empty() {
                         col = col.child(
-                            div().text_size(FONT_MSG_BODY).child(
-                                TextView::markdown(
-                                    SharedString::from(format!("dmsg-{}", m.seq)),
+                            div()
+                                .text_size(FONT_MSG_BODY)
+                                .line_height(relative(1.9))
+                                .child(markdown_body(
+                                    format!("dmsg-{}", m.seq).into(),
                                     m.text.clone(),
+                                    FONT_MSG_BODY,
+                                    gpui::rems(0.6),
+                                    dark,
                                     window,
                                     cx,
-                                )
-                                .style(TextViewStyle {
-                                    heading_base_font_size: FONT_MSG_BODY,
-                                    paragraph_gap: gpui::rems(0.6),
-                                    is_dark: dark,
-                                    ..Default::default()
-                                })
-                                .line_height(relative(1.5))
-                                .selectable(true),
-                            ),
+                                )),
                         );
                     }
                     if !m.tool_calls.is_empty() {
                         col = col.child(tool_cluster(
                             ix,
                             &m.tool_calls,
-                            expanded,
+                            tool_arg_cells,
+                            tools_open,
                             cx.listener(move |this, _, _window, cx| {
                                 if let Some(detail) = &mut this.detail {
-                                    if !detail.expanded_rows.insert(ix) {
-                                        detail.expanded_rows.remove(&ix);
-                                    }
+                                    toggle_expanded_row(&mut detail.expanded_tools, ix);
                                     // 行高随展开变化,让 list 重测该行
                                     detail.msg_list.splice(ix..ix + 1, 1);
                                 }
@@ -3035,7 +4159,7 @@ impl Workbench {
                     }
                     col.into_any_element()
                 }
-                Role::System => centered_pill(one_line(&m.text, 120), cx).into_any_element(),
+                MessageRole::System => centered_pill(one_line(&m.text, 120), cx).into_any_element(),
             }
         };
 
@@ -3051,7 +4175,7 @@ impl Workbench {
             .child(
                 div()
                     .w_full()
-                    .max_w(px(720.))
+                    .max_w(READER_MAX_WIDTH)
                     .min_w_0()
                     // 淡 primary 底:标记搜索命中落点(尾部命中不滚动,全靠它识别)。
                     // 负 margin + 等量 padding:背景向外扩出呼吸边,内容原位不推挤,
@@ -3210,10 +4334,10 @@ impl Workbench {
                 div().w_full().flex().justify_center().px(SPACE_XXL).child(
                     v_flex()
                         .w_full()
-                        .max_w(px(720.))
+                        .max_w(READER_MAX_WIDTH)
                         .pt(SPACE_SM)
                         .pb(px(40.))
-                        .gap(px(32.))
+                        .gap(INSIGHTS_SECTION_GAP)
                         .child(overview)
                         .child(
                             v_flex()
@@ -3367,6 +4491,38 @@ impl Workbench {
             .into_any_element()
     }
 
+    #[allow(deprecated)]
+    fn update_detail_selection_auto_scroll(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let has_selection = event.dragging() && window.has_text_selection(cx);
+        let delta = self.detail.as_ref().and_then(|detail| {
+            let bounds = detail.msg_list.viewport_bounds();
+            (has_selection
+                && !detail.msg_list.is_scrollbar_dragging()
+                && event.position.x >= bounds.left()
+                && event.position.x <= bounds.right())
+            .then(|| AutoScroll::compute_delta(event.position.y, bounds))
+            .flatten()
+        });
+
+        self.detail_selection_auto_scroll
+            .set(delta, cx, |delta, this, cx| {
+                let Some(detail) = &this.detail else {
+                    return;
+                };
+                detail.msg_list.scroll_by(delta);
+                cx.notify();
+            });
+    }
+
+    fn stop_detail_selection_auto_scroll(&mut self) {
+        self.detail_selection_auto_scroll.stop();
+    }
+
     fn render_detail(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let Some(detail) = &self.detail else {
@@ -3390,6 +4546,7 @@ impl Workbench {
                 .into_any_element();
         };
         let meta = &detail.meta;
+        let detail_title_tooltip: SharedString = meta.title.clone().into();
         let session_id = meta.id.clone();
         let export_entity = cx.entity();
         let reveal_entity = export_entity.clone();
@@ -3398,7 +4555,7 @@ impl Workbench {
             .ghost()
             .rounded(RADIUS_BUTTON)
             .icon(icon("icons/more-horizontal.svg").with_size(px(16.)))
-            .dropdown_menu(move |menu, _, _| {
+            .dropdown_menu(move |menu, _, cx| {
                 let export_entity = export_entity.clone();
                 let reveal_entity = reveal_entity.clone();
                 let delete_entity = delete_entity.clone();
@@ -3435,16 +4592,22 @@ impl Workbench {
                     )
                     .separator()
                     .item(
-                        PopupMenuItem::new(format!(" {MOVE_TO_TRASH}"))
-                            .icon(icon("icons/trash-2.svg").with_size(px(15.)))
-                            .on_click(move |_, window, cx| {
-                                delete_entity.update(cx, |this, cx| {
-                                    this.confirm_delete(window, cx);
-                                });
-                            }),
+                        PopupMenuItem::element(|_, cx| {
+                            div().text_color(cx.theme().danger).child(MOVE_TO_TRASH)
+                        })
+                        .icon(
+                            icon("icons/trash-2.svg")
+                                .with_size(px(15.))
+                                .text_color(cx.theme().danger),
+                        )
+                        .on_click(move |_, window, cx| {
+                            delete_entity.update(cx, |this, cx| {
+                                this.confirm_delete(window, cx);
+                            });
+                        }),
                     )
             })
-            .anchor(Corner::TopRight);
+            .anchor(Anchor::TopRight);
 
         let detail_path: SharedString = if meta.project_path.is_empty() {
             "Unknown project".to_string()
@@ -3473,6 +4636,29 @@ impl Workbench {
                 format!("Updated {}", abs_date(meta.updated_at)).into(),
             )
         });
+        let branch: Option<SharedString> =
+            visible_git_branch(meta.git_branch.as_deref()).map(|branch| branch.to_string().into());
+        let project_badge: AnyElement = {
+            let badge = badge(
+                meta.project_name.clone(),
+                theme.muted,
+                theme.muted_foreground,
+            );
+            if meta.project_path.is_empty() {
+                div().child(badge).into_any_element()
+            } else {
+                let project_path = meta.project_path.clone();
+                div()
+                    .id("detail-project")
+                    .cursor_pointer()
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new(SHOW_IN_FM).build(window, cx)
+                    })
+                    .on_click(move |_, _, _| terminal::open_in_file_manager(&project_path))
+                    .child(badge)
+                    .into_any_element()
+            }
+        };
 
         v_flex()
             .flex_1()
@@ -3505,8 +4691,8 @@ impl Workbench {
                                     .text_color(theme.muted_foreground)
                                     .child(img(meta.agent.brand_icon(theme.mode.is_dark())).size(px(15.)).flex_shrink_0())
                                     .child(div().flex_shrink_0().child(meta.agent.display_name()))
-                                    .child(badge(meta.project_name.clone(), theme.muted, theme.muted_foreground))
-                                    .when_some(meta.git_branch.clone(), |this, branch| {
+                                    .child(project_badge)
+                                    .when_some(branch, |this, branch| {
                                         this.child(
                                             h_flex()
                                                 .min_w_0()
@@ -3647,7 +4833,7 @@ impl Workbench {
                                                         }
                                                         menu
                                                     })
-                                                    .anchor(Corner::TopRight),
+                                                    .anchor(Anchor::TopRight),
                                             )
                                     })
                                     .child(tool_btn(
@@ -3684,19 +4870,29 @@ impl Workbench {
                             ),
                     )
                     .child(
-                        h_flex()
+                        div()
                             .w_full()
-                            .h(WINDOW_TITLEBAR_HEIGHT)
+                            .min_h(WINDOW_TITLEBAR_HEIGHT)
                             .min_w_0()
+                            .py(SPACE_SM)
+                            .flex()
                             .items_center()
                             .child(
                                 div()
+                                    .id("detail-title")
+                                    .w_full()
                                     .min_w_0()
-                                    .truncate()
+                                    .whitespace_normal()
                                     .text_size(FONT_TITLE)
                                     .line_height(relative(1.15))
                                     .font_semibold()
-                                    .child(meta.title.clone()),
+                                    .child(meta.title.clone())
+                                    .tooltip(move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(
+                                            detail_title_tooltip.clone(),
+                                        )
+                                        .build(window, cx)
+                                    }),
                             ),
                     )
                     .child(
@@ -3829,6 +5025,54 @@ impl Workbench {
                     .text_color(theme.muted_foreground)
                     .child(Spinner::new().small())
                     .child(div().text_size(FONT_BODY).child("Loading session…"))
+                    .into_any_element()
+            } else if let Some(error) = detail.error.clone() {
+                let reveal_path = meta.file_path.clone();
+                v_flex()
+                    .flex_1()
+                    .bg(theme.popover)
+                    .items_center()
+                    .justify_center()
+                    .px(SPACE_XXL)
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .max_w(px(520.))
+                            .items_center()
+                            .gap(SPACE_MD)
+                            .child(
+                                icon("icons/circle-x.svg")
+                                    .with_size(px(24.))
+                                    .text_color(theme.danger),
+                            )
+                            .child(
+                                div()
+                                    .text_size(FONT_HEADING)
+                                    .font_semibold()
+                                    .text_color(theme.foreground)
+                                    .child("Couldn't load this session"),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .whitespace_normal()
+                                    .text_center()
+                                    .text_size(FONT_CAPTION)
+                                    .text_color(theme.muted_foreground)
+                                    .child(error),
+                            )
+                            .child(
+                                Button::new("reveal-failed-session")
+                                    .outline()
+                                    .small()
+                                    .rounded(RADIUS_BUTTON)
+                                    .icon(icon("icons/folder.svg").with_size(px(13.)))
+                                    .label(REVEAL_IN_FM)
+                                    .on_click(move |_, _, _| {
+                                        terminal::reveal_in_file_manager(&reveal_path)
+                                    }),
+                            ),
+                    )
                     .into_any_element()
             } else {
                 let entity = cx.entity().downgrade();
@@ -4010,7 +5254,7 @@ fn usage_bar_row(
     let theme = cx.theme();
     let frac = (count as f32 / max.max(1) as f32).clamp(0., 1.);
     h_flex()
-        .h(px(22.))
+        .h(SPACE_XXL)
         .gap(SPACE_SM)
         .items_center()
         .when_some(lead, |row, lead| {
@@ -4172,7 +5416,7 @@ fn render_distribution(range: InsightsRange, values: &[i64], peak: usize, cx: &A
                         .id(("dist", i))
                         .flex_1()
                         .h(height)
-                        .rounded(px(2.))
+                        .rounded(RADIUS_CELL)
                         .bg(bg)
                         .tooltip(move |window, cx| {
                             gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx)
@@ -4296,7 +5540,7 @@ fn render_heatmap(d: &InsightsData, cx: &App) -> AnyElement {
                 div()
                     .id(("hm", ix))
                     .size(px(CELL))
-                    .rounded(px(2.))
+                    .rounded(RADIUS_CELL)
                     .bg(heat_color(n))
                     // 只捕获 Copy 的 (start, ix, n),hover 到的那格才格式化
                     .tooltip(move |window, cx| {
@@ -4338,7 +5582,7 @@ fn render_heatmap(d: &InsightsData, cx: &App) -> AnyElement {
                 .flex_shrink_0()
                 .child("Less")
                 .children(std::iter::once(0.).chain(HEAT).map(|a: f32| {
-                    div().size(px(CELL)).rounded(px(2.)).bg(if a == 0. {
+                    div().size(px(CELL)).rounded(RADIUS_CELL).bg(if a == 0. {
                         theme.muted
                     } else {
                         theme.primary.opacity(a)
@@ -4433,120 +5677,446 @@ fn centered_pill(text: impl Into<SharedString>, cx: &App) -> Div {
     )
 }
 
-/// 工具调用折叠簇:头行(chevron + 名字序列 + 失败计数)默认收起,
-/// 展开为左竖线缩进列表;仅失败项内联输出(错误才是回顾重点)。
+/// 对话正文共用的 Markdown 视图。表格、引用块与分隔线由组件原生解析；
+/// Wake 只覆写标题层级、代码块表面、语法配色和代码操作区。
+fn markdown_body(
+    id: SharedString,
+    text: String,
+    base: Pixels,
+    paragraph_gap: gpui::Rems,
+    dark: bool,
+    _window: &mut Window,
+    cx: &mut App,
+) -> TextView {
+    let theme = cx.theme();
+    let code_bg = theme.muted;
+    let code_border = theme.border;
+    let code_radius = theme.radius;
+    // TextView 的语法颜色在解析阶段固化；把主题写进 id，让模式切换走同步
+    // 首次解析路径，避免代码块短暂保留上一种模式的颜色。
+    let themed_id: SharedString = format!("{id}-{}", if dark { "dark" } else { "light" }).into();
+
+    TextView::markdown(themed_id, text)
+        .style(
+            TextViewStyle {
+                heading_base_font_size: base,
+                paragraph_gap,
+                is_dark: dark,
+                highlight_theme: if dark {
+                    HighlightTheme::default_dark()
+                } else {
+                    HighlightTheme::default_light()
+                },
+                ..Default::default()
+            }
+            .heading_font_size(|level, base| match level {
+                1 => base * 1.45,
+                2 => base * 1.28,
+                3 => base * 1.14,
+                4 => base * 1.05,
+                _ => base,
+            })
+            .code_block(
+                StyleRefinement::default()
+                    .bg(code_bg)
+                    .border_1()
+                    .border_color(code_border)
+                    .rounded(code_radius)
+                    .px(SPACE_LG)
+                    .py(SPACE_MD),
+            ),
+        )
+        .code_block_actions(|block, _window, cx| {
+            let theme = cx.theme();
+            let code = block.code();
+            h_flex()
+                .items_center()
+                .gap(SPACE_SM)
+                .px(px(6.))
+                .text_size(FONT_LABEL)
+                .text_color(theme.muted_foreground)
+                .when_some(block.lang(), |actions, lang| actions.child(lang))
+                .child(
+                    div()
+                        .id("code-copy")
+                        .size(px(20.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(RADIUS_BADGE)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.secondary_hover))
+                        .tooltip(|window, cx| {
+                            gpui_component::tooltip::Tooltip::new("Copy code").build(window, cx)
+                        })
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()));
+                        })
+                        .child(icon("icons/copy.svg").with_size(px(12.))),
+                )
+        })
+        .selectable(true)
+}
+
+/// Thinking 折叠面板：收起是一行摘要，展开后显示完整原文。
+fn thinking_panel(
+    ix: usize,
+    text: &str,
+    expanded: bool,
+    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Div {
+    let theme = cx.theme();
+    let summary = clip_display(&one_line(text, 400), 88);
+    let mut panel = v_flex()
+        .w_full()
+        .min_w_0()
+        .rounded(theme.radius)
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.muted.opacity(0.45))
+        .child(
+            h_flex()
+                .id(("thinking", ix))
+                .w_full()
+                .min_w_0()
+                .items_center()
+                .gap(px(7.))
+                .px(SPACE_MD)
+                .py(SPACE_SM)
+                .cursor_pointer()
+                .text_size(FONT_MSG_THINKING)
+                .text_color(theme.muted_foreground)
+                .hover(|style| style.text_colored(theme.foreground, FONT_MSG_THINKING))
+                .child(
+                    icon("icons/chevron-right.svg")
+                        .with_size(px(11.))
+                        .flex_shrink_0()
+                        .when(expanded, |icon| {
+                            icon.rotate(gpui::Radians(std::f32::consts::FRAC_PI_2))
+                        }),
+                )
+                .child(div().flex_shrink_0().font_medium().child("Thinking"))
+                .when(!expanded, |header| {
+                    header.child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .italic()
+                            .child(summary),
+                    )
+                })
+                .on_click(on_toggle),
+        );
+
+    if expanded {
+        panel = panel.child(
+            div()
+                .w_full()
+                .min_w_0()
+                .pl(px(30.))
+                .pr(SPACE_MD)
+                .pb(SPACE_MD)
+                .whitespace_normal()
+                .text_size(FONT_MSG_THINKING)
+                .line_height(relative(1.7))
+                .text_color(theme.muted_foreground)
+                .child(text.to_string()),
+        );
+    }
+
+    panel
+}
+
+const TOOL_TEXT_PREVIEW_LIMIT: usize = 600;
+
+fn tool_cluster_heading(
+    calls: &[ToolCallView],
+    arg_cells: usize,
+) -> (SharedString, Option<SharedString>) {
+    match calls {
+        [] => ("No tool calls".into(), None),
+        [only] => {
+            let arg = (!only.input_preview.trim().is_empty())
+                .then(|| clip_display(&only.input_preview, arg_cells).into());
+            (only.name.clone().into(), arg)
+        }
+        many => {
+            let names = many
+                .iter()
+                .map(|call| call.name.as_str())
+                .collect::<Vec<_>>()
+                .join(" · ");
+            (
+                format!("{} tool calls", many.len()).into(),
+                Some(clip_display(&names, arg_cells).into()),
+            )
+        }
+    }
+}
+
+fn clip_tool_text(text: &str, limit: usize) -> (String, bool) {
+    let mut chars = text.chars();
+    let mut shown: String = chars.by_ref().take(limit).collect();
+    let truncated = chars.next().is_some();
+    if truncated {
+        shown.push('…');
+    }
+    (shown, truncated)
+}
+
+/// 工具调用折叠卡：收起显示名称/数量、Unicode 宽度感知的参数摘要和失败数；
+/// 展开显示可用的完整 Input 与成功/失败 Output。正文只展示前 600 字符，
+/// 但复制按钮始终复制完整内容，不使用会抢主阅读区滚轮的嵌套滚动容器。
 fn tool_cluster(
     ix: usize,
     calls: &[ToolCallView],
+    arg_cells: usize,
     expanded: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> Div {
     let theme = cx.theme();
     let failed = calls.iter().filter(|c| c.is_error).count();
-    let names = calls
-        .iter()
-        .map(|c| c.name.as_str())
-        .collect::<Vec<_>>()
-        .join(" · ");
-    let head_label = if calls.len() == 1 {
-        names.clone()
-    } else {
-        format!("{} tools · {}", calls.len(), names)
-    };
+    let (head_name, head_arg) = tool_cluster_heading(calls, arg_cells);
     let mono = theme.mono_font_family.clone();
+    let panel_border = theme.border;
 
-    let mut cluster = v_flex().w_full().min_w_0().gap(px(4.)).child(
-        h_flex()
-            .id(("tool-cluster", ix))
-            .w_full()
-            .min_w_0()
-            .gap(px(6.))
-            .cursor_pointer()
-            .text_size(FONT_CAPTION)
-            .text_color(theme.muted_foreground)
-            .hover(|s| s.text_colored(theme.foreground, FONT_CAPTION))
-            .child(
-                icon("icons/chevron-right.svg")
-                    .with_size(px(11.))
-                    .flex_shrink_0()
-                    .when(expanded, |ic| {
-                        ic.rotate(gpui::Radians(std::f32::consts::FRAC_PI_2))
-                    }),
-            )
-            .child(div().min_w_0().truncate().font_medium().child(head_label))
-            .when(failed > 0, |this| {
-                this.child(
+    let mut cluster = v_flex()
+        .w_full()
+        .min_w_0()
+        .rounded(theme.radius)
+        .border_1()
+        .border_color(panel_border)
+        .bg(theme.muted.opacity(0.35))
+        .child(
+            h_flex()
+                .id(("tool-cluster", ix))
+                .w_full()
+                .min_w_0()
+                .items_center()
+                .gap(px(7.))
+                .px(SPACE_MD)
+                .py(SPACE_SM)
+                .cursor_pointer()
+                .text_size(FONT_MSG_THINKING)
+                .text_color(theme.muted_foreground)
+                .hover(|style| style.text_colored(theme.foreground, FONT_MSG_THINKING))
+                .child(
+                    icon("icons/chevron-right.svg")
+                        .with_size(px(11.))
+                        .flex_shrink_0()
+                        .when(expanded, |icon| {
+                            icon.rotate(gpui::Radians(std::f32::consts::FRAC_PI_2))
+                        }),
+                )
+                .child(
                     div()
                         .flex_shrink_0()
-                        .text_color(theme.danger)
-                        .child(format!("{failed} failed")),
+                        .font_medium()
+                        .text_color(theme.foreground)
+                        .child(head_name),
                 )
-            })
-            .on_click(on_toggle),
-    );
+                .when_some(head_arg, |header, arg| {
+                    header.child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .font_family(mono.clone())
+                            .child(arg),
+                    )
+                })
+                .child(div().flex_1())
+                .when(failed > 0, |header| {
+                    header.child(
+                        div()
+                            .flex_shrink_0()
+                            .px(px(7.))
+                            .rounded(RADIUS_BADGE)
+                            .text_size(FONT_LABEL)
+                            .text_color(theme.danger)
+                            .bg(theme.danger.opacity(0.12))
+                            .child(format!("{failed} failed")),
+                    )
+                })
+                .on_click(on_toggle),
+        );
+
     if expanded {
         let mut items = v_flex()
             .w_full()
             .min_w_0()
-            .ml(px(5.))
-            .pl(px(12.))
-            .border_l_1()
-            .border_color(theme.border)
-            .gap(px(6.));
-        for tc in calls {
-            let mut item = v_flex().w_full().min_w_0().gap(px(2.)).child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_size(FONT_CAPTION)
-                            .font_medium()
-                            .text_color(if tc.is_error {
-                                theme.danger
-                            } else {
-                                theme.foreground
-                            })
-                            .child(tc.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(FONT_MSG_THINKING)
-                            .font_family(mono.clone())
-                            .text_color(theme.muted_foreground)
-                            .child(tc.input_preview.clone()),
-                    ),
-            );
-            if tc.is_error {
-                if let Some(out) = &tc.output {
-                    let shown: String = out.trim().chars().take(400).collect();
-                    if !shown.is_empty() {
-                        item = item.child(
+            .border_t_1()
+            .border_color(panel_border);
+        for (call_ix, call) in calls.iter().enumerate() {
+            let mut item = v_flex()
+                .w_full()
+                .min_w_0()
+                .px(SPACE_MD)
+                .py(px(10.))
+                .gap(px(6.))
+                .when(call_ix > 0, |item| {
+                    item.border_t_1().border_color(panel_border)
+                });
+
+            if calls.len() > 1 {
+                item = item.child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .gap(px(7.))
+                        .child(
                             div()
-                                .w_full()
+                                .flex_shrink_0()
+                                .text_size(FONT_MSG_THINKING)
+                                .font_medium()
+                                .text_color(if call.is_error {
+                                    theme.danger
+                                } else {
+                                    theme.foreground
+                                })
+                                .child(call.name.clone()),
+                        )
+                        .child(
+                            div()
                                 .min_w_0()
-                                .px(px(8.))
-                                .py(px(5.))
-                                .rounded(RADIUS_KBD)
-                                .bg(theme.muted)
-                                .text_size(FONT_LABEL)
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(FONT_MSG_THINKING)
                                 .font_family(mono.clone())
                                 .text_color(theme.muted_foreground)
-                                .child(shown),
-                        );
-                    }
-                }
+                                .child(clip_display(&call.input_preview, arg_cells)),
+                        ),
+                );
             }
+
+            let input = call.input.as_deref().and_then(non_blank_tool_text);
+            if let Some(input) = input {
+                item = item.child(tool_section(
+                    format!("tool-copy-{ix}-{call_ix}-input").into(),
+                    "Input",
+                    input,
+                    false,
+                    mono.clone(),
+                    cx,
+                ));
+            } else if let Some(input_preview) = non_blank_tool_text(&call.input_preview) {
+                item = item.child(tool_section(
+                    format!("tool-copy-{ix}-{call_ix}-input-preview").into(),
+                    "Input preview",
+                    input_preview,
+                    false,
+                    mono.clone(),
+                    cx,
+                ));
+            }
+
+            if let Some(output) = call.output.as_deref().and_then(non_blank_tool_text) {
+                item = item.child(tool_section(
+                    format!("tool-copy-{ix}-{call_ix}-output").into(),
+                    "Output",
+                    output,
+                    call.is_error,
+                    mono.clone(),
+                    cx,
+                ));
+            }
+
             items = items.child(item);
         }
         cluster = cluster.child(items);
     }
     cluster
+}
+
+/// 空白只参与“是否有内容”的判断；展示与复制必须保留工具原始输出的边界空白。
+fn non_blank_tool_text(text: &str) -> Option<&str> {
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn tool_section(
+    copy_id: SharedString,
+    label: &'static str,
+    body: &str,
+    is_error: bool,
+    mono: SharedString,
+    cx: &App,
+) -> Div {
+    let theme = cx.theme();
+    let (shown, truncated) = clip_tool_text(body, TOOL_TEXT_PREVIEW_LIMIT);
+    let full = body.to_string();
+    let copy_tooltip: SharedString = format!("Copy full {}", label.to_lowercase()).into();
+
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .gap(SPACE_XS)
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap(SPACE_SM)
+                .text_size(FONT_LABEL)
+                .text_color(if is_error {
+                    theme.danger
+                } else {
+                    theme.muted_foreground
+                })
+                .child(label)
+                .when(truncated, |header| {
+                    header.child(
+                        div()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("First {TOOL_TEXT_PREVIEW_LIMIT} characters")),
+                    )
+                })
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .id(copy_id)
+                        .size(px(20.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(RADIUS_BADGE)
+                        .cursor_pointer()
+                        .text_color(theme.muted_foreground)
+                        .hover(|style| style.bg(theme.secondary_hover).text_color(theme.foreground))
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(copy_tooltip.clone())
+                                .build(window, cx)
+                        })
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(full.clone()));
+                        })
+                        .child(icon("icons/copy.svg").with_size(px(12.))),
+                ),
+        )
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .px(px(10.))
+                .py(px(7.))
+                .rounded(RADIUS_KBD)
+                .bg(if is_error {
+                    theme.danger.opacity(0.08)
+                } else {
+                    theme.muted
+                })
+                .whitespace_normal()
+                .text_size(FONT_MSG_THINKING)
+                .line_height(relative(1.6))
+                .font_family(mono)
+                .text_color(if is_error {
+                    theme.danger
+                } else {
+                    theme.muted_foreground
+                })
+                .child(shown),
+        )
 }
 
 /// 小胶囊 badge(项目名/model/source 共用):4px 圆角,内部截断。
@@ -4753,6 +6323,8 @@ impl Focusable for Workbench {
 
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.refresh_session_group_date(cx);
+        self.restore_pending_list_selection(window, cx);
         let theme = cx.theme();
         div()
             .id("workbench")
@@ -4765,6 +6337,13 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &OpenSettings, _window, cx| this.open_settings(cx)))
             .on_action(cx.listener(|this, _: &OpenUpdates, _window, cx| this.open_updates(cx)))
             .on_action(cx.listener(|this, _: &OpenAbout, _window, cx| this.open_about(cx)))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                this.update_detail_selection_auto_scroll(event, window, cx)
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.stop_detail_selection_auto_scroll()),
+            )
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)

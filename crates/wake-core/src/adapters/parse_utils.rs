@@ -332,6 +332,7 @@ pub fn is_injected_user_content(text: &str) -> bool {
     const PREFIXES: &[&str] = &[
         "<recommended_plugins",
         "<environment_context",
+        "<user_action",
         "<user_instructions",
         "<permissions",
         "<workspace",

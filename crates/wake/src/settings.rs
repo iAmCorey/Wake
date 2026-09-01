@@ -59,10 +59,11 @@ fn settings_button(button: Button, cx: &App) -> Button {
             ButtonCustomVariant::new(cx)
                 .color(theme.secondary)
                 .foreground(theme.secondary_foreground)
-                .border(theme.border)
                 .hover(theme.secondary_hover)
                 .active(theme.secondary_active),
         )
+        .border_1()
+        .border_color(theme.border)
         .small()
         .rounded(RADIUS_BUTTON)
 }
@@ -76,11 +77,12 @@ fn settings_primary_button(button: Button, cx: &App) -> Button {
             ButtonCustomVariant::new(cx)
                 .color(theme.primary)
                 .foreground(theme.primary_foreground)
-                .border(theme.primary)
                 .hover(theme.primary_hover)
                 .active(theme.primary_active)
                 .shadow(true),
         )
+        .border_1()
+        .border_color(theme.primary)
         .rounded(RADIUS_BUTTON)
 }
 
@@ -241,7 +243,6 @@ impl SettingsView {
                     } else {
                         theme.muted_foreground
                     })
-                    .border(theme.transparent)
                     .hover(theme.secondary_hover)
                     .active(theme.popover),
             )

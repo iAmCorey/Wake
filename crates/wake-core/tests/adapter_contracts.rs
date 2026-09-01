@@ -365,6 +365,13 @@ fn codex_subagent_ref() -> SessionFileRef {
         "33333333-aaaa-bbbb-cccc-000000000003",
     )
 }
+fn codex_review_ref() -> SessionFileRef {
+    fs_ref(
+        AgentId::Codex,
+        &fixture("codex/sessions/2026/08/09/rollout-2026-08-09T10-30-00-44444444-aaaa-bbbb-cccc-000000000004.jsonl"),
+        "44444444-aaaa-bbbb-cccc-000000000004",
+    )
+}
 fn qoder_ref() -> SessionFileRef {
     fs_ref(
         AgentId::Qoder,
@@ -555,6 +562,36 @@ fn codex_parse_contract() {
         s.units.iter().map(|u| u.seq).collect::<Vec<_>>(),
         vec![1, 2, 3]
     );
+}
+
+#[test]
+fn codex_review_output_is_readable_and_not_duplicated() {
+    setup();
+    let adapter = CodexAdapter::new();
+    let r = codex_review_ref();
+    let transcript = adapter
+        .parse_transcript(&r)
+        .expect("codex review transcript");
+
+    assert_eq!(transcript.mainline.len(), 1);
+    let review = &transcript.mainline[0];
+    assert_eq!(review.role, Role::Assistant);
+    assert_eq!(review.kind, MessageKind::Text);
+    assert!(review.text.contains("## Code review"));
+    assert!(review.text.contains("Changes requested"));
+    assert!(review.text.contains("[P2] Keep the selected row"));
+    assert!(review.text.contains("workbench.rs:42–44"));
+    assert!(review.text.contains("98%"));
+    assert!(!review.text.contains("Fallback review text"));
+    assert!(!review.text.contains("\"findings\""));
+    assert!(!review.text.contains("<user_action>"));
+    assert_eq!(transcript.unknown_line_count, 0);
+
+    let session = adapter.parse_session(&r).expect("codex review session");
+    assert_eq!(session.meta.message_count, 1);
+    assert_eq!(session.meta.title, UNTITLED);
+    assert_eq!(session.units.len(), 1);
+    assert!(session.units[0].text.contains("Keep the selected row"));
 }
 
 #[test]

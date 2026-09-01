@@ -14,13 +14,19 @@ wake-core = { path = "../wake-core" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-gpui = "0.2"
-gpui-component = { version = "0.5", features = ["tree-sitter-languages"] }
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "fd3bc2bbb8a2c4dfe268c1475682476ada54cd0c", features = ["tree-sitter-languages"] }
 futures = "0.3"
 chrono.workspace = true
 dirs.workspace = true
 semver.workspace = true
 reqwest.workspace = true
+unicode-width = "0.2"
+unicode-segmentation = "1.13"
+
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", features = ["test-support"] }
 
 # exe 图标 + 版本资源(build.rs 里按 CARGO_CFG_TARGET_OS 判目标生效)。
 # 不做 target 门控:build-dependencies 的 [target.*] 匹配语义在 host/target

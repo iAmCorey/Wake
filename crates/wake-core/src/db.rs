@@ -630,7 +630,7 @@ impl Store {
         let sql = format!(
             "SELECT {SESSION_COLS} FROM sessions s LEFT JOIN user_data u ON u.session_key = s.key
              {where_sql}
-             ORDER BY COALESCE(u.pinned,0) DESC, {order_col} {order_dir} LIMIT ? OFFSET ?"
+             ORDER BY COALESCE(u.pinned,0) DESC, {order_col} {order_dir}, s.key ASC LIMIT ? OFFSET ?"
         );
         let mut stmt = conn.prepare_cached(&sql)?;
         let limit = if f.limit > 0 { f.limit } else { 500 };

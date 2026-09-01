@@ -25,7 +25,7 @@ use workbench::{
 actions!(wake_app, [Quit, CloseWindow]);
 
 fn main() {
-    let app = Application::new().with_assets(Assets);
+    let app = gpui_platform::application().with_assets(Assets);
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
         gpui_component::set_locale("en");
@@ -61,6 +61,7 @@ fn main() {
             Menu {
                 name: "Wake".into(),
                 items: wake_menu_items,
+                disabled: false,
             },
             Menu {
                 name: "File".into(),
@@ -69,6 +70,7 @@ fn main() {
                     MenuItem::separator(),
                     MenuItem::action("Close Window", CloseWindow),
                 ],
+                disabled: false,
             },
         ]);
 
@@ -121,7 +123,7 @@ fn main() {
                 theme::sync_appearance(Some(window), cx);
 
                 let workbench = cx.new(|cx| Workbench::new(window, cx));
-                window.focus(&workbench.read(cx).focus_handle(cx));
+                window.focus(&workbench.read(cx).focus_handle(cx), cx);
                 cx.new(|cx| Root::new(workbench, window, cx))
             },
         );

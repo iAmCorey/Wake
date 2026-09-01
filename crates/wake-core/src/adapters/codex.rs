@@ -6,6 +6,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -152,6 +153,141 @@ fn friendly_source(originator: &str) -> Option<String> {
     })
 }
 
+/// Codex Desktop 把一次 review 同时写成注入式 `<user_action>` 与
+/// `ExitedReviewMode.review_output`。前者只作结构化事件的文本兜底，不应以
+/// “用户消息 + XML 外壳”的形态出现在详情里。
+fn review_results_from_user_action(text: &str) -> Option<String> {
+    let text = text.trim();
+    if !text.starts_with("<user_action") || extract_tag(text, "action")?.trim() != "review" {
+        return None;
+    }
+    let results = extract_tag(text, "results")?;
+    (!results.trim().is_empty()).then(|| results.trim().to_string())
+}
+
+fn review_confidence(value: Option<&Value>) -> Option<String> {
+    let value = value?.as_f64()?;
+    let percent = if (0.0..=1.0).contains(&value) {
+        value * 100.0
+    } else {
+        value
+    };
+    percent.is_finite().then(|| format!("{percent:.0}%"))
+}
+
+/// review 的机器 JSON 转成详情页 Markdown。严格要求 `findings` 数组，避免
+/// 把用户恰好贴出的普通 JSON 误判成 review。
+fn format_review_output(review: &Value) -> Option<String> {
+    let findings = review.get("findings")?.as_array()?;
+    let mut out = String::from("## Code review\n\n");
+
+    let verdict = review
+        .get("overall_correctness")
+        .and_then(Value::as_str)
+        .map(|value| match value {
+            "patch is correct" => "Passed",
+            "patch is incorrect" => "Changes requested",
+            other => other,
+        });
+    let confidence = review_confidence(review.get("overall_confidence_score"));
+    let mut facts = Vec::new();
+    if let Some(verdict) = verdict {
+        facts.push(format!("**Result:** {verdict}"));
+    }
+    if let Some(confidence) = confidence {
+        facts.push(format!("**Confidence:** {confidence}"));
+    }
+    if !facts.is_empty() {
+        out.push_str(&facts.join(" · "));
+        out.push_str("\n\n");
+    }
+
+    if let Some(explanation) = review
+        .get("overall_explanation")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        out.push_str(explanation);
+        out.push_str("\n\n");
+    }
+
+    out.push_str("### Findings\n\n");
+    if findings.is_empty() {
+        out.push_str("No findings.");
+        return Some(out);
+    }
+
+    for (index, finding) in findings.iter().enumerate() {
+        let title = finding
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or("Untitled finding")
+            .replace(['\r', '\n'], " ");
+        let priority = finding.get("priority").and_then(Value::as_i64);
+        let heading = if title.starts_with("[P") {
+            title
+        } else if let Some(priority) = priority {
+            format!("[P{priority}] {title}")
+        } else {
+            title
+        };
+        let _ = write!(out, "#### {}. {heading}\n\n", index + 1);
+
+        if let Some(body) = finding
+            .get("body")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|body| !body.is_empty())
+        {
+            out.push_str(body);
+            out.push_str("\n\n");
+        }
+
+        if let Some(location) = finding.get("code_location") {
+            if let Some(path) = location.get("absolute_file_path").and_then(Value::as_str) {
+                let range = location.get("line_range");
+                let start = range
+                    .and_then(|range| range.get("start"))
+                    .and_then(Value::as_i64);
+                let end = range
+                    .and_then(|range| range.get("end"))
+                    .and_then(Value::as_i64);
+                let suffix = match (start, end) {
+                    (Some(start), Some(end)) if start != end => format!(":{start}–{end}"),
+                    (Some(start), _) => format!(":{start}"),
+                    _ => String::new(),
+                };
+                // 路径理论上不会含反引号；替换掉可避免异常输入打断 Markdown。
+                let path = path.replace('`', "'");
+                let _ = write!(out, "**Location:** `{path}{suffix}`\n\n");
+            }
+        }
+
+        if let Some(confidence) = review_confidence(finding.get("confidence_score")) {
+            let _ = write!(out, "**Confidence:** {confidence}\n\n");
+        }
+    }
+
+    Some(out.trim_end().to_string())
+}
+
+fn format_review_json(text: &str) -> Option<String> {
+    let text = text.trim();
+    let review: Value = match serde_json::from_str(text) {
+        Ok(review) => review,
+        Err(_) => {
+            // 某些 reviewer 把键名按 Markdown 写成 `confidence\_score`；这类
+            // 输出不是合法 JSON，只在初次解析失败后做窄化兼容。
+            let unescaped = text.replace("\\_", "_");
+            serde_json::from_str(&unescaped).ok()?
+        }
+    };
+    format_review_output(&review)
+}
+
 fn parse_rollout(path: &Path) -> Result<CodexParse> {
     let file = fs::File::open(path)?;
     let reader = BufReader::with_capacity(1 << 20, file);
@@ -159,6 +295,7 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
     let mut messages: Vec<TranscriptMessage> = Vec::new();
     let mut event_fallback: Vec<TranscriptMessage> = Vec::new();
     let mut tool_index: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut pending_review_message: Option<usize> = None;
     let mut cwd = String::new();
     let mut git_branch: Option<String> = None;
     let mut model: Option<String> = None;
@@ -258,9 +395,20 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
                         }
                         match role {
                             "user" => {
-                                messages.push(mk_msg(Role::User, user_kind(&text), &text, ts))
+                                if let Some(results) = review_results_from_user_action(&text) {
+                                    messages.push(mk_msg(
+                                        Role::Assistant,
+                                        MessageKind::Text,
+                                        &results,
+                                        ts,
+                                    ));
+                                    pending_review_message = Some(messages.len() - 1);
+                                } else {
+                                    messages.push(mk_msg(Role::User, user_kind(&text), &text, ts));
+                                }
                             }
                             "assistant" => {
+                                let text = format_review_json(&text).unwrap_or(text);
                                 messages.push(mk_msg(Role::Assistant, MessageKind::Text, &text, ts))
                             }
                             _ => messages.push(mk_msg(Role::System, MessageKind::Meta, &text, ts)),
@@ -386,19 +534,60 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
                     "user_message" => {
                         if let Some(m) = payload.get("message").and_then(|v| v.as_str()) {
                             if !m.trim().is_empty() {
-                                event_fallback.push(mk_msg(Role::User, user_kind(m), m.trim(), ts));
+                                if let Some(results) = review_results_from_user_action(m) {
+                                    event_fallback.push(mk_msg(
+                                        Role::Assistant,
+                                        MessageKind::Text,
+                                        &results,
+                                        ts,
+                                    ));
+                                } else {
+                                    event_fallback.push(mk_msg(
+                                        Role::User,
+                                        user_kind(m),
+                                        m.trim(),
+                                        ts,
+                                    ));
+                                }
                             }
                         }
                     }
                     "agent_message" => {
                         if let Some(m) = payload.get("message").and_then(|v| v.as_str()) {
                             if !m.trim().is_empty() {
+                                let text = format_review_json(m).unwrap_or_else(|| m.trim().into());
                                 event_fallback.push(mk_msg(
                                     Role::Assistant,
                                     MessageKind::Text,
-                                    m.trim(),
+                                    &text,
                                     ts,
                                 ));
+                            }
+                        }
+                    }
+                    "item_completed" => {
+                        let item = payload.get("item");
+                        let is_review = item
+                            .and_then(|item| item.get("type"))
+                            .and_then(Value::as_str)
+                            == Some("ExitedReviewMode");
+                        if is_review {
+                            if let Some(markdown) = item
+                                .and_then(|item| item.get("review_output"))
+                                .and_then(format_review_output)
+                            {
+                                let review_message =
+                                    mk_msg(Role::Assistant, MessageKind::Text, &markdown, ts);
+                                if let Some(index) = pending_review_message
+                                    .take()
+                                    .filter(|index| *index + 1 == messages.len())
+                                {
+                                    messages[index] = review_message;
+                                } else if !messages.last().is_some_and(|message| {
+                                    message.role == Role::Assistant && message.text == markdown
+                                }) {
+                                    messages.push(review_message);
+                                }
                             }
                         }
                     }
@@ -679,5 +868,38 @@ impl AgentAdapter for CodexAdapter {
             scan_sessions: self.scan_sessions && !roots.contains(&self.sessions_dir),
             scan_archived: self.scan_archived && !roots.contains(&self.archived_dir),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_review_json_is_formatted_instead_of_exposed() {
+        let raw = serde_json::json!({
+            "findings": [{
+                "title": "A finding",
+                "body": "Human-readable detail.",
+                "confidence_score": 0.91,
+                "priority": 1,
+                "code_location": {
+                    "absolute_file_path": "/tmp/example.rs",
+                    "line_range": { "start": 7, "end": 7 }
+                }
+            }],
+            "overall_correctness": "patch is incorrect",
+            "overall_explanation": "One issue remains.",
+            "overall_confidence_score": 0.95
+        })
+        .to_string();
+
+        let formatted = format_review_json(&raw).expect("review JSON");
+        assert!(formatted.contains("## Code review"));
+        assert!(formatted.contains("[P1] A finding"));
+        assert!(formatted.contains("`/tmp/example.rs:7`"));
+        assert!(!formatted.contains("\"findings\""));
+        assert!(format_review_json(&raw.replace('_', "\\_")).is_some());
+        assert!(format_review_json(r#"{"ordinary":"json"}"#).is_none());
     }
 }

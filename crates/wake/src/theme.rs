@@ -110,7 +110,7 @@ pub fn apply_wake_theme(cx: &mut App) {
         theme.sidebar_primary = c(0x4C8DFF);
         theme.sidebar_primary_foreground = c(0xFFFFFF);
 
-        theme.list = c(0x20201F);
+        theme.colors.list = c(0x20201F);
         theme.list_hover = c(0x2A2A28);
         theme.list_active = c(0x303B4C);
         theme.list_active_border = c(0x303B4C);
@@ -172,7 +172,7 @@ pub fn apply_wake_theme(cx: &mut App) {
         theme.sidebar_primary = c(0x0A84FF);
         theme.sidebar_primary_foreground = c(0xFFFFFF);
 
-        theme.list = c(0xF7F7F5);
+        theme.colors.list = c(0xF7F7F5);
         theme.list_hover = c(0xEDEDEA);
         theme.list_active = c(0xE3EBF6);
         theme.list_active_border = c(0xE3EBF6);

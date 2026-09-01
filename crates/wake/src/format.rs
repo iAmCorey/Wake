@@ -1,4 +1,36 @@
 use chrono::{DateTime, Datelike, Duration, Local, TimeZone};
+use unicode_segmentation::UnicodeSegmentation as _;
+use unicode_width::UnicodeWidthStr as _;
+
+/// 按终端显示单元宽度截断文本，并在确有截断时补一个省略号。
+///
+/// CJK 宽字符按 2 个单元计算，并以 Unicode 字素簇为不可拆分单位；这比按
+/// code point 范围猜测宽度准确，也不会切断 ZWJ/肤色修饰 Emoji。
+pub fn clip_display(s: &str, max_width: usize) -> String {
+    if s.width() <= max_width {
+        return s.to_string();
+    }
+
+    let ellipsis = "…";
+    let ellipsis_width = ellipsis.width();
+    if max_width < ellipsis_width {
+        return String::new();
+    }
+
+    let content_width = max_width - ellipsis_width;
+    let mut clipped = String::new();
+    let mut used = 0;
+    for grapheme in s.graphemes(true) {
+        let width = grapheme.width();
+        if used + width > content_width {
+            break;
+        }
+        clipped.push_str(grapheme);
+        used += width;
+    }
+    clipped.push_str(ellipsis);
+    clipped
+}
 
 /// 会话时间的渐进式展示：越近越强调新鲜度，越远越强调日期锚点。
 pub fn smart_time(ts: i64) -> String {
@@ -182,5 +214,32 @@ mod tests {
             smart_time_from(local_time(2025, 8, 21, 12, 0).timestamp_millis(), &now),
             "Aug 21, 2025"
         );
+    }
+
+    #[test]
+    fn clip_display_counts_cjk_and_latin_widths() {
+        assert_eq!(clip_display("Wake 会话", 9), "Wake 会话");
+        assert_eq!(clip_display("Wake 会话标题", 9), "Wake 会…");
+        assert_eq!(clip_display("超长会话标题", 7), "超长会…");
+    }
+
+    #[test]
+    fn clip_display_respects_zero_width_marks_and_tiny_limits() {
+        let combined = "e\u{301}clair";
+        assert_eq!(clip_display(combined, 4), "e\u{301}cl…");
+        assert_eq!(clip_display("abc", 1), "…");
+        assert_eq!(clip_display("abc", 0), "");
+    }
+
+    #[test]
+    fn clip_display_never_splits_emoji_grapheme_clusters() {
+        let family = "👩‍👩‍👧‍👦";
+        assert_eq!(
+            clip_display(&format!("{family}xy"), 3),
+            format!("{family}…")
+        );
+
+        let toned = "👍🏽";
+        assert_eq!(clip_display(&format!("{toned}xy"), 3), format!("{toned}…"));
     }
 }
