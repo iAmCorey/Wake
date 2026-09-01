@@ -24,8 +24,81 @@ use workbench::{
 
 actions!(wake_app, [Quit, CloseWindow]);
 
+// macOS:用户关掉最后一个窗后进程仍留 Dock,点 Dock 图标走 NSApplication 的
+// applicationShouldHandleReopen → gpui Platform::on_reopen。这里复用启动期
+// 的开窗配置,空窗重建、有窗只是把已存在的拉到前台,不重复实例
+fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
+    let bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
+    // macOS:隐藏系统标题栏、内容顶到窗顶,traffic light 悬浮在侧栏上;
+    // Linux/Windows:标准系统标题栏(appears_transparent=false)。Windows
+    // 后端按此保留原生 caption(min/max/close、snap layouts、深色模式随
+    // 系统由 gpui 设 DWMWA_USE_IMMERSIVE_DARK_MODE),title 即窗名;
+    // GNOME Wayland 不给 SSD 时回落 CSD,见 window_decorations 注释。
+    // cfg! 而非 #[cfg]:两支在任一平台都参与类型检查,别让另一支只有 CI 见得到
+    let titlebar = if cfg!(target_os = "macos") {
+        TitlebarOptions {
+            title: None,
+            appears_transparent: true,
+            // 44px Wake 顶部净空中垂直居中 13.5px traffic lights。
+            traffic_light_position: Some(point(px(20.), px(15.))),
+        }
+    } else {
+        TitlebarOptions {
+            title: Some("Wake".into()),
+            appears_transparent: false,
+            traffic_light_position: None,
+        }
+    };
+    cx.open_window(
+        WindowOptions {
+            titlebar: Some(titlebar),
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(940.), px(620.))),
+            // Linux 桌面按它归组窗口、匹配 .desktop(StartupWMClass=wake)
+            app_id: Some("wake".into()),
+            // Wayland 显式请求 CSD(2026-08-24 Codex review):默认的 Server
+            // 请求在 GNOME/Mutter(无 zxdg-decoration 协议)下会被 gpui 记成
+            // Server 而 compositor 实际什么都不画——窗口既无系统标题栏、
+            // workbench 又按 Server 不挂 TitleBar,彻底没有关窗/拖拽面。
+            // 请求 Client 后:Wayland 全家走 CSD(TitleBar 补位),X11 侧
+            // gpui 探测 compositor 不支持 CSD 时仍自动回报 Server(WM 标题
+            // 栏照常、TitleBar 不挂),macOS/Windows 忽略此字段(Windows
+            // 后端不实现 request_decorations,runtime 恒报 Server)
+            window_decorations: Some(WindowDecorations::Client),
+            ..Default::default()
+        },
+        |window, cx| {
+            // 跟随系统深浅色切换
+            window
+                .observe_window_appearance(|window, cx| {
+                    theme::sync_appearance(Some(window), cx);
+                })
+                .detach();
+            theme::sync_appearance(Some(window), cx);
+
+            let workbench = cx.new(|cx| Workbench::new(window, cx));
+            window.focus(&workbench.read(cx).focus_handle(cx), cx);
+            cx.new(|cx| Root::new(workbench, window, cx))
+        },
+    )
+}
+
 fn main() {
     let app = gpui_platform::application().with_assets(Assets);
+    // macOS:用户关掉最后一个窗后进程仍留 Dock,点 Dock 图标走 NSApplication 的
+    // applicationShouldHandleReopen → gpui Platform::on_reopen。空窗重建、
+    // 有窗只是把已存在的拉到前台,不重复实例
+    app.on_reopen(|cx| {
+        if cx.windows().is_empty() {
+            if let Err(e) = open_main_window(cx) {
+                wake_core::services::terminal::show_fatal_alert(&format!(
+                    "Wake couldn't reopen its window: {e}"
+                ));
+                std::process::exit(1);
+            }
+        }
+        cx.activate(true);
+    });
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
         gpui_component::set_locale("en");
@@ -74,59 +147,7 @@ fn main() {
             },
         ]);
 
-        let bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
-        // macOS:隐藏系统标题栏、内容顶到窗顶,traffic light 悬浮在侧栏上;
-        // Linux/Windows:标准系统标题栏(appears_transparent=false)。Windows
-        // 后端按此保留原生 caption(min/max/close、snap layouts、深色模式随
-        // 系统由 gpui 设 DWMWA_USE_IMMERSIVE_DARK_MODE),title 即窗名;
-        // GNOME Wayland 不给 SSD 时回落 CSD,见 window_decorations 注释。
-        // cfg! 而非 #[cfg]:两支在任一平台都参与类型检查,别让另一支只有 CI 见得到
-        let titlebar = if cfg!(target_os = "macos") {
-            TitlebarOptions {
-                title: None,
-                appears_transparent: true,
-                // 44px Wake 顶部净空中垂直居中 13.5px traffic lights。
-                traffic_light_position: Some(point(px(20.), px(15.))),
-            }
-        } else {
-            TitlebarOptions {
-                title: Some("Wake".into()),
-                appears_transparent: false,
-                traffic_light_position: None,
-            }
-        };
-        let window = cx.open_window(
-            WindowOptions {
-                titlebar: Some(titlebar),
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(940.), px(620.))),
-                // Linux 桌面按它归组窗口、匹配 .desktop(StartupWMClass=wake)
-                app_id: Some("wake".into()),
-                // Wayland 显式请求 CSD(2026-08-24 Codex review):默认的 Server
-                // 请求在 GNOME/Mutter(无 zxdg-decoration 协议)下会被 gpui 记成
-                // Server 而 compositor 实际什么都不画——窗口既无系统标题栏、
-                // workbench 又按 Server 不挂 TitleBar,彻底没有关窗/拖拽面。
-                // 请求 Client 后:Wayland 全家走 CSD(TitleBar 补位),X11 侧
-                // gpui 探测 compositor 不支持 CSD 时仍自动回报 Server(WM 标题
-                // 栏照常、TitleBar 不挂),macOS/Windows 忽略此字段(Windows
-                // 后端不实现 request_decorations,runtime 恒报 Server)
-                window_decorations: Some(WindowDecorations::Client),
-                ..Default::default()
-            },
-            |window, cx| {
-                // 跟随系统深浅色切换
-                window
-                    .observe_window_appearance(|window, cx| {
-                        theme::sync_appearance(Some(window), cx);
-                    })
-                    .detach();
-                theme::sync_appearance(Some(window), cx);
-
-                let workbench = cx.new(|cx| Workbench::new(window, cx));
-                window.focus(&workbench.read(cx).focus_handle(cx), cx);
-                cx.new(|cx| Root::new(workbench, window, cx))
-            },
-        );
+        let window = open_main_window(cx);
         // 开窗失败必须自己报:release 的 Windows 子系统没有 stderr,panic
         // 消息无处可去,用户看到的就是任务栏闪一下然后什么都没有
         //(GPU/驱动起不来、RDP 会话等都会走到这)。show_fatal_alert 会弹
