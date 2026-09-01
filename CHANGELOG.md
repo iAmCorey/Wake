@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.3.4] — 2026-09-01
+
 - New: inline images from every readable agent transcript format now appear with compact thumbnails, full-window zoom, copy, and collision-safe save-to-Downloads actions; unsupported image formats can still be saved in their original bytes
 - Performance and privacy: image bytes are decoded only when a transcript is opened, each image is capped at 12 MiB with a 64 MiB transcript budget, remote URLs and transcript-supplied local paths are never dereferenced, and background indexing keeps lightweight `[image]` placeholders instead of base64 payloads
 - Fix: global search now closes reliably when clicking outside its panel while remaining open when switching to another application
