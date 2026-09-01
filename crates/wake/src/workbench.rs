@@ -192,36 +192,44 @@ fn session_group_label(ts: i64, today: NaiveDate) -> SharedString {
     date.format("%B %Y").to_string().into()
 }
 
-fn build_session_groups_at(
-    sessions: &[SessionMeta],
+#[derive(Debug, Clone)]
+struct SessionListRow {
+    meta: SessionMeta,
+    depth: u8,
+    child_count: i64,
+    expanded: bool,
+    /// 子会话必须紧跟父会话，不能因自己的时间戳被拆进另一个日期 section。
+    group_timestamp: i64,
+    group_pinned: bool,
+}
+
+fn build_row_groups_at(
+    rows: &[SessionListRow],
     sort: SortKey,
     ascending: bool,
     today: NaiveDate,
 ) -> Vec<SessionGroup> {
     let time_descending = !ascending && matches!(sort, SortKey::Updated | SortKey::Created);
-    if sessions.is_empty() || !time_descending {
+    if rows.is_empty() || !time_descending {
         return vec![SessionGroup {
             label: "".into(),
-            range: 0..sessions.len(),
+            range: 0..rows.len(),
         }];
     }
 
     let mut groups = Vec::new();
-    let pinned_count = sessions.iter().take_while(|session| session.pinned).count();
+    let pinned_count = rows.iter().take_while(|row| row.group_pinned).count();
     if pinned_count > 0 {
         groups.push(SessionGroup {
             label: "Pinned".into(),
             range: 0..pinned_count,
         });
     }
-
     let mut start = pinned_count;
-    while start < sessions.len() {
-        let label = session_group_label(session_group_timestamp(&sessions[start], sort), today);
+    while start < rows.len() {
+        let label = session_group_label(rows[start].group_timestamp, today);
         let mut end = start + 1;
-        while end < sessions.len()
-            && session_group_label(session_group_timestamp(&sessions[end], sort), today) == label
-        {
+        while end < rows.len() && session_group_label(rows[end].group_timestamp, today) == label {
             end += 1;
         }
         groups.push(SessionGroup {
@@ -238,6 +246,7 @@ fn same_session_query(left: &SessionFilter, right: &SessionFilter) -> bool {
         && left.project_path == right.project_path
         && left.favorite_only == right.favorite_only
         && left.include_archived == right.include_archived
+        && left.roots_only == right.roots_only
         && left.title_query == right.title_query
         && left.sort == right.sort
         && left.ascending == right.ascending
@@ -264,7 +273,12 @@ fn session_matches_filter(session: &SessionMeta, filter: &SessionFilter) -> bool
 }
 
 pub struct SessionsDelegate {
+    /// 分页查询返回的根会话；next_offset 只能按它推进，展开的孩子不参与分页。
     pub sessions: Vec<SessionMeta>,
+    rows: Vec<SessionListRow>,
+    children: HashMap<String, Vec<SessionMeta>>,
+    child_counts: HashMap<String, i64>,
+    expanded: HashSet<String>,
     groups: Vec<SessionGroup>,
     grouped_on: NaiveDate,
     sort: SortKey,
@@ -283,15 +297,20 @@ impl SessionsDelegate {
         ascending: bool,
         grouped_on: NaiveDate,
     ) -> Self {
-        let groups = build_session_groups_at(&sessions, sort, ascending, grouped_on);
-        Self {
+        let mut delegate = Self {
             sessions,
-            groups,
+            rows: Vec::new(),
+            children: HashMap::new(),
+            child_counts: HashMap::new(),
+            expanded: HashSet::new(),
+            groups: Vec::new(),
             grouped_on,
             sort,
             ascending,
             pagination: None,
-        }
+        };
+        delegate.rebuild_rows_at(grouped_on);
+        delegate
     }
 
     fn paged(
@@ -300,7 +319,13 @@ impl SessionsDelegate {
         total: i64,
         store: Arc<Store>,
     ) -> Self {
+        let child_counts = if filter.roots_only {
+            store.child_counts(&filter).unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
         let mut delegate = Self::new(sessions, filter.sort, filter.ascending);
+        delegate.child_counts = child_counts;
         delegate.pagination = Some(SessionPagination {
             store,
             total: total.max(0),
@@ -310,12 +335,55 @@ impl SessionsDelegate {
             loading: false,
             failed: false,
         });
+        delegate.rebuild_rows();
         delegate
     }
 
-    fn rebuild_groups(&mut self) {
-        let today = Local::now().date_naive();
-        self.groups = build_session_groups_at(&self.sessions, self.sort, self.ascending, today);
+    fn tree_mode(&self) -> bool {
+        self.pagination
+            .as_ref()
+            .is_some_and(|page| page.filter.roots_only)
+    }
+
+    fn rebuild_rows(&mut self) {
+        self.rebuild_rows_at(Local::now().date_naive());
+    }
+
+    fn rebuild_rows_at(&mut self, today: NaiveDate) {
+        let tree_mode = self.tree_mode();
+        let mut rows = Vec::new();
+        for root in &self.sessions {
+            let child_count = if tree_mode {
+                self.child_counts.get(&root.key).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            let expanded = child_count > 0 && self.expanded.contains(&root.key);
+            let group_timestamp = session_group_timestamp(root, self.sort);
+            let group_pinned = root.pinned;
+            rows.push(SessionListRow {
+                meta: root.clone(),
+                depth: 0,
+                child_count,
+                expanded,
+                group_timestamp,
+                group_pinned,
+            });
+            if expanded {
+                if let Some(children) = self.children.get(&root.key) {
+                    rows.extend(children.iter().cloned().map(|child| SessionListRow {
+                        meta: child,
+                        depth: 1,
+                        child_count: 0,
+                        expanded: false,
+                        group_timestamp,
+                        group_pinned,
+                    }));
+                }
+            }
+        }
+        self.rows = rows;
+        self.groups = build_row_groups_at(&self.rows, self.sort, self.ascending, today);
         self.grouped_on = today;
     }
 
@@ -323,7 +391,7 @@ impl SessionsDelegate {
         if self.grouped_on == today {
             return false;
         }
-        let groups = build_session_groups_at(&self.sessions, self.sort, self.ascending, today);
+        let groups = build_row_groups_at(&self.rows, self.sort, self.ascending, today);
         let changed = groups != self.groups;
         self.groups = groups;
         self.grouped_on = today;
@@ -340,17 +408,93 @@ impl SessionsDelegate {
             page.into_iter()
                 .filter(|session| keys.insert(session.key.clone())),
         );
-        self.rebuild_groups();
+        if let Some(pagination) = &self.pagination {
+            if pagination.filter.roots_only {
+                self.child_counts = pagination
+                    .store
+                    .child_counts(&pagination.filter)
+                    .unwrap_or_default();
+            }
+        }
+        self.rebuild_rows();
     }
 
-    /// 把组件发出的分组坐标还原为 `sessions` 的平铺下标。
+    fn restore_expanded(&mut self, expanded: HashSet<String>) {
+        if !self.tree_mode() {
+            return;
+        }
+        let root_keys: HashSet<&str> = self.sessions.iter().map(|root| root.key.as_str()).collect();
+        self.expanded = expanded
+            .into_iter()
+            .filter(|key| root_keys.contains(key.as_str()))
+            .collect();
+        self.reload_expanded();
+    }
+
+    fn reload_expanded(&mut self) {
+        let Some(pagination) = &self.pagination else {
+            return;
+        };
+        let store = pagination.store.clone();
+        let filter = pagination.filter.clone();
+        self.children.clear();
+        for key in &self.expanded {
+            if let Ok(children) = store.list_children(key, &filter) {
+                self.children.insert(key.clone(), children);
+            }
+        }
+        self.rebuild_rows();
+    }
+
+    fn toggle(&mut self, key: &str) -> bool {
+        if !self.tree_mode() || self.child_counts.get(key).copied().unwrap_or(0) == 0 {
+            return false;
+        }
+        if self.expanded.remove(key) {
+            self.children.remove(key);
+        } else {
+            let Some(pagination) = &self.pagination else {
+                return false;
+            };
+            let Ok(children) = pagination.store.list_children(key, &pagination.filter) else {
+                return false;
+            };
+            self.expanded.insert(key.to_string());
+            self.children.insert(key.to_string(), children);
+        }
+        self.rebuild_rows();
+        true
+    }
+
+    fn ensure_expanded(&mut self, key: &str) -> bool {
+        if self.expanded.contains(key) {
+            return true;
+        }
+        self.toggle(key)
+    }
+
+    fn row_index(&self, key: &str) -> Option<usize> {
+        self.rows.iter().position(|row| row.meta.key == key)
+    }
+
+    fn row_key(&self, ix: IndexPath) -> Option<&str> {
+        self.flat_index(ix)
+            .and_then(|flat| self.rows.get(flat))
+            .map(|row| row.meta.key.as_str())
+    }
+
+    fn row_has_children(&self, key: &str) -> bool {
+        self.child_counts.get(key).copied().unwrap_or(0) > 0
+    }
+
+    /// 把组件发出的分组坐标还原为可见 `rows` 的平铺下标。
     fn flat_index(&self, ix: IndexPath) -> Option<usize> {
         let group = self.groups.get(ix.section)?;
         let flat = group.range.start.checked_add(ix.row)?;
         (flat < group.range.end).then_some(flat)
     }
 
-    /// 搜索跳转仍以 `sessions` 平铺下标定位；进入列表前转成分组坐标。
+    /// 搜索/选择以可见 `rows` 平铺下标定位；进入列表前转成分组坐标。
     fn index_path(&self, flat: usize) -> Option<IndexPath> {
         self.groups
             .iter()
@@ -381,85 +525,231 @@ impl ListDelegate for SessionsDelegate {
         cx: &mut Context<ListState<Self>>,
     ) -> Option<Self::Item> {
         let flat_ix = self.flat_index(ix)?;
-        let s = self.sessions.get(flat_ix)?;
+        let row = self.rows.get(flat_ix)?.clone();
+        let s = &row.meta;
         let theme = cx.theme();
         let shown_ts = session_group_timestamp(s, self.sort);
         let shown_time: SharedString = smart_time(shown_ts).into();
         let shown_tooltip: SharedString = abs_date(shown_ts).into();
         let title_tooltip: SharedString = s.title.clone().into();
-        let icon_width = 3 * (usize::from(s.pinned) + usize::from(s.favorite));
+        let show_chevron = self.tree_mode() && row.child_count > 0;
+        let icon_width =
+            3 * (usize::from(s.pinned) + usize::from(s.favorite) + usize::from(show_chevron));
         let title: SharedString =
             clip_display(&s.title, SESSION_TITLE_MAX_WIDTH.saturating_sub(icon_width)).into();
+        let key = s.key.clone();
+        let open_key = key.clone();
+        let toggle_key = key.clone();
+        let child_count = row.child_count;
+        let expanded = row.expanded;
+        let depth = row.depth;
+        let child_line_color = theme.muted_foreground.opacity(0.38);
+        // 2px 线的中心与父行 15px Grok 图标的 11.5px 中轴一致。
+        let child_line_left = SPACE_XS + px(6.5);
 
         Some(
-            ListItem::new(ix).rounded(theme.radius).mx(SPACE_SM).child(
-                v_flex()
-                    .w_full()
-                    .px(SPACE_XS)
-                    .py(SPACE_SM)
-                    .gap(SPACE_XS)
-                    .child(
-                        h_flex()
-                            .gap(px(6.))
-                            .child(
+            // 稳定元素身份必须是 session key：展开插入孩子后，IndexPath 会整体
+            // 位移；继续拿下标当 id 会复用到另一会话的点击状态。
+            ListItem::new(SharedString::from(key.clone()))
+                .rounded(theme.radius)
+                .mx(SPACE_SM)
+                .child(
+                    v_flex()
+                        .id(SharedString::from(format!("session-row:{key}")))
+                        .relative()
+                        .w_full()
+                        .px(SPACE_XS)
+                        .py(SPACE_SM)
+                        .gap(SPACE_XS)
+                        .when(depth > 0, |this| {
+                            this.pl(px(20.)).child(
                                 div()
-                                    .id(("session-title", flat_ix))
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_size(FONT_BODY)
-                                    .font_medium()
-                                    .text_color(theme.foreground)
-                                    .child(title)
-                                    .tooltip(move |window, cx| {
-                                        gpui_component::tooltip::Tooltip::new(title_tooltip.clone())
-                                            .build(window, cx)
-                                    }),
+                                    .absolute()
+                                    .left(child_line_left)
+                                    .top(SPACE_SM)
+                                    .bottom(SPACE_SM)
+                                    .w(px(2.))
+                                    .rounded_full()
+                                    .bg(child_line_color),
                             )
-                            .when(s.pinned, |this| {
-                                this.child(
-                                    icon("icons/pin-filled.svg")
-                                        .with_size(px(11.))
-                                        .text_color(theme.primary),
-                                )
-                            })
-                            .when(s.favorite, |this| {
-                                this.child(
-                                    icon("icons/star-filled.svg")
-                                        .with_size(px(11.))
-                                        .text_color(rgb(crate::theme::STAR_YELLOW)),
-                                )
+                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                let Some(flat) = this.delegate().row_index(&open_key) else {
+                                    return;
+                                };
+                                let Some(path) = this.delegate().index_path(flat) else {
+                                    return;
+                                };
+                                let already_selected = this
+                                    .selected_index()
+                                    .and_then(|selected| this.delegate().row_key(selected))
+                                    == Some(open_key.as_str());
+                                if already_selected && this.delegate().row_has_children(&open_key) {
+                                    this.delegate_mut().toggle(&open_key);
+                                    if let Some(new_path) = this
+                                        .delegate()
+                                        .row_index(&open_key)
+                                        .and_then(|flat| this.delegate().index_path(flat))
+                                    {
+                                        this.set_selected_index(Some(new_path), window, cx);
+                                    }
+                                    cx.notify();
+                                    return;
+                                }
+                                this.focus(window, cx);
+                                this.set_selected_index(Some(path), window, cx);
+                                cx.emit(ListEvent::Confirm(path));
+                                cx.notify();
                             }),
-                    )
-                    .child(
-                        h_flex()
-                            .gap(px(6.))
-                            .text_size(FONT_LABEL)
-                            .text_color(theme.muted_foreground)
-                            .child(
-                                img(s.agent.brand_icon(theme.mode.is_dark()))
-                                    .size(px(15.))
-                                    .flex_shrink_0(),
-                            )
-                            .child(badge(
-                                s.project_name.clone(),
-                                theme.muted,
-                                theme.muted_foreground,
-                            ))
-                            .child(div().flex_1())
-                            .child(
-                                div()
-                                    .id(("session-time", flat_ix))
-                                    .flex_shrink_0()
-                                    .child(shown_time)
-                                    .tooltip(move |window, cx| {
-                                        gpui_component::tooltip::Tooltip::new(shown_tooltip.clone())
+                        )
+                        .child(
+                            h_flex()
+                                .gap(px(6.))
+                                .when(show_chevron, |this| {
+                                    this.child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "session-expand:{toggle_key}"
+                                            )))
+                                            .size(px(16.))
+                                            .flex_shrink_0()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(4.))
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(theme.muted))
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _, window, cx| {
+                                                    cx.stop_propagation();
+                                                    let selected_key = this
+                                                        .selected_index()
+                                                        .and_then(|selected| {
+                                                            this.delegate()
+                                                                .row_key(selected)
+                                                                .map(str::to_string)
+                                                        });
+                                                    if !this.delegate_mut().toggle(&toggle_key) {
+                                                        return;
+                                                    }
+                                                    let selected_path = selected_key
+                                                        .as_deref()
+                                                        .and_then(|key| {
+                                                            this.delegate().row_index(key).and_then(
+                                                                |flat| {
+                                                                    this.delegate().index_path(flat)
+                                                                },
+                                                            )
+                                                        })
+                                                        .or_else(|| {
+                                                            this.delegate()
+                                                                .row_index(&toggle_key)
+                                                                .and_then(|flat| {
+                                                                    this.delegate().index_path(flat)
+                                                                })
+                                                        });
+                                                    this.set_selected_index(
+                                                        selected_path,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                    cx.notify();
+                                                }),
+                                            )
+                                            .child(
+                                                icon("icons/chevron-right.svg")
+                                                    .with_size(px(13.))
+                                                    .text_color(theme.muted_foreground)
+                                                    .when(expanded, |icon| {
+                                                        icon.rotate(Radians(
+                                                            std::f32::consts::FRAC_PI_2,
+                                                        ))
+                                                    }),
+                                            ),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .id(("session-title", flat_ix))
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_size(FONT_BODY)
+                                        .font_medium()
+                                        .text_color(theme.foreground)
+                                        .child(title)
+                                        .tooltip(move |window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(
+                                                title_tooltip.clone(),
+                                            )
                                             .build(window, cx)
-                                    }),
-                            ),
-                    ),
-            ),
+                                        }),
+                                )
+                                .when(s.pinned, |this| {
+                                    this.child(
+                                        icon("icons/pin-filled.svg")
+                                            .with_size(px(11.))
+                                            .text_color(theme.primary),
+                                    )
+                                })
+                                .when(s.favorite, |this| {
+                                    this.child(
+                                        icon("icons/star-filled.svg")
+                                            .with_size(px(11.))
+                                            .text_color(rgb(crate::theme::STAR_YELLOW)),
+                                    )
+                                }),
+                        )
+                        .child(
+                            h_flex()
+                                .gap(px(6.))
+                                .text_size(FONT_LABEL)
+                                .text_color(theme.muted_foreground)
+                                .child(
+                                    img(s.agent.brand_icon(theme.mode.is_dark()))
+                                        .size(px(15.))
+                                        .flex_shrink_0(),
+                                )
+                                .child(badge(
+                                    s.project_name.clone(),
+                                    theme.muted,
+                                    theme.muted_foreground,
+                                ))
+                                .when(show_chevron, |this| {
+                                    this.child(
+                                        div()
+                                            .id(("session-child-count", flat_ix))
+                                            .flex_shrink_0()
+                                            .child(format!("{child_count}"))
+                                            .tooltip(move |window, cx| {
+                                                gpui_component::tooltip::Tooltip::new(format!(
+                                                    "{child_count} nested session{}",
+                                                    if child_count == 1 { "" } else { "s" }
+                                                ))
+                                                .build(window, cx)
+                                            }),
+                                    )
+                                })
+                                .child(div().flex_1())
+                                .child(
+                                    div()
+                                        .id(("session-time", flat_ix))
+                                        .flex_shrink_0()
+                                        .child(shown_time)
+                                        .tooltip(move |window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(
+                                                shown_tooltip.clone(),
+                                            )
+                                            .build(window, cx)
+                                        }),
+                                ),
+                        ),
+                ),
         )
     }
 
@@ -566,19 +856,21 @@ impl ListDelegate for SessionsDelegate {
 mod session_group_tests {
     use std::collections::HashSet;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use chrono::{Local, NaiveDate, TimeZone as _};
     use gpui_component::IndexPath;
     use wake_core::adapters::AgentAdapter;
+    use wake_core::db::Store;
     use wake_core::models::{
         AgentId, ParsedSession, ParsedTranscript, SessionFileRef, SessionFilter, SessionMeta,
         SortKey, ToolCallView,
     };
 
     use super::{
-        build_session_groups_at, clip_tool_text, load_visible_transcript, non_blank_tool_text,
-        same_session_query, session_group_label, session_matches_filter, toggle_expanded_row,
-        tool_cluster_heading, visible_git_branch, SessionsDelegate, SESSION_PAGE_SIZE,
+        clip_tool_text, load_visible_transcript, non_blank_tool_text, same_session_query,
+        session_group_label, session_matches_filter, toggle_expanded_row, tool_cluster_heading,
+        visible_git_branch, SessionsDelegate, SESSION_PAGE_SIZE,
     };
 
     struct FailingAdapter;
@@ -688,12 +980,13 @@ mod session_group_tests {
             session("week", local_ms(2026, 8, 31), false),
             session("month", local_ms(2026, 8, 30), false),
         ];
-        let groups = build_session_groups_at(
-            &sessions,
+        let delegate = SessionsDelegate::new_at(
+            sessions,
             SortKey::Updated,
             false,
             NaiveDate::from_ymd_opt(2026, 9, 2).unwrap(),
         );
+        let groups = &delegate.groups;
 
         let labels: Vec<&str> = groups.iter().map(|group| group.label.as_ref()).collect();
         assert_eq!(
@@ -709,14 +1002,6 @@ mod session_group_tests {
         assert_eq!(groups[0].range, 0..1);
         assert_eq!(groups[3].range, 3..4);
 
-        let delegate = SessionsDelegate {
-            sessions,
-            groups,
-            grouped_on: NaiveDate::from_ymd_opt(2026, 9, 2).unwrap(),
-            sort: SortKey::Updated,
-            ascending: false,
-            pagination: None,
-        };
         assert_eq!(delegate.flat_index(IndexPath::new(0).section(3)), Some(3));
         assert_eq!(delegate.index_path(4), Some(IndexPath::new(0).section(4)));
     }
@@ -728,12 +1013,13 @@ mod session_group_tests {
             session("two", local_ms(2026, 9, 1), false),
         ];
         for (sort, ascending) in [(SortKey::Messages, false), (SortKey::Updated, true)] {
-            let groups = build_session_groups_at(
-                &sessions,
+            let delegate = SessionsDelegate::new_at(
+                sessions.clone(),
                 sort,
                 ascending,
                 NaiveDate::from_ymd_opt(2026, 9, 2).unwrap(),
             );
+            let groups = &delegate.groups;
             assert_eq!(groups.len(), 1);
             assert!(groups[0].label.is_empty());
             assert_eq!(groups[0].range, 0..2);
@@ -754,6 +1040,59 @@ mod session_group_tests {
         assert_eq!(delegate.sessions[1].key, "two");
         assert_eq!(delegate.groups[0].range, 0..2);
         assert_eq!(delegate.index_path(1), Some(IndexPath::new(1)));
+    }
+
+    #[test]
+    fn tree_delegate_expands_children_without_changing_root_pagination() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temp.path().join("tree.db")).unwrap());
+        let mut parent = session("grok:parent", local_ms(2026, 9, 1), false);
+        parent.agent = AgentId::Grok;
+        parent.file_path = "/tmp/grok/parent/updates.jsonl".into();
+        let mut child = session("grok:child", local_ms(2026, 9, 2), false);
+        child.agent = AgentId::Grok;
+        child.file_path = "/tmp/grok/child/updates.jsonl".into();
+        let mut other = session("grok:other", local_ms(2026, 8, 31), false);
+        other.agent = AgentId::Grok;
+        other.file_path = "/tmp/grok/other/updates.jsonl".into();
+        store
+            .write_meta_only(&[
+                (parent.clone(), parent.updated_at),
+                (child.clone(), child.updated_at),
+                (other.clone(), other.updated_at),
+            ])
+            .unwrap();
+        store
+            .replace_parent_links(AgentId::Grok, &[(child.key.clone(), parent.key.clone())])
+            .unwrap();
+        let filter = SessionFilter {
+            roots_only: true,
+            sort: SortKey::Messages,
+            limit: SESSION_PAGE_SIZE,
+            ..Default::default()
+        };
+        let (roots, total) = store.list_sessions(&filter).unwrap();
+        let mut delegate = SessionsDelegate::paged(roots, filter, total, store);
+
+        assert_eq!(delegate.sessions.len(), 2);
+        assert_eq!(delegate.rows.len(), 2);
+        assert_eq!(delegate.rows[0].child_count, 1);
+        assert_eq!(delegate.row_index(&other.key), Some(1));
+        assert!(delegate.toggle(&parent.key));
+        assert_eq!(
+            delegate.sessions.len(),
+            2,
+            "children must not advance pagination"
+        );
+        assert_eq!(delegate.rows.len(), 3);
+        assert_eq!(delegate.rows[0].meta.key, parent.key);
+        assert_eq!(delegate.rows[1].meta.key, child.key);
+        assert_eq!(delegate.rows[1].depth, 1);
+        assert_eq!(delegate.index_path(1), Some(IndexPath::new(1)));
+        assert_eq!(delegate.row_index(&other.key), Some(2));
+        assert!(delegate.toggle(&parent.key));
+        assert_eq!(delegate.rows.len(), 2);
+        assert_eq!(delegate.row_index(&other.key), Some(1));
     }
 
     #[test]
@@ -1750,6 +2089,7 @@ impl Workbench {
             project_path: self.selected_project.clone(),
             favorite_only: self.favorite_only,
             include_archived: false,
+            roots_only: !self.favorite_only,
             title_query: None,
             sort: self.sort_key,
             ascending: self.sort_ascending,
@@ -1762,9 +2102,8 @@ impl Workbench {
         let list = self.list_state.read(cx);
         let delegate = list.delegate();
         list.selected_index()
-            .and_then(|path| delegate.flat_index(path))
-            .and_then(|flat| delegate.sessions.get(flat))
-            .map(|session| session.key.clone())
+            .and_then(|path| delegate.row_key(path))
+            .map(str::to_string)
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -1783,6 +2122,7 @@ impl Workbench {
                 .map(|_| delegate.sessions.len())
                 .unwrap_or_default()
         };
+        let expanded = self.list_state.read(cx).delegate().expanded.clone();
         if previously_loaded > SESSION_PAGE_SIZE as usize {
             filter.limit = i64::try_from(previously_loaded).unwrap_or(i64::MAX);
         }
@@ -1790,7 +2130,9 @@ impl Workbench {
             self.total_sessions = total;
             let store = self.store.clone();
             self.list_state.update(cx, |state, cx| {
-                *state.delegate_mut() = SessionsDelegate::paged(sessions, filter, total, store);
+                let mut delegate = SessionsDelegate::paged(sessions, filter, total, store);
+                delegate.restore_expanded(expanded);
+                *state.delegate_mut() = delegate;
                 cx.notify();
             });
             self.pending_list_selection = selected_key;
@@ -2807,12 +3149,18 @@ impl Workbench {
         let key = {
             let list = list.read(cx);
             let delegate = list.delegate();
-            delegate
-                .flat_index(ix)
-                .and_then(|flat| delegate.sessions.get(flat))
-                .map(|session| session.key.clone())
+            delegate.row_key(ix).map(str::to_string)
         };
         if let Some(key) = key {
+            if matches!(ev, ListEvent::Confirm(_))
+                && self
+                    .detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.meta.key == key)
+                && self.toggle_list_key(&key, window, cx)
+            {
+                return;
+            }
             // 用户手动选择优先于尚未完成的搜索定位，避免旧任务稍后抢回高亮。
             self._list_seek_task = None;
             self.open_detail(&key, None, window, cx);
@@ -3209,9 +3557,15 @@ impl Workbench {
             )
         };
         let (generation, mut filter, mut offset, mut total) = request;
+        let root_key = if filter.roots_only {
+            self.visible_parent_key(key)
+                .unwrap_or_else(|| key.to_string())
+        } else {
+            key.to_string()
+        };
         if !self
             .store
-            .get_session(key)
+            .get_session(&root_key)
             .ok()
             .flatten()
             .is_some_and(|session| session_matches_filter(&session, &filter))
@@ -3220,7 +3574,7 @@ impl Workbench {
         }
         let store = self.store.clone();
         let key = key.to_string();
-        let wanted_key = key.clone();
+        let wanted_key = root_key.clone();
         let query = cx.background_spawn(async move {
             let mut loaded = Vec::new();
             let mut found = false;
@@ -3280,30 +3634,80 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let path = {
-            let list = self.list_state.read(cx);
-            let delegate = list.delegate();
-            delegate
-                .sessions
-                .iter()
-                .position(|session| session.key == key)
-                .and_then(|flat| delegate.index_path(flat))
-        };
+        let parent_key = self
+            .list_state
+            .read(cx)
+            .delegate()
+            .tree_mode()
+            .then(|| self.visible_parent_key(key))
+            .flatten();
         self.list_state.update(cx, |state, cx| {
+            if state.delegate().row_index(key).is_none() {
+                if let Some(parent) = parent_key.as_deref() {
+                    if state.delegate().row_index(parent).is_some() {
+                        state.delegate_mut().ensure_expanded(parent);
+                    }
+                }
+            }
+            let path = state
+                .delegate()
+                .row_index(key)
+                .and_then(|flat| state.delegate().index_path(flat));
             state.set_selected_index(path, window, cx);
             if scroll {
-                let Some(path) = path else { return };
-                // 组件无 strict-Top:非 Center 策略都是"最小滚动恰好可见",
-                // 目标从下方进入会贴底。先把 offset 拉到超底,deferred 消费时
-                // 目标位于视口上方,最小滚动分支即把它对齐到视口顶。
-                // 耦合 gpui-component 0.5.1 行为;上游 DeferredScrollToItem 的
-                // scroll_strict 字段目前写死 false 未被读——它被接通之日,
-                // 换成 strict-Top 调用并删掉这行 set_offset
-                state.scroll_handle().set_offset(point(px(0.), px(-1e9)));
-                state.scroll_to_item(path, ScrollStrategy::Top, window, cx);
+                if let Some(path) = path {
+                    // 组件无 strict-Top:非 Center 策略都是"最小滚动恰好可见",
+                    // 目标从下方进入会贴底。先把 offset 拉到超底,deferred 消费时
+                    // 目标位于视口上方,最小滚动分支即把它对齐到视口顶。
+                    // 耦合 gpui-component 0.5.1 行为;上游 DeferredScrollToItem 的
+                    // scroll_strict 字段目前写死 false 未被读——它被接通之日,
+                    // 换成 strict-Top 调用并删掉这行 set_offset
+                    state.scroll_handle().set_offset(point(px(0.), px(-1e9)));
+                    state.scroll_to_item(path, ScrollStrategy::Top, window, cx);
+                }
             }
-        });
-        path.is_some()
+            path.is_some()
+        })
+    }
+
+    fn visible_parent_key(&self, key: &str) -> Option<String> {
+        let parent_key = self.store.parent_key_of(key).ok().flatten()?;
+        self.store
+            .get_session(&parent_key)
+            .ok()
+            .flatten()
+            .filter(|parent| !parent.archived)
+            .map(|_| parent_key)
+    }
+
+    /// 展开/收起后按 session key 恢复选择，避免插入的子行让 IndexPath 漂到
+    /// 下一条会话。若被收起的正是已选子会话，则选择回父会话。
+    fn toggle_list_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.list_state.update(cx, |state, cx| {
+            if !state.delegate().row_has_children(key) {
+                return false;
+            }
+            let selected_key = state
+                .selected_index()
+                .and_then(|path| state.delegate().row_key(path))
+                .map(str::to_string);
+            if !state.delegate_mut().toggle(key) {
+                return false;
+            }
+            let selected_path = selected_key
+                .as_deref()
+                .and_then(|selected| state.delegate().row_index(selected))
+                .and_then(|flat| state.delegate().index_path(flat))
+                .or_else(|| {
+                    state
+                        .delegate()
+                        .row_index(key)
+                        .and_then(|flat| state.delegate().index_path(flat))
+                });
+            state.set_selected_index(selected_path, window, cx);
+            cx.notify();
+            true
+        })
     }
 
     // ---------- 操作 ----------
@@ -3407,25 +3811,41 @@ impl Workbench {
     /// 否则界面在授权框弹出的整段时间里完全冻结。
     fn do_delete(
         &mut self,
-        key: String,
+        keys: Vec<String>,
         targets: Vec<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let store = self.store.clone();
-        let trash_key = key.clone();
+        let trash_keys = keys.clone();
+        let count = keys.len();
         let task = cx.background_spawn(async move {
-            terminal::trash_paths(&targets).and_then(|()| store.remove_session(&trash_key, true))
+            terminal::trash_paths(&targets)?;
+            store.remove_sessions(&trash_keys, true)
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             this.update_in(cx, |this, window, cx| match result {
                 Ok(()) => {
-                    // 等待期间用户可能已翻到别的会话,只在仍停在被删那条时才清空
-                    if this.detail.as_ref().is_some_and(|d| d.meta.key == key) {
+                    // 等待期间用户可能已翻到别的会话，只在仍停在被删子树时清空。
+                    if this
+                        .detail
+                        .as_ref()
+                        .is_some_and(|detail| keys.iter().any(|key| key == &detail.meta.key))
+                    {
                         this.detail = None;
                     }
-                    window.push_notification(Notification::success(SESSION_TRASHED), cx);
+                    let message = if count == 1 {
+                        SESSION_TRASHED.to_string()
+                    } else {
+                        format!(
+                            "{count} sessions {}",
+                            SESSION_TRASHED
+                                .strip_prefix("Session ")
+                                .unwrap_or(SESSION_TRASHED)
+                        )
+                    };
+                    window.push_notification(Notification::success(message), cx);
                     // 立刻把它从列表摘掉,不等 watcher 那 800ms 去抖
                     this.refresh(cx);
                 }
@@ -3441,13 +3861,28 @@ impl Workbench {
     fn confirm_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(detail) = &self.detail else { return };
         let meta = detail.meta.clone();
-        // 会话归属哪些磁盘路径(主文件/边车目录)是 adapter 的布局知识
-        let targets = adapter_for(&self.adapters, meta.agent, &meta.file_path)
-            .map(|a| a.session_paths(&meta))
-            .unwrap_or_else(|| vec![meta.file_path.clone()]);
+        let mut sessions = vec![meta.clone()];
+        sessions.extend(self.store.all_descendants(&meta.key).unwrap_or_default());
+        let nested_count = sessions.len().saturating_sub(1);
+        let keys: Vec<String> = sessions.iter().map(|session| session.key.clone()).collect();
+        // 每个子会话按自己的胜出 file_path 找 adapter；多 location 下不能沿用
+        // 根会话所属实例。磁盘目标保持稳定顺序并去重。
+        let mut seen_targets = HashSet::new();
+        let mut targets = Vec::new();
+        for session in &sessions {
+            let paths = adapter_for(&self.adapters, session.agent, &session.file_path)
+                .map(|adapter| adapter.session_paths(session))
+                .unwrap_or_else(|| vec![session.file_path.clone()]);
+            for path in paths {
+                if seen_targets.insert(path.clone()) {
+                    targets.push(path);
+                }
+            }
+        }
         let entity = cx.entity();
         window.open_alert_dialog(cx, move |dialog, _window, cx| {
             let meta = meta.clone();
+            let keys = keys.clone();
             let targets = targets.clone();
             let entity = entity.clone();
             let theme = cx.theme();
@@ -3456,7 +3891,11 @@ impl Workbench {
                     div()
                         .text_size(FONT_HEADING)
                         .font_semibold()
-                        .child("Delete this session?"),
+                        .child(if nested_count > 0 {
+                            "Delete this session tree?"
+                        } else {
+                            "Delete this session?"
+                        }),
                 )
                 .width(px(440.))
                 // 破坏性确认:主按钮点名动作并用 danger 形态,不留裸 "OK"。
@@ -3472,7 +3911,15 @@ impl Workbench {
                     v_flex()
                         .gap(SPACE_SM)
                         .text_size(FONT_BODY)
-                        .child(TRASH_CONFIRM_BODY)
+                        .child(if nested_count > 0 {
+                            format!(
+                                "This session and {nested_count} nested session{} will be moved to {}. You can restore them anytime:",
+                                if nested_count == 1 { "" } else { "s" },
+                                if cfg!(target_os = "windows") { "the Recycle Bin" } else { "Trash" },
+                            )
+                        } else {
+                            TRASH_CONFIRM_BODY.to_string()
+                        })
                         .child(
                             div()
                                 .px(SPACE_SM)
@@ -3497,7 +3944,7 @@ impl Workbench {
                 )
                 .on_ok(move |_, window, cx| {
                     entity.update(cx, |this, cx| {
-                        this.do_delete(meta.key.clone(), targets.clone(), window, cx);
+                        this.do_delete(keys.clone(), targets.clone(), window, cx);
                     });
                     true
                 })
@@ -3840,7 +4287,7 @@ impl Workbench {
 
     fn render_session_list(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let shown = self.list_state.read(cx).delegate().sessions.len();
+        let shown = self.list_state.read(cx).delegate().rows.len();
         let library_empty = self.agent_counts.iter().map(|(_, n)| *n).sum::<i64>() == 0;
         let listed_count = self.total_sessions.max(0);
         let shown_label: SharedString = format!(

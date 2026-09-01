@@ -79,6 +79,10 @@ fn run_scan_inner(
     full: bool,
     progress: &mut ScanProgress,
 ) -> Result<()> {
+    for adapter in adapters {
+        adapter.begin_scan();
+    }
+    let force_grok_backfill = store.needs_grok_parent_backfill();
     let known = store.known_files()?;
     let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     struct WorkItem<'a> {
@@ -172,6 +176,7 @@ fn run_scan_inner(
     }
 
     for (adapter, refs) in adapters.iter().zip(per_adapter) {
+        let force_adapter = force_grok_backfill && adapter.agent() == AgentId::Grok;
         for r in &refs {
             seen_paths.insert(r.file_path.clone());
         }
@@ -192,7 +197,7 @@ fn run_scan_inner(
                     // 墓碑要按**这个最终 key** 再卡——write_meta_only 是第三条
                     // 写库路径,漏了它,已删会话会以空正文卡片复活
                     //(2026-08-24 Codex review P1)
-                    if (changed || full) && !store.is_key_tombstoned(&meta.key) {
+                    if (changed || full || force_adapter) && !store.is_key_tombstoned(&meta.key) {
                         // fileMtime=0 → 后续全量解析仍会执行
                         Some((meta.clone(), 0))
                     } else {
@@ -212,7 +217,7 @@ fn run_scan_inner(
                     None => true,
                     Some((mtime, size, _)) => *mtime != r.mtime_ms || *size != r.size,
                 };
-            if full || changed {
+            if full || force_adapter || changed {
                 let quick = quick_map
                     .as_ref()
                     .and_then(|m| m.get(&r.file_path).cloned());
@@ -251,7 +256,10 @@ fn run_scan_inner(
     events.on_progress(progress);
 
     let mut last_notify = std::time::Instant::now();
+    let mut grok_backfill_succeeded = true;
     for item in &queue {
+        let forced_grok = force_grok_backfill && item.adapter.agent() == AgentId::Grok;
+        let mut item_written = false;
         match item.adapter.parse_session(&item.r) {
             Ok(parsed) => {
                 // quick/parsed 合并策略属各 adapter(默认 parsed 为准 quick 补缺,
@@ -269,8 +277,9 @@ fn run_scan_inner(
                 // 全量写入也走事务内副本裁决:扫描快照里的旧副本不得覆盖
                 // watcher 并发间隙写入的更新副本(启动扫描与手动刷新期间
                 // watcher 都活着,2026-08-24 Codex review P1)
-                if let Err(e) = store.write_session_guarded(&meta, item.r.mtime_ms, &parsed.units) {
-                    eprintln!("[scanner] write failed {}: {e}", item.r.file_path);
+                match store.write_session_guarded(&meta, item.r.mtime_ms, &parsed.units) {
+                    Ok(written) => item_written = written,
+                    Err(e) => eprintln!("[scanner] write failed {}: {e}", item.r.file_path),
                 }
             }
             Err(e) => {
@@ -289,12 +298,15 @@ fn run_scan_inner(
                                 None => parsed.meta,
                             };
                             if store.is_key_tombstoned(&meta.key) {
+                                item_written = true;
                                 break;
                             }
-                            if let Err(e) =
-                                store.write_session_guarded(&meta, fb.mtime_ms, &parsed.units)
-                            {
-                                eprintln!("[scanner] fallback write failed {}: {e}", fb.file_path);
+                            match store.write_session_guarded(&meta, fb.mtime_ms, &parsed.units) {
+                                Ok(written) => item_written = written,
+                                Err(e) => eprintln!(
+                                    "[scanner] fallback write failed {}: {e}",
+                                    fb.file_path
+                                ),
                             }
                             break;
                         }
@@ -305,6 +317,9 @@ fn run_scan_inner(
                 }
             }
         }
+        if forced_grok && !item_written {
+            grok_backfill_succeeded = false;
+        }
         progress.done += 1;
         if last_notify.elapsed().as_millis() > 800 || progress.done == progress.total {
             last_notify = std::time::Instant::now();
@@ -313,7 +328,172 @@ fn run_scan_inner(
         }
     }
 
+    if sync_parent_links(adapters, store)? {
+        events.on_sessions_changed();
+    }
+    if force_grok_backfill && grok_backfill_succeeded {
+        store.finish_grok_parent_backfill()?;
+    }
+
     Ok(())
+}
+
+/// 多 location 下关系元数据跟着 parent 会话，而 child 的胜出文件可能在另一根。
+/// 因此先接受“关系目标 parent 的胜出文件也属于该快照”的直接边，再跨快照把
+/// 嵌套链扁平到 root。解除/换父前重解析 child，恢复被旧父项目覆盖的自身归属。
+fn sync_parent_links(adapters: &[Box<dyn AgentAdapter>], store: &Arc<Store>) -> Result<bool> {
+    let mut managed_agents = std::collections::HashSet::new();
+    let mut links_by_adapter: Vec<std::collections::HashMap<String, String>> =
+        Vec::with_capacity(adapters.len());
+    for adapter in adapters {
+        if adapter.manages_parent_links() {
+            managed_agents.insert(adapter.agent());
+            links_by_adapter.push(adapter.parent_links().into_iter().collect());
+        } else {
+            links_by_adapter.push(std::collections::HashMap::new());
+        }
+    }
+
+    let mut changed = false;
+    for agent in managed_agents {
+        let sources = store.session_sources_for_agent(agent)?;
+        let mut source_by_key = std::collections::HashMap::new();
+        let mut owner_by_key = std::collections::HashMap::new();
+        for (key, file_path) in &sources {
+            if let Some(adapter_ix) = crate::adapters::adapter_ix_for(adapters, agent, file_path) {
+                source_by_key.insert(key.clone(), file_path.clone());
+                owner_by_key.insert(key.clone(), adapter_ix);
+            }
+        }
+
+        // meta.json 位于 parent 的 location。只采纳由当前胜出 parent 所属快照
+        // 提供的边，避免另一份陈旧备份把已解除的关系重新挂回去。
+        let mut direct = std::collections::HashMap::new();
+        for (adapter_ix, links) in links_by_adapter.iter().enumerate() {
+            if adapters[adapter_ix].agent() != agent {
+                continue;
+            }
+            for (child, parent) in links {
+                if source_by_key.contains_key(child)
+                    && owner_by_key.get(parent).copied() == Some(adapter_ix)
+                {
+                    direct.insert(child.clone(), parent.clone());
+                }
+            }
+        }
+
+        // 各 location 只能看见自己的直接/局部链；合并后再走到全局 root。
+        let mut desired_map = std::collections::HashMap::new();
+        for child in direct.keys() {
+            if let Some(parent) = flattened_parent(child, &direct) {
+                desired_map.insert(child.clone(), parent);
+            }
+        }
+
+        // replace_parent_links 会把关系内 child 的 project 覆写成父项目。关系
+        // 解除或换父时，先从 child 自己的胜出文件重解析，恢复 fallback project；
+        // 解析失败则保留仍有效的旧关系，下一次 Grok 事件继续重试。
+        let current = store.parent_links_for_agent(agent)?;
+        for (child, old_parent) in current {
+            if desired_map.get(&child) == Some(&old_parent) {
+                continue;
+            }
+            let restored = source_by_key.get(&child).is_some_and(|file_path| {
+                reparse_for_parent_change(adapters, store, agent, &child, file_path)
+            });
+            if !restored && source_by_key.contains_key(&old_parent) {
+                desired_map.insert(child, old_parent);
+            }
+        }
+
+        let mut desired: Vec<(String, String)> = desired_map.into_iter().collect();
+        desired.sort();
+        changed |= store.replace_parent_links(agent, &desired)?;
+    }
+    Ok(changed)
+}
+
+/// watcher 收到关系边车事件、但没有会话主文件可交给 `scan_files` 时使用。
+/// 同 agent 的全部 location 必须一起刷新，否则跨 location 的父链会被局部快照截断。
+pub fn refresh_parent_links(
+    adapters: &[Box<dyn AgentAdapter>],
+    store: &Arc<Store>,
+    events: &dyn ScanEvents,
+    affected_agents: &[AgentId],
+) {
+    let mut refreshable = false;
+    for adapter in adapters {
+        if affected_agents.contains(&adapter.agent()) && adapter.manages_parent_links() {
+            adapter.begin_scan();
+            refreshable = true;
+        }
+    }
+    if !refreshable {
+        return;
+    }
+    match sync_parent_links(adapters, store) {
+        Ok(true) => events.on_sessions_changed(),
+        Ok(false) => {}
+        Err(error) => eprintln!("[scanner] parent-link sidecar refresh failed: {error}"),
+    }
+}
+
+fn flattened_parent(
+    child: &str,
+    direct: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    let mut current = child;
+    let mut seen = std::collections::HashSet::from([child]);
+    loop {
+        let parent = direct.get(current)?;
+        if !seen.insert(parent.as_str()) {
+            return None;
+        }
+        if direct.contains_key(parent) {
+            current = parent;
+        } else {
+            return Some(parent.clone());
+        }
+    }
+}
+
+fn reparse_for_parent_change(
+    adapters: &[Box<dyn AgentAdapter>],
+    store: &Arc<Store>,
+    agent: AgentId,
+    key: &str,
+    file_path: &str,
+) -> bool {
+    let Some(adapter_ix) = crate::adapters::adapter_ix_for(adapters, agent, file_path) else {
+        return false;
+    };
+    let adapter = &adapters[adapter_ix];
+    let Some(reference) = adapter.file_ref(std::path::Path::new(file_path)) else {
+        eprintln!("[scanner] cannot restore detached session source: {file_path}");
+        return false;
+    };
+    let parsed = match adapter.parse_session(&reference) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!("[scanner] detached session reparse failed {file_path}: {error}");
+            return false;
+        }
+    };
+    let quick = adapter.quick_meta(std::slice::from_ref(&reference));
+    let meta = match quick.as_ref().and_then(|metas| metas.get(file_path)) {
+        Some(quick) => adapter.merge_quick_meta(parsed.meta, quick),
+        None => parsed.meta,
+    };
+    if meta.key != key || store.is_key_tombstoned(&meta.key) {
+        return false;
+    }
+    match store.write_session_guarded(&meta, reference.mtime_ms, &parsed.units) {
+        Ok(written) => written,
+        Err(error) => {
+            eprintln!("[scanner] detached session write failed {file_path}: {error}");
+            false
+        }
+    }
 }
 
 /// watcher 触发的单文件增量。与 run_scan 走同一道 quick/parsed 合并——
@@ -325,6 +505,13 @@ pub fn scan_files(
     events: &dyn ScanEvents,
     refs: Vec<SessionFileRef>,
 ) {
+    let affected_agents: std::collections::HashSet<AgentId> =
+        refs.iter().map(|reference| reference.agent).collect();
+    for adapter in adapters {
+        if affected_agents.contains(&adapter.agent()) {
+            adapter.begin_scan();
+        }
+    }
     // 按**实例**分组,不是按 agent:自定义 location 让同 agent 有多实例,
     // 文件必须交给拥有其根的那个(gemini/kimi 的 cwd 反查、codex 的 state DB
     // 都是实例相对侧档);quick_meta 是整库查询,每组只查一次,不能逐文件调
@@ -377,6 +564,15 @@ pub fn scan_files(
                 Err(e) => eprintln!("[scanner] incremental parse failed {}: {e}", r.file_path),
             }
         }
+    }
+    if adapters
+        .iter()
+        .any(|adapter| affected_agents.contains(&adapter.agent()) && adapter.manages_parent_links())
+    {
+        changed |= sync_parent_links(adapters, store).unwrap_or_else(|error| {
+            eprintln!("[scanner] parent-link refresh failed: {error}");
+            false
+        });
     }
     if changed {
         events.on_sessions_changed();

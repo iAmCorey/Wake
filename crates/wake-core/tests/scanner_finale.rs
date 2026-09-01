@@ -9,7 +9,7 @@ use anyhow::{bail, Result};
 use wake_core::adapters::AgentAdapter;
 use wake_core::db::Store;
 use wake_core::models::*;
-use wake_core::scanner::{run_scan, ScanEvents, ScanProgress};
+use wake_core::scanner::{refresh_parent_links, run_scan, ScanEvents, ScanProgress};
 
 /// 收集全部进度事件与变更通知计数,供断言终态/刷新契约
 struct Recorder(Mutex<Vec<ScanProgress>>, Mutex<usize>);
@@ -93,6 +93,285 @@ fn finale_fires_when_adapter_fails() {
     assert_terminal_event(&rec.0.lock().unwrap(), "adapter 枚举失败");
 }
 
+#[test]
+fn parent_links_from_multiple_locations_are_merged_by_winning_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    let mut child = seed(
+        AgentId::Grok,
+        "/tmp/grok-child-location",
+        "/tmp/grok-child-location/group/child/updates.jsonl",
+        "child",
+        20,
+    );
+    child.meta.project_path = "/tmp/wt-plan-pr-1".into();
+    child.meta.project_name = "wt-plan-pr-1".into();
+    child.manages_links = true;
+
+    let mut parent = seed(
+        AgentId::Grok,
+        "/tmp/grok-parent-location",
+        "/tmp/grok-parent-location/group/parent/updates.jsonl",
+        "parent",
+        10,
+    );
+    parent.meta.project_path = "/Users/tester/Github/source".into();
+    parent.meta.project_name = "source".into();
+    // Grok 的 subagents/meta.json 在 parent 会话目录，所以关系快照属于
+    // parent location；child 的胜出 updates.jsonl 则来自另一 location。
+    parent.manages_links = true;
+    parent.parent_links = vec![("grok:child".into(), "grok:parent".into())];
+
+    let adapters: Vec<Box<dyn AgentAdapter>> = vec![Box::new(child), Box::new(parent)];
+    run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+
+    assert_eq!(
+        store.parent_key_of("grok:child").unwrap(),
+        Some("grok:parent".into())
+    );
+    assert_eq!(
+        store
+            .get_session("grok:child")
+            .unwrap()
+            .unwrap()
+            .project_path,
+        "/Users/tester/Github/source"
+    );
+}
+
+#[test]
+fn nested_parent_chain_flattens_across_three_locations() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    let mut leaf = seed(
+        AgentId::Grok,
+        "/tmp/grok-leaf-location",
+        "/tmp/grok-leaf-location/group/leaf/updates.jsonl",
+        "leaf",
+        30,
+    );
+    leaf.manages_links = true;
+    let mut middle = seed(
+        AgentId::Grok,
+        "/tmp/grok-middle-location",
+        "/tmp/grok-middle-location/group/middle/updates.jsonl",
+        "middle",
+        20,
+    );
+    middle.manages_links = true;
+    middle.parent_links = vec![("grok:leaf".into(), "grok:middle".into())];
+    let mut root = seed(
+        AgentId::Grok,
+        "/tmp/grok-root-location",
+        "/tmp/grok-root-location/group/root/updates.jsonl",
+        "root",
+        10,
+    );
+    root.meta.project_path = "/Users/tester/Github/source".into();
+    root.meta.project_name = "source".into();
+    root.manages_links = true;
+    root.parent_links = vec![("grok:middle".into(), "grok:root".into())];
+
+    let adapters: Vec<Box<dyn AgentAdapter>> =
+        vec![Box::new(leaf), Box::new(middle), Box::new(root)];
+    run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+
+    assert_eq!(
+        store.parent_key_of("grok:middle").unwrap(),
+        Some("grok:root".into())
+    );
+    assert_eq!(
+        store.parent_key_of("grok:leaf").unwrap(),
+        Some("grok:root".into())
+    );
+    assert_eq!(
+        store
+            .get_session("grok:leaf")
+            .unwrap()
+            .unwrap()
+            .project_path,
+        "/Users/tester/Github/source"
+    );
+}
+
+#[test]
+fn removing_parent_link_restores_child_project_on_sidecar_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    let mut child = seed(
+        AgentId::Grok,
+        "/tmp/grok-child-location",
+        "/tmp/grok-child-location/group/child/updates.jsonl",
+        "child",
+        20,
+    );
+    child.meta.project_path = "/tmp/wt-plan-pr-1".into();
+    child.meta.project_name = "wt-plan-pr-1".into();
+    child.manages_links = true;
+    let mut parent = seed(
+        AgentId::Grok,
+        "/tmp/grok-parent-location",
+        "/tmp/grok-parent-location/group/parent/updates.jsonl",
+        "parent",
+        10,
+    );
+    parent.meta.project_path = "/Users/tester/Github/source".into();
+    parent.meta.project_name = "source".into();
+    parent.manages_links = true;
+    parent.parent_links = vec![("grok:child".into(), "grok:parent".into())];
+
+    let adapters: Vec<Box<dyn AgentAdapter>> = vec![Box::new(child), Box::new(parent)];
+    run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+    assert_eq!(
+        store
+            .get_session("grok:child")
+            .unwrap()
+            .unwrap()
+            .project_path,
+        "/Users/tester/Github/source"
+    );
+
+    let mut child = seed(
+        AgentId::Grok,
+        "/tmp/grok-child-location",
+        "/tmp/grok-child-location/group/child/updates.jsonl",
+        "child",
+        20,
+    );
+    child.meta.project_path = "/tmp/wt-plan-pr-1".into();
+    child.meta.project_name = "wt-plan-pr-1".into();
+    child.manages_links = true;
+    let mut parent = seed(
+        AgentId::Grok,
+        "/tmp/grok-parent-location",
+        "/tmp/grok-parent-location/group/parent/updates.jsonl",
+        "parent",
+        10,
+    );
+    parent.meta.project_path = "/Users/tester/Github/source".into();
+    parent.meta.project_name = "source".into();
+    parent.manages_links = true;
+    let adapters: Vec<Box<dyn AgentAdapter>> = vec![Box::new(child), Box::new(parent)];
+
+    refresh_parent_links(&adapters, &store, &Recorder::new(), &[AgentId::Grok]);
+
+    let child = store.get_session("grok:child").unwrap().unwrap();
+    assert_eq!(store.parent_key_of(&child.key).unwrap(), None);
+    assert_eq!(child.project_path, "/tmp/wt-plan-pr-1");
+    assert_eq!(child.project_name, "wt-plan-pr-1");
+}
+
+#[test]
+fn migration_backfill_reparses_unchanged_grok_rows_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("scan.db");
+    let store = Arc::new(Store::open(&db_path).unwrap());
+    let mut adapter = seed(
+        AgentId::Grok,
+        "/tmp/grok-backfill",
+        "/tmp/grok-backfill/group/session/updates.jsonl",
+        "session",
+        42,
+    );
+    adapter.meta.project_path = "/Users/tester/Github/source".into();
+    adapter.meta.project_name = "source".into();
+    let mut stale = adapter.meta.clone();
+    stale.project_path = "/tmp/wt-plan-pr-1".into();
+    stale.project_name = "wt-plan-pr-1".into();
+    store.write_meta_only(&[(stale, 42)]).unwrap();
+    rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .execute(
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('grok_parent_backfill', '1')",
+            [],
+        )
+        .unwrap();
+
+    run_scan(
+        &[Box::new(adapter) as Box<dyn AgentAdapter>],
+        &store,
+        &Recorder::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        store
+            .get_session("grok:session")
+            .unwrap()
+            .unwrap()
+            .project_path,
+        "/Users/tester/Github/source"
+    );
+    assert!(!store.needs_grok_parent_backfill());
+}
+
+#[test]
+fn migration_backfill_retries_after_parse_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("retry.db");
+    let store = Arc::new(Store::open(&db_path).unwrap());
+    let mut broken = seed(
+        AgentId::Grok,
+        "/tmp/grok-backfill-retry",
+        "/tmp/grok-backfill-retry/group/session/updates.jsonl",
+        "session",
+        42,
+    );
+    broken.meta.project_path = "/tmp/wt-plan-pr-1".into();
+    broken.meta.project_name = "wt-plan-pr-1".into();
+    broken.fail_parse = true;
+    store
+        .write_meta_only(&[(broken.meta.clone(), broken.r.mtime_ms)])
+        .unwrap();
+    rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .execute(
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('grok_parent_backfill', '1')",
+            [],
+        )
+        .unwrap();
+
+    run_scan(
+        &[Box::new(broken) as Box<dyn AgentAdapter>],
+        &store,
+        &Recorder::new(),
+        false,
+    )
+    .unwrap();
+    assert!(
+        store.needs_grok_parent_backfill(),
+        "failed forced rows must remain retryable"
+    );
+
+    let mut repaired = seed(
+        AgentId::Grok,
+        "/tmp/grok-backfill-retry",
+        "/tmp/grok-backfill-retry/group/session/updates.jsonl",
+        "session",
+        42,
+    );
+    repaired.meta.project_path = "/Users/tester/Github/source".into();
+    repaired.meta.project_name = "source".into();
+    run_scan(
+        &[Box::new(repaired) as Box<dyn AgentAdapter>],
+        &store,
+        &Recorder::new(),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        store
+            .get_session("grok:session")
+            .unwrap()
+            .unwrap()
+            .project_path,
+        "/Users/tester/Github/source"
+    );
+    assert!(!store.needs_grok_parent_backfill());
+}
+
 /// 固定提供一个会话(含 quickMeta 快路径)的 adapter。agent/root 可参数化:
 /// 防复活、跨根去重、重叠根归属三组测试共用
 struct SeedAdapter {
@@ -105,6 +384,8 @@ struct SeedAdapter {
     /// 模拟 codex 的 state 改名:quick 给出的 key 与文件 native key 不同,
     /// merge 时 quick key 压过 parsed(codex 同款优先级)
     quick_key: Option<String>,
+    manages_links: bool,
+    parent_links: Vec<(String, String)>,
 }
 
 impl AgentAdapter for SeedAdapter {
@@ -113,6 +394,9 @@ impl AgentAdapter for SeedAdapter {
     }
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         Ok(vec![self.r.clone()])
+    }
+    fn file_ref(&self, path: &Path) -> Option<SessionFileRef> {
+        (path.to_string_lossy() == self.r.file_path).then(|| self.r.clone())
     }
     fn quick_meta(
         &self,
@@ -131,6 +415,12 @@ impl AgentAdapter for SeedAdapter {
             parsed.key = quick.key.clone();
         }
         parsed
+    }
+    fn manages_parent_links(&self) -> bool {
+        self.manages_links
+    }
+    fn parent_links(&self) -> Vec<(String, String)> {
+        self.parent_links.clone()
     }
     fn parse_session(&self, _: &SessionFileRef) -> Result<ParsedSession> {
         if self.fail_parse {
@@ -156,6 +446,8 @@ impl AgentAdapter for SeedAdapter {
             meta: self.meta.clone(),
             fail_parse: self.fail_parse,
             quick_key: self.quick_key.clone(),
+            manages_links: self.manages_links,
+            parent_links: self.parent_links.clone(),
         })
     }
 }
@@ -194,6 +486,8 @@ fn seed(agent: AgentId, root: &str, path: &str, native_id: &str, mtime: i64) -> 
         },
         fail_parse: false,
         quick_key: None,
+        manages_links: false,
+        parent_links: Vec::new(),
     }
 }
 
@@ -237,6 +531,8 @@ fn tombstoned_session_does_not_resurrect_on_rescan() {
         meta: meta.clone(),
         fail_parse: false,
         quick_key: None,
+        manages_links: false,
+        parent_links: Vec::new(),
     })];
     let rec = Recorder::new();
 

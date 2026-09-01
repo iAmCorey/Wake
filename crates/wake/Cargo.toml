@@ -27,6 +27,7 @@ unicode-segmentation = "1.13"
 
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", features = ["test-support"] }
+tempfile = "3"
 
 # exe 图标 + 版本资源(build.rs 里按 CARGO_CFG_TARGET_OS 判目标生效)。
 # 不做 target 门控:build-dependencies 的 [target.*] 匹配语义在 host/target

@@ -1,9 +1,9 @@
 use crate::adapters::AgentAdapter;
 use crate::db::Store;
 use crate::models::*;
-use crate::scanner::{scan_files, ScanEvents};
+use crate::scanner::{refresh_parent_links, scan_files, ScanEvents};
 use notify::{RecursiveMode, Watcher};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -148,12 +148,19 @@ pub fn start_watcher(
                 }
             }
 
+            let mut parent_link_agents = HashSet::new();
             for ev in batch.into_iter().flatten() {
                 for path in ev.paths {
+                    let owner_ix = resolve_ix(&path);
+                    if let Some(adapter) = owner_ix.and_then(|ix| adapters.get(ix)) {
+                        if adapter.is_parent_link_event(&path) {
+                            parent_link_agents.insert(adapter.agent());
+                        }
+                    }
                     if matches!(ev.kind, notify::EventKind::Remove(_)) {
                         pending.remove(&path);
                         removed.push(path.clone());
-                    } else if let Some(ix) = resolve_ix(&path) {
+                    } else if let Some(ix) = owner_ix {
                         pending.insert(path.clone(), ix);
                     }
                 }
@@ -174,8 +181,15 @@ pub fn start_watcher(
                 .drain()
                 .filter_map(|(path, ix)| adapters.get(ix).and_then(|a| a.file_ref(&path)))
                 .collect();
+            let scanned_agents: HashSet<AgentId> =
+                refs.iter().map(|reference| reference.agent).collect();
             if !refs.is_empty() {
                 scan_files(&adapters, &store, events.as_ref(), refs);
+            }
+            parent_link_agents.retain(|agent| !scanned_agents.contains(agent));
+            if !parent_link_agents.is_empty() {
+                let agents: Vec<AgentId> = parent_link_agents.into_iter().collect();
+                refresh_parent_links(&adapters, &store, events.as_ref(), &agents);
             }
         }
     });

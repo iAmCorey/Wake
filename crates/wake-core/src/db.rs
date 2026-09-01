@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   file_path      TEXT NOT NULL UNIQUE,
   file_size      INTEGER DEFAULT 0,
   file_mtime     INTEGER DEFAULT 0,
-  unknown_lines  INTEGER DEFAULT 0
+  unknown_lines  INTEGER DEFAULT 0,
+  parent_key     TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_agent   ON sessions(agent_id, updated_at DESC);
@@ -98,16 +99,52 @@ fn open_conn(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.busy_timeout(std::time::Duration::from_millis(3000))?;
+    let sessions_existed: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions')",
+        [],
+        |row| row.get(0),
+    )?;
     conn.execute_batch(DDL)
         .context("failed to initialize SQLite schema")?;
     // tombstones.key 迁移(2026-08-24 加列,老库无此列;重复加列报错即忽略):
     // 墓碑按逻辑会话(key)+物理路径双轨屏蔽,多 location 副本不得复活已删会话
     let _ = conn.execute("ALTER TABLE tombstones ADD COLUMN key TEXT", []);
+    if !table_has_column(&conn, "sessions", "parent_key")? {
+        let tx = conn.transaction()?;
+        tx.execute(
+            "ALTER TABLE sessions ADD COLUMN parent_key TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+        // 只有从旧 schema 升级时才需要强制重解析 Grok；新库第一次增量扫描
+        // 本来就会解析全部文件，不应额外记一个永久升级状态。
+        if sessions_existed {
+            tx.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('grok_parent_backfill', '1')",
+                [],
+            )?;
+        }
+        tx.commit()?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_key)",
+        [],
+    )?;
     Ok(conn)
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for name in names {
+        if name? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// 打开索引库;打不开就把它连同 WAL/SHM 一起挪到 `.corrupt` 旁路再建一个空的。
@@ -211,10 +248,121 @@ impl Store {
         Ok(())
     }
 
-    pub fn remove_session(&self, key: &str, tombstone: bool) -> Result<()> {
+    /// 旧索引第一次升级到父子会话 schema 后，现有 Grok 行需要强制重解析，
+    /// 才能把临时 worktree cwd 统一回主会话项目。
+    pub fn needs_grok_parent_backfill(&self) -> bool {
+        let conn = self.read.lock().unwrap();
+        conn.query_row(
+            "SELECT 1 FROM schema_meta WHERE key = 'grok_parent_backfill'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|value| value.is_some())
+        .unwrap_or(false)
+    }
+
+    pub fn finish_grok_parent_backfill(&self) -> Result<()> {
+        let conn = self.write.lock().unwrap();
+        conn.execute(
+            "DELETE FROM schema_meta WHERE key = 'grok_parent_backfill'",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// 当前胜出副本的 `(key, file_path)`，scanner 用 file_path 把同一 agent
+    /// 的多 location 会话交回真正拥有它的 adapter 快照。
+    pub fn session_sources_for_agent(&self, agent: AgentId) -> Result<Vec<(String, String)>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT key, file_path FROM sessions WHERE agent_id = ?1 ORDER BY key",
+        )?;
+        let rows = stmt.query_map(params![agent.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// scanner 在替换全量关系前用它找出解除/换父的 child；这些会话必须先
+    /// 从自己的源文件重解析，恢复被父项目覆盖前的 canonical project。
+    pub fn parent_links_for_agent(&self, agent: AgentId) -> Result<HashMap<String, String>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT key, parent_key FROM sessions
+             WHERE agent_id = ?1 AND parent_key != '' ORDER BY key",
+        )?;
+        let rows = stmt.query_map(params![agent.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// 用某家 adapter 的全量快照原子替换父子关系。只接受库内存在、同 agent、
+    /// 非自指的父子键；陈旧关系会被清空。返回是否真的改变了任何行。
+    pub fn replace_parent_links(&self, agent: AgentId, links: &[(String, String)]) -> Result<bool> {
         let mut conn = self.write.lock().unwrap();
         let tx = conn.transaction()?;
-        {
+        let before: Vec<(String, String)> = {
+            let mut stmt = tx.prepare_cached(
+                "SELECT key, parent_key FROM sessions
+                 WHERE agent_id = ?1 AND parent_key != '' ORDER BY key",
+            )?;
+            let rows = stmt.query_map(params![agent.as_str()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        tx.execute(
+            "UPDATE sessions SET parent_key = '' WHERE agent_id = ?1 AND parent_key != ''",
+            params![agent.as_str()],
+        )?;
+        let mut update = tx.prepare_cached(
+            "UPDATE sessions AS child SET
+               parent_key = ?1,
+               project_path = COALESCE((
+                 SELECT NULLIF(parent.project_path, '') FROM sessions parent WHERE parent.key = ?1
+               ), child.project_path),
+               project_name = COALESCE((
+                 SELECT NULLIF(parent.project_name, '') FROM sessions parent WHERE parent.key = ?1
+               ), child.project_name)
+             WHERE child.key = ?2 AND child.agent_id = ?3 AND child.key != ?1
+               AND EXISTS (
+                 SELECT 1 FROM sessions parent
+                 WHERE parent.key = ?1 AND parent.agent_id = child.agent_id
+               )",
+        )?;
+        let mut unique = std::collections::HashSet::new();
+        for (child, parent) in links {
+            if unique.insert(child.as_str()) {
+                update.execute(params![parent, child, agent.as_str()])?;
+            }
+        }
+        drop(update);
+        let after: Vec<(String, String)> = {
+            let mut stmt = tx.prepare_cached(
+                "SELECT key, parent_key FROM sessions
+                 WHERE agent_id = ?1 AND parent_key != '' ORDER BY key",
+            )?;
+            let rows = stmt.query_map(params![agent.as_str()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        tx.commit()?;
+        Ok(before != after)
+    }
+
+    pub fn remove_session(&self, key: &str, tombstone: bool) -> Result<()> {
+        self.remove_sessions(&[key.to_string()], tombstone)
+    }
+
+    /// 一棵会话树在索引侧原子删除。磁盘路径由调用方先整体移入废纸篓；若
+    /// 任一索引步骤失败，所有 session/message/FTS/tombstone 改动一起回滚。
+    pub fn remove_sessions(&self, keys: &[String], tombstone: bool) -> Result<()> {
+        let mut conn = self.write.lock().unwrap();
+        let tx = conn.transaction()?;
+        for key in keys {
             let file_path: Option<String> = tx
                 .query_row(
                     "SELECT file_path FROM sessions WHERE key = ?1",
@@ -606,15 +754,26 @@ impl Store {
             args.push(Box::new(like.clone()));
             args.push(Box::new(like));
         }
+        if f.roots_only {
+            wheres.push(if f.include_archived {
+                ROOT_IGNORING_ARCHIVED.into()
+            } else {
+                ROOT_WHEN_HIDING_ARCHIVED.into()
+            });
+        }
         let where_sql = if wheres.is_empty() {
             String::new()
         } else {
             format!("WHERE {}", wheres.join(" AND "))
         };
-        let order_col = match f.sort {
-            SortKey::Updated => "s.updated_at",
-            SortKey::Created => "s.created_at",
-            SortKey::Messages => "s.message_count",
+        let order_col = match (f.roots_only, f.sort, f.include_archived) {
+            (true, SortKey::Updated, false) => ROOT_UPDATED_ACTIVE,
+            (true, SortKey::Updated, true) => ROOT_UPDATED_ALL,
+            (true, SortKey::Messages, false) => ROOT_MESSAGES_ACTIVE,
+            (true, SortKey::Messages, true) => ROOT_MESSAGES_ALL,
+            (_, SortKey::Updated, _) => "s.updated_at",
+            (_, SortKey::Created, _) => "s.created_at",
+            (_, SortKey::Messages, _) => "s.message_count",
         };
         let order_dir = if f.ascending { "ASC" } else { "DESC" };
 
@@ -627,8 +786,17 @@ impl Store {
             |r| r.get(0),
         )?;
 
+        let selected_cols = if f.roots_only {
+            if f.include_archived {
+                ROOT_SESSION_COLS_ALL
+            } else {
+                ROOT_SESSION_COLS_ACTIVE
+            }
+        } else {
+            SESSION_COLS
+        };
         let sql = format!(
-            "SELECT {SESSION_COLS} FROM sessions s LEFT JOIN user_data u ON u.session_key = s.key
+            "SELECT {selected_cols} FROM sessions s LEFT JOIN user_data u ON u.session_key = s.key
              {where_sql}
              ORDER BY COALESCE(u.pinned,0) DESC, {order_col} {order_dir}, s.key ASC LIMIT ? OFFSET ?"
         );
@@ -647,6 +815,88 @@ impl Store {
         Ok((out, total))
     }
 
+    /// 当前筛选下各根会话可见的直接子会话数。Grok 关系在入库时已扁平到
+    /// root，因此一次 GROUP BY 足够覆盖任意原始嵌套深度。
+    pub fn child_counts(&self, f: &SessionFilter) -> Result<HashMap<String, i64>> {
+        let (where_sql, args) = child_filter_sql(f, None);
+        let conn = self.read.lock().unwrap();
+        let sql = format!(
+            "SELECT s.parent_key, COUNT(*)
+             FROM sessions s LEFT JOIN user_data u ON u.session_key = s.key
+             {where_sql} GROUP BY s.parent_key"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(args.iter().map(|arg| arg.as_ref())),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        let mut counts = HashMap::new();
+        for row in rows {
+            let (key, count) = row?;
+            if !key.is_empty() {
+                counts.insert(key, count);
+            }
+        }
+        Ok(counts)
+    }
+
+    pub fn list_children(&self, parent_key: &str, f: &SessionFilter) -> Result<Vec<SessionMeta>> {
+        let (where_sql, args) = child_filter_sql(f, Some(parent_key));
+        let order_col = match f.sort {
+            SortKey::Updated => "s.updated_at",
+            SortKey::Created => "s.created_at",
+            SortKey::Messages => "s.message_count",
+        };
+        let order_dir = if f.ascending { "ASC" } else { "DESC" };
+        let conn = self.read.lock().unwrap();
+        let sql = format!(
+            "SELECT {SESSION_COLS}
+             FROM sessions s LEFT JOIN user_data u ON u.session_key = s.key
+             {where_sql}
+             ORDER BY COALESCE(u.pinned,0) DESC, {order_col} {order_dir}, s.key ASC"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(args.iter().map(|arg| arg.as_ref())),
+            row_to_meta,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn parent_key_of(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.read.lock().unwrap();
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT NULLIF(parent_key, '') FROM sessions WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(value)
+    }
+
+    /// 删除确认使用：不受当前列表筛选和 archived 状态影响，递归取完整子树。
+    pub fn all_descendants(&self, key: &str) -> Result<Vec<SessionMeta>> {
+        let conn = self.read.lock().unwrap();
+        let sql = format!(
+            "WITH RECURSIVE descendants(key) AS (
+               SELECT key FROM sessions WHERE parent_key = ?1
+               UNION
+               SELECT child.key FROM sessions child
+               JOIN descendants parent ON child.parent_key = parent.key
+             )
+             SELECT {SESSION_COLS}
+             FROM sessions s
+             JOIN descendants d ON d.key = s.key
+             LEFT JOIN user_data u ON u.session_key = s.key
+             ORDER BY s.created_at, s.key"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params![key], row_to_meta)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn get_session(&self, key: &str) -> Result<Option<SessionMeta>> {
         let conn = self.read.lock().unwrap();
         let sql = format!(
@@ -658,9 +908,16 @@ impl Store {
     pub fn list_projects(&self) -> Result<Vec<ProjectInfo>> {
         let conn = self.read.lock().unwrap();
         let mut stmt = conn.prepare_cached(
-            "SELECT project_path, project_name, COUNT(*), MAX(updated_at)
-             FROM sessions WHERE archived = 0
-             GROUP BY project_path ORDER BY MAX(updated_at) DESC",
+            "SELECT s.project_path, s.project_name, COUNT(*),
+                    MAX(MAX(s.updated_at, COALESCE((
+                      SELECT MAX(c.updated_at) FROM sessions c
+                      WHERE c.parent_key = s.key AND c.archived = 0
+                    ), 0))) AS activity
+             FROM sessions s
+             WHERE s.archived = 0 AND (s.parent_key = '' OR NOT EXISTS (
+               SELECT 1 FROM sessions p WHERE p.key = s.parent_key AND p.archived = 0
+             ))
+             GROUP BY s.project_path ORDER BY activity DESC",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(ProjectInfo {
@@ -690,7 +947,11 @@ impl Store {
     pub fn agent_counts(&self) -> Result<HashMap<String, i64>> {
         let conn = self.read.lock().unwrap();
         let mut stmt = conn.prepare_cached(
-            "SELECT agent_id, COUNT(*) FROM sessions WHERE archived = 0 GROUP BY agent_id",
+            "SELECT s.agent_id, COUNT(*) FROM sessions s
+             WHERE s.archived = 0 AND (s.parent_key = '' OR NOT EXISTS (
+               SELECT 1 FROM sessions p WHERE p.key = s.parent_key AND p.archived = 0
+             ))
+             GROUP BY s.agent_id",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         let mut map = HashMap::new();
@@ -1024,6 +1285,91 @@ const SESSION_COLS: &str =
     "s.key, s.agent_id, s.native_id, s.title, s.project_path, s.project_name,
     s.git_branch, s.created_at, s.updated_at, s.message_count, s.tokens_used, s.model, s.source,
     s.archived, s.file_path, s.file_size, COALESCE(u.favorite,0), COALESCE(u.pinned,0)";
+
+const ROOT_WHEN_HIDING_ARCHIVED: &str = "(s.parent_key = '' OR NOT EXISTS (
+       SELECT 1 FROM sessions p WHERE p.key = s.parent_key AND p.archived = 0
+     ))";
+const ROOT_IGNORING_ARCHIVED: &str =
+    "(s.parent_key = '' OR NOT EXISTS (SELECT 1 FROM sessions p WHERE p.key = s.parent_key))";
+const ROOT_UPDATED_ACTIVE: &str =
+    "MAX(s.updated_at, COALESCE((SELECT MAX(c.updated_at) FROM sessions c
+      WHERE c.parent_key = s.key AND c.archived = 0), 0))";
+const ROOT_UPDATED_ALL: &str =
+    "MAX(s.updated_at, COALESCE((SELECT MAX(c.updated_at) FROM sessions c
+      WHERE c.parent_key = s.key), 0))";
+const ROOT_MESSAGES_ACTIVE: &str =
+    "s.message_count + COALESCE((SELECT SUM(c.message_count) FROM sessions c
+      WHERE c.parent_key = s.key AND c.archived = 0), 0)";
+const ROOT_MESSAGES_ALL: &str =
+    "s.message_count + COALESCE((SELECT SUM(c.message_count) FROM sessions c
+      WHERE c.parent_key = s.key), 0)";
+const ROOT_SESSION_COLS_ACTIVE: &str =
+    "s.key, s.agent_id, s.native_id, s.title, s.project_path, s.project_name,
+     s.git_branch, s.created_at,
+     MAX(s.updated_at, COALESCE((SELECT MAX(c.updated_at) FROM sessions c
+       WHERE c.parent_key = s.key AND c.archived = 0), 0)),
+     s.message_count + COALESCE((SELECT SUM(c.message_count) FROM sessions c
+       WHERE c.parent_key = s.key AND c.archived = 0), 0),
+     s.tokens_used, s.model, s.source, s.archived, s.file_path, s.file_size,
+     COALESCE(u.favorite,0), COALESCE(u.pinned,0)";
+const ROOT_SESSION_COLS_ALL: &str =
+    "s.key, s.agent_id, s.native_id, s.title, s.project_path, s.project_name,
+     s.git_branch, s.created_at,
+     MAX(s.updated_at, COALESCE((SELECT MAX(c.updated_at) FROM sessions c
+       WHERE c.parent_key = s.key), 0)),
+     s.message_count + COALESCE((SELECT SUM(c.message_count) FROM sessions c
+       WHERE c.parent_key = s.key), 0),
+     s.tokens_used, s.model, s.source, s.archived, s.file_path, s.file_size,
+     COALESCE(u.favorite,0), COALESCE(u.pinned,0)";
+
+fn child_filter_sql(
+    filter: &SessionFilter,
+    parent_key: Option<&str>,
+) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    let mut wheres = Vec::new();
+    let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    match parent_key {
+        Some(parent) => {
+            wheres.push("s.parent_key = ?".to_string());
+            args.push(Box::new(parent.to_string()));
+        }
+        None => wheres.push("s.parent_key != ''".to_string()),
+    }
+    if !filter.agents.is_empty() {
+        let placeholders = filter
+            .agents
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        wheres.push(format!("s.agent_id IN ({placeholders})"));
+        for agent in &filter.agents {
+            args.push(Box::new(agent.as_str().to_string()));
+        }
+    }
+    if let Some(project) = &filter.project_path {
+        wheres.push("s.project_path = ?".to_string());
+        args.push(Box::new(project.clone()));
+    }
+    if filter.favorite_only {
+        wheres.push("COALESCE(u.favorite, 0) = 1".to_string());
+    }
+    if !filter.include_archived {
+        wheres.push("s.archived = 0".to_string());
+    }
+    if let Some(query) = filter
+        .title_query
+        .as_deref()
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+    {
+        wheres.push("(s.title LIKE ? ESCAPE '\\' OR s.project_name LIKE ? ESCAPE '\\')".into());
+        let like = format!("%{}%", escape_like(query));
+        args.push(Box::new(like.clone()));
+        args.push(Box::new(like));
+    }
+    (format!("WHERE {}", wheres.join(" AND ")), args)
+}
 
 fn row_to_meta(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
     let agent_str: String = r.get(1)?;

@@ -316,6 +316,9 @@ pub struct SessionFilter {
     pub project_path: Option<String>,
     pub favorite_only: bool,
     pub include_archived: bool,
+    /// 只返回会话树的可见根节点。父节点不存在或被当前归档口径隐藏时，
+    /// 子节点会提升为根，避免形成无法从列表进入的孤儿会话。
+    pub roots_only: bool,
     pub title_query: Option<String>,
     pub sort: SortKey,
     /// false = 降序(默认,新到旧/多到少)

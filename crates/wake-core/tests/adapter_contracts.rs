@@ -1116,9 +1116,17 @@ fn pi_parse_contract() {
 #[test]
 fn grok_parse_contract() {
     setup();
-    let adapter = GrokAdapter::new();
+    let adapter = GrokAdapter::new().with_custom_root(fixture("grok"));
+    adapter.begin_scan();
+    assert!(adapter.parent_links().contains(&(
+        "grok:aaaaaaaa-aaaa-bbbb-cccc-0000000000aa".into(),
+        "grok:77777777-aaaa-bbbb-cccc-000000000007".into(),
+    )));
+    let parent_meta = fixture("grok/sessions/%2FUsers%2Ftester%2FGithub%2Fwakefx/77777777-aaaa-bbbb-cccc-000000000007/subagents/child-fixture/meta.json");
+    assert!(adapter.is_parent_link_event(&parent_meta));
     // file_ref 是公开 API:只认 updates.jsonl,native_id 取会话目录名
     let path = fixture("grok/sessions/%2FUsers%2Ftester%2FGithub%2Fwakefx/77777777-aaaa-bbbb-cccc-000000000007/updates.jsonl");
+    assert!(!adapter.is_parent_link_event(&path));
     let r = adapter.file_ref(&path).expect("grok file_ref");
     assert_eq!(r.native_id, "77777777-aaaa-bbbb-cccc-000000000007");
     assert!(adapter

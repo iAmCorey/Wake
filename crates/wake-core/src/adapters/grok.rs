@@ -1,3 +1,4 @@
+use super::grok_group::{self, GroupCtx};
 use super::parse_utils::*;
 use super::{units_from_messages, AgentAdapter};
 use crate::models::*;
@@ -7,6 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// Grok Build(xAI 的 coding CLI):`~/.grok/sessions/<url编码cwd>/<uuid>/` 一目录
 /// 一会话。主文件 `updates.jsonl` 是 ACP 风格完整流水({timestamp(unix秒),
@@ -16,16 +18,44 @@ use std::path::{Path, PathBuf};
 /// Grok 自己的索引,`prompt_history.jsonl` 在 cwd 目录级——都不是会话文件。
 pub struct GrokAdapter {
     root: PathBuf,
+    grok_home: PathBuf,
+    group: Mutex<Option<Arc<GroupCtx>>>,
 }
 
 impl GrokAdapter {
     pub fn new() -> Self {
+        let grok_home = super::home_dir().unwrap_or_default().join(".grok");
         Self {
-            root: super::home_dir()
-                .unwrap_or_default()
-                .join(".grok")
-                .join("sessions"),
+            root: grok_home.join("sessions"),
+            grok_home,
+            group: Mutex::new(None),
         }
+    }
+
+    fn from_custom_dir(dir: PathBuf) -> Self {
+        let (root, grok_home) = if dir.join("sessions").is_dir() {
+            (dir.join("sessions"), dir)
+        } else if dir.file_name().is_some_and(|name| name == "sessions") {
+            let home = dir.parent().unwrap_or(&dir).to_path_buf();
+            (dir, home)
+        } else {
+            // 保留旧行为：自定义目录也可以直接就是 sessions root。
+            // 此时没有结构证据允许越过用户选择的边界去父目录读 sidecar。
+            (dir.clone(), dir)
+        };
+        Self {
+            root,
+            grok_home,
+            group: Mutex::new(None),
+        }
+    }
+
+    fn group_ctx(&self) -> Arc<GroupCtx> {
+        let mut group = self.group.lock().unwrap();
+        if group.is_none() {
+            *group = Some(grok_group::load_group_ctx(&self.root, &self.grok_home));
+        }
+        Arc::clone(group.as_ref().unwrap())
     }
 }
 
@@ -37,6 +67,7 @@ struct Summary {
     updated_ms: i64,
     git_branch: Option<String>,
     model: Option<String>,
+    git_remotes: Vec<String>,
 }
 
 fn read_summary(updates_path: &Path) -> Summary {
@@ -47,6 +78,7 @@ fn read_summary(updates_path: &Path) -> Summary {
         updated_ms: 0,
         git_branch: None,
         model: None,
+        git_remotes: Vec::new(),
     };
     let path = updates_path.with_file_name("summary.json");
     if let Ok(raw) = fs::read_to_string(&path) {
@@ -83,6 +115,14 @@ fn read_summary(updates_path: &Path) -> Summary {
                 .and_then(|x| x.as_str())
                 .filter(|m| !m.is_empty())
                 .map(String::from);
+            if let Some(remotes) = v.get("git_remotes").and_then(Value::as_array) {
+                s.git_remotes = remotes
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|remote| !remote.is_empty())
+                    .map(String::from)
+                    .collect();
+            }
         }
     }
     s
@@ -273,7 +313,13 @@ fn parse_grok_updates(path: &Path) -> Result<(Vec<TranscriptMessage>, u32)> {
     Ok((messages, unknown))
 }
 
-fn build_meta(r: &SessionFileRef, side: &Summary, messages: &[TranscriptMessage]) -> SessionMeta {
+fn build_meta(
+    r: &SessionFileRef,
+    side: &Summary,
+    messages: &[TranscriptMessage],
+    grok_home: &Path,
+    group: &GroupCtx,
+) -> SessionMeta {
     let title = Some(clean_title_candidate(&side.title))
         .filter(|t| !t.is_empty())
         .or_else(|| title_from_messages(messages))
@@ -283,13 +329,15 @@ fn build_meta(r: &SessionFileRef, side: &Summary, messages: &[TranscriptMessage]
         .filter_map(|m| m.timestamp)
         .max()
         .unwrap_or(0);
+    let (project_path, project_name) =
+        grok_group::canonical_project(&side.cwd, &side.git_remotes, grok_home, &r.native_id, group);
     SessionMeta {
         key: format!("grok:{}", r.native_id),
         id: r.native_id.clone(),
         agent: AgentId::Grok,
         title,
-        project_path: side.cwd.clone(),
-        project_name: project_name_of(&side.cwd),
+        project_path,
+        project_name,
         file_path: r.file_path.clone(),
         created_at: if side.created_ms > 0 {
             side.created_ms
@@ -318,6 +366,26 @@ fn build_meta(r: &SessionFileRef, side: &Summary, messages: &[TranscriptMessage]
 impl AgentAdapter for GrokAdapter {
     fn agent(&self) -> AgentId {
         AgentId::Grok
+    }
+
+    fn begin_scan(&self) {
+        *self.group.lock().unwrap() = Some(grok_group::load_group_ctx(&self.root, &self.grok_home));
+    }
+
+    fn manages_parent_links(&self) -> bool {
+        true
+    }
+
+    fn parent_links(&self) -> Vec<(String, String)> {
+        grok_group::parent_links(&self.group_ctx())
+    }
+
+    fn is_parent_link_event(&self, path: &Path) -> bool {
+        path.strip_prefix(&self.root).ok().is_some_and(|relative| {
+            relative
+                .components()
+                .any(|component| component.as_os_str() == "subagents")
+        })
     }
 
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
@@ -362,7 +430,7 @@ impl AgentAdapter for GrokAdapter {
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
         let (messages, unknown) = parse_grok_updates(Path::new(&r.file_path))?;
         let side = read_summary(Path::new(&r.file_path));
-        let meta = build_meta(r, &side, &messages);
+        let meta = build_meta(r, &side, &messages, &self.grok_home, &self.group_ctx());
         let units = units_from_messages(&messages);
         Ok(ParsedSession {
             meta,
@@ -375,7 +443,7 @@ impl AgentAdapter for GrokAdapter {
         let (messages, unknown) = parse_grok_updates(Path::new(&r.file_path))?;
         let side = read_summary(Path::new(&r.file_path));
         Ok(ParsedTranscript {
-            meta: build_meta(r, &side, &messages),
+            meta: build_meta(r, &side, &messages, &self.grok_home, &self.group_ctx()),
             mainline: messages,
             sidechains: Vec::new(),
             unknown_line_count: unknown,
@@ -383,12 +451,7 @@ impl AgentAdapter for GrokAdapter {
     }
 
     fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
-        let root = if dir.join("sessions").is_dir() {
-            dir.join("sessions")
-        } else {
-            dir
-        };
-        Box::new(Self { root })
+        Box::new(Self::from_custom_dir(dir))
     }
 
     fn data_roots(&self) -> Vec<PathBuf> {

@@ -146,6 +146,7 @@ fn list_sessions_filters_and_counts() {
         project_path: None,
         favorite_only: false,
         include_archived: false,
+        roots_only: false,
         title_query: None,
         sort: SortKey::Updated,
         ascending: false,
@@ -199,6 +200,151 @@ fn list_sessions_pages_have_stable_tie_order() {
             "claude-code:e",
         ]
     );
+}
+
+#[test]
+fn nested_sessions_are_aggregated_but_starred_stays_flat() {
+    let (_dir, store) = temp_store();
+    let mut parent = meta("grok:parent", "parent");
+    parent.agent = AgentId::Grok;
+    parent.project_path = "/work/source".into();
+    parent.project_name = "source".into();
+    parent.file_path = "/tmp/grok/a/parent/updates.jsonl".into();
+    parent.updated_at = 100;
+    parent.message_count = 2;
+    let mut child = meta("grok:child", "child");
+    child.agent = AgentId::Grok;
+    child.project_path = "/tmp/wt-plan-pr-1".into();
+    child.project_name = "wt-plan-pr-1".into();
+    child.file_path = "/tmp/grok/b/child/updates.jsonl".into();
+    child.updated_at = 500;
+    child.message_count = 7;
+    let mut other = meta("grok:other", "other");
+    other.agent = AgentId::Grok;
+    other.file_path = "/tmp/grok/a/other/updates.jsonl".into();
+    other.updated_at = 400;
+    other.message_count = 3;
+    store
+        .write_meta_only(&[
+            (parent.clone(), parent.updated_at),
+            (child.clone(), child.updated_at),
+            (other, 400),
+        ])
+        .unwrap();
+    store
+        .replace_parent_links(AgentId::Grok, &[(child.key.clone(), parent.key.clone())])
+        .unwrap();
+
+    let filter = SessionFilter {
+        roots_only: true,
+        limit: 20,
+        ..Default::default()
+    };
+    let (roots, total) = store.list_sessions(&filter).unwrap();
+    assert_eq!(total, 2);
+    assert_eq!(
+        roots[0].key, parent.key,
+        "child activity should sort its root"
+    );
+    assert_eq!(roots[0].updated_at, 500);
+    assert_eq!(roots[0].message_count, 9);
+    assert_eq!(store.child_counts(&filter).unwrap()[&parent.key], 1);
+    let children = store.list_children(&parent.key, &filter).unwrap();
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].key, child.key);
+    assert_eq!(children[0].project_path, parent.project_path);
+    assert_eq!(
+        store.parent_key_of(&child.key).unwrap(),
+        Some(parent.key.clone())
+    );
+    assert_eq!(store.agent_counts().unwrap()["grok"], 2);
+    assert_eq!(
+        store
+            .list_projects()
+            .unwrap()
+            .iter()
+            .find(|project| project.path == parent.project_path)
+            .unwrap()
+            .session_count,
+        1
+    );
+
+    store.set_user_data(&child.key, Some(true), None).unwrap();
+    let starred = SessionFilter {
+        favorite_only: true,
+        roots_only: false,
+        limit: 20,
+        ..Default::default()
+    };
+    let (rows, total) = store.list_sessions(&starred).unwrap();
+    assert_eq!(total, 1);
+    assert_eq!(
+        rows[0].key, child.key,
+        "Starred must keep child sessions flat"
+    );
+}
+
+#[test]
+fn removing_a_session_tree_writes_every_tombstone_atomically() {
+    let (_dir, store) = temp_store();
+    let mut parent = meta("grok:delete-parent", "parent");
+    parent.agent = AgentId::Grok;
+    let mut child = meta("grok:delete-child", "child");
+    child.agent = AgentId::Grok;
+    store
+        .write_meta_only(&[
+            (parent.clone(), parent.updated_at),
+            (child.clone(), child.updated_at),
+        ])
+        .unwrap();
+    store
+        .replace_parent_links(AgentId::Grok, &[(child.key.clone(), parent.key.clone())])
+        .unwrap();
+    assert_eq!(store.all_descendants(&parent.key).unwrap().len(), 1);
+
+    store
+        .remove_sessions(&[parent.key.clone(), child.key.clone()], true)
+        .unwrap();
+    assert!(store.get_session(&parent.key).unwrap().is_none());
+    assert!(store.get_session(&child.key).unwrap().is_none());
+    assert!(store.is_key_tombstoned(&parent.key));
+    assert!(store.is_key_tombstoned(&child.key));
+    assert!(store.is_tombstoned(&parent.file_path));
+    assert!(store.is_tombstoned(&child.file_path));
+}
+
+#[test]
+fn old_database_marks_grok_backfill_until_scan_finishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE sessions (
+           key TEXT PRIMARY KEY, agent_id TEXT NOT NULL, native_id TEXT NOT NULL,
+           title TEXT NOT NULL DEFAULT '', project_path TEXT NOT NULL DEFAULT '',
+           project_name TEXT NOT NULL DEFAULT '', git_branch TEXT, created_at INTEGER DEFAULT 0,
+           updated_at INTEGER DEFAULT 0, message_count INTEGER DEFAULT 0, tokens_used INTEGER,
+           model TEXT, source TEXT, archived INTEGER DEFAULT 0, file_path TEXT NOT NULL UNIQUE,
+           file_size INTEGER DEFAULT 0, file_mtime INTEGER DEFAULT 0, unknown_lines INTEGER DEFAULT 0
+         );",
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::open(&path).unwrap();
+    assert!(store.needs_grok_parent_backfill());
+    store.finish_grok_parent_backfill().unwrap();
+    assert!(!store.needs_grok_parent_backfill());
+
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let has_parent: bool = conn
+        .prepare("PRAGMA table_info(sessions)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .flatten()
+        .any(|name| name == "parent_key");
+    assert!(has_parent);
 }
 
 #[test]

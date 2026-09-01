@@ -12,6 +12,7 @@ pub mod opencode;
 pub mod pi;
 pub mod qoder;
 
+pub(crate) mod grok_group;
 pub(crate) mod parse_utils;
 pub(crate) mod sqlite_ro;
 
@@ -76,6 +77,23 @@ pub trait AgentAdapter: Send + Sync {
     /// 有边车/目录布局的 adapter 覆写。
     fn session_paths(&self, meta: &SessionMeta) -> Vec<String> {
         vec![meta.file_path.clone()]
+    }
+    /// 一轮扫描开始前刷新 adapter 的跨会话快照。默认 adapter 没有这类状态。
+    fn begin_scan(&self) {}
+    /// 此 adapter 是否负责维护会话父子关系。单独的能力位用于区分“当前没有
+    /// 子会话”和“不支持父子关系”，前者必须清掉数据库中的陈旧关系。
+    fn manages_parent_links(&self) -> bool {
+        false
+    }
+    /// 当前数据根内的 `(child_key, direct_parent_key)` 全量快照。scanner 会在
+    /// 合并同 agent 的所有 location 后统一扁平到 root。
+    fn parent_links(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+    /// watcher 事件是否会改变父子关系快照。关系边车不是会话主文件，不能塞进
+    /// `file_ref`；命中后 watcher 会单独刷新同 agent 的所有关系快照。
+    fn is_parent_link_event(&self, _path: &Path) -> bool {
+        false
     }
     /// 本家会话文件所在的根位置(目录,或 SQLite 型的库文件),**不论当前存不存在**。
     /// 这是路径的**唯一事实源**:watch_paths 由它派生,"Scanned locations" 面板

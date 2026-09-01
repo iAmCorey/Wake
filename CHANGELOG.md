@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- New: Grok Build `execute-plan` and subagent sessions now nest under their root parent, with expandable child counts, root-level sidebar totals, source-project recovery for worktrees, flat Starred/search results, and cascading Trash deletion
+- Credits: Grok subagent nesting was inspired by [PR #3](https://github.com/iAmCorey/Wake/pull/3). Thanks to [@syanbo](https://github.com/syanbo) for mapping Grok's parent metadata and worktree behavior; the final implementation was independently rebuilt on the current codebase
+
 ## [0.3.2] — 2026-09-01
 
 - Fix: in a Codex branch or subagent thread, the parent conversation's transcript is injected as a `user` message — its assistant replies were being shown as if you had typed them, and were indexed for search. They are now treated as injected context, like the other `<environment_context>`-style blocks

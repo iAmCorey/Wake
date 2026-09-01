@@ -7752,6 +7752,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "tempfile",
  "unicode-segmentation",
  "unicode-width",
  "wake-core",
