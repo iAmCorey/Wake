@@ -1,6 +1,6 @@
 //! macOS 平台原语:AppleScript/`open` 驱动的终端与 Finder、Finder 废纸篓、
-//! Kooky 深链。接口与 linux.rs 同形,策略(dir/file 分发、路径过滤、
-//! 线程化)在 mod.rs,这里只做动作本身。
+//! 深链目标(Kooky、Claude Desktop、Codex Desktop)。接口与 linux.rs 同形,
+//! 策略(dir/file 分发、路径过滤、线程化)在 mod.rs,这里只做动作本身。
 
 use super::{
     cli_not_found_error, percent_encode, pipe_to, posix_quote, resolve_cli, resume_args,
@@ -24,17 +24,26 @@ fn osascript(lines: &[String]) -> std::io::Result<std::process::Output> {
     cmd.output()
 }
 
-/// Open In 下拉的目标终端。只列本机实际安装且可程序化注入命令的
-/// (Tabby 等无稳定命令接口的不做)。
+/// Open In 下拉的目标。shell 类只列本机实际安装且可程序化注入命令的
+/// (Tabby 等无稳定命令接口的不做);深链类(Kooky/两家 desktop)不跑
+/// shell,由 deep_link_resume 整锅接管。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalApp {
     Terminal,
     ITerm,
     Warp,
     Ghostty,
-    /// 用户自己的 agent 宿主 app。暂无外部接口(无 URL scheme、不收 open
-    /// 参数),只能激活应用,不能带会话跳转。
+    /// 用户自己的 agent 宿主 app:roster 内走 kooky://resume 深链,
+    /// 名单外经 kooky-cli 哑管道传命令文本(见 launch_kooky)。
     Kooky,
+    /// Claude Desktop 内嵌的 Claude Code:claude://resume?session=<uuid>
+    /// 把磁盘上的 CLI transcript 导入 desktop 会话并聚焦(实测 2026-09-01,
+    /// 处理端是 app.asar 的 claudeURLHandler,id 校验为裸 UUID)。
+    ClaudeDesktop,
+    /// Codex 桌面版(app 名叫 ChatGPT.app,bundle id com.openai.codex):
+    /// codex://threads/<uuid> 打开本地会话(路由 kind "localConversation",
+    /// desktop 的 threads 表与 CLI 共库、行内 rollout_path 即 CLI 文件)。
+    CodexDesktop,
 }
 
 impl TerminalApp {
@@ -45,6 +54,8 @@ impl TerminalApp {
             TerminalApp::Warp => "Warp",
             TerminalApp::Ghostty => "Ghostty",
             TerminalApp::Kooky => "Kooky",
+            TerminalApp::ClaudeDesktop => "Claude Desktop",
+            TerminalApp::CodexDesktop => "Codex Desktop",
         }
     }
 
@@ -56,10 +67,23 @@ impl TerminalApp {
             TerminalApp::Warp => "warp",
             TerminalApp::Ghostty => "ghostty",
             TerminalApp::Kooky => "kooky",
+            TerminalApp::ClaudeDesktop => "claude-desktop",
+            TerminalApp::CodexDesktop => "codex-desktop",
         }
     }
 
-    /// 已安装的 .app 绝对路径(首个命中)
+    /// 内嵌品牌图标覆盖:Codex desktop 的 .app 图标是 ChatGPT 的(留白也
+    /// 比别家多,渲染出来偏小),Open In 里应与 Codex agent 图标一致,
+    /// 直接用内嵌 brands 资源,不走 ensure_app_icons 的提取缓存
+    pub fn brand_icon(&self) -> Option<&'static str> {
+        match self {
+            TerminalApp::CodexDesktop => Some("brands/codex.png"),
+            _ => None,
+        }
+    }
+
+    /// 已安装的 .app 绝对路径(首个命中;/Applications 之外再试
+    /// ~/Applications 下同名 bundle)
     pub fn resolved_app_path(&self) -> Option<std::path::PathBuf> {
         let candidates: &[&str] = match self {
             TerminalApp::Terminal => &["/System/Applications/Utilities/Terminal.app"],
@@ -67,18 +91,37 @@ impl TerminalApp {
             TerminalApp::Warp => &["/Applications/Warp.app"],
             TerminalApp::Ghostty => &["/Applications/Ghostty.app"],
             TerminalApp::Kooky => &["/Applications/Kooky.app"],
+            TerminalApp::ClaudeDesktop => &["/Applications/Claude.app"],
+            // Codex desktop 的 app 名与旧版 ChatGPT 同名,靠 bundle id 区分
+            TerminalApp::CodexDesktop => &["/Applications/ChatGPT.app"],
         };
-        for p in candidates {
-            let p = std::path::PathBuf::from(p);
-            if p.is_dir() {
-                return Some(p);
+        let home = dirs::home_dir().unwrap_or_default().join("Applications");
+        for c in candidates {
+            let sys = std::path::PathBuf::from(c);
+            let alt = std::path::Path::new(c).file_name().map(|n| home.join(n));
+            for p in std::iter::once(sys).chain(alt) {
+                if p.is_dir() && self.bundle_marker_ok(&p) {
+                    return Some(p);
+                }
             }
         }
-        let home_app = dirs::home_dir()
-            .unwrap_or_default()
-            .join("Applications")
-            .join(format!("{}.app", self.display_name()));
-        home_app.is_dir().then_some(home_app)
+        None
+    }
+
+    /// display 名不足以认 app 的变体按 bundle id 验明正身(Info.plist 里
+    /// bundle id 是明文 ASCII,XML/二进制两种 plist 都直接搜得到):
+    /// ChatGPT.app 只有 Codex 版(com.openai.codex)才注册 codex:// scheme,
+    /// 旧版 ChatGPT 同名不同物;Claude.app 同理防重名壳。一次性探测
+    /// (installed_terminals 进程内缓存),读几 KB plist 无感。
+    fn bundle_marker_ok(&self, app: &Path) -> bool {
+        let marker: &[u8] = match self {
+            TerminalApp::ClaudeDesktop => b"com.anthropic.claudefordesktop",
+            TerminalApp::CodexDesktop => b"com.openai.codex",
+            _ => return true,
+        };
+        std::fs::read(app.join("Contents/Info.plist"))
+            .map(|data| data.windows(marker.len()).any(|w| w == marker))
+            .unwrap_or(false)
     }
 
     fn is_installed(&self) -> bool {
@@ -86,21 +129,28 @@ impl TerminalApp {
     }
 }
 
-/// 深链类目标整锅接管 resume(不经 agent CLI)。Kooky 是本平台唯一一例;
-/// 新增非 shell 目标在此声明,mod.rs 的 resume_session_in 无需加旁路。
+/// 深链类目标整锅接管 resume(不经 agent CLI)。新增非 shell 目标在此
+/// 声明,mod.rs 的 resume_session_in 无需加旁路。
 pub(super) fn deep_link_resume(meta: &SessionMeta, term: TerminalApp) -> Option<ResumeOutcome> {
-    (term == TerminalApp::Kooky).then(|| launch_kooky(meta))
+    match term {
+        TerminalApp::Kooky => Some(launch_kooky(meta)),
+        TerminalApp::ClaudeDesktop => Some(launch_claude_desktop(meta)),
+        TerminalApp::CodexDesktop => Some(launch_desktop_id(&meta.id, "codex://threads/", term)),
+        _ => None,
+    }
 }
 
 /// Shell 类目标的命令注入分发(深链目标已被 deep_link_resume 拦下,
-/// Kooky 臂只是护栏)
+/// 深链臂只是护栏)
 pub(super) fn launch_shell(term: TerminalApp, command: &str) -> anyhow::Result<()> {
     match term {
         TerminalApp::Terminal => launch_terminal_app(command),
         TerminalApp::ITerm => launch_iterm(command),
         TerminalApp::Warp => launch_warp(command),
         TerminalApp::Ghostty => launch_ghostty(command),
-        TerminalApp::Kooky => anyhow::bail!("Kooky is a deep-link target"),
+        TerminalApp::Kooky | TerminalApp::ClaudeDesktop | TerminalApp::CodexDesktop => {
+            anyhow::bail!("{} is a deep-link target", term.display_name())
+        }
     }
 }
 
@@ -196,16 +246,24 @@ fn kooky_speaks(agent: AgentId) -> bool {
     KOOKY_ROSTER.contains(&agent) || kooky_cli_path().is_some()
 }
 
-/// 某会话可用的恢复目标(Kooky 按 agent 过滤,见 kooky_speaks)
+/// 某会话可用的恢复目标(Kooky 按 agent 过滤见 kooky_speaks;两家 desktop
+/// 只认自家 agent 的会话——深链 id 命名空间互不相通)
 pub fn terminals_for(agent: AgentId) -> Vec<TerminalApp> {
     installed_terminals()
         .iter()
         .copied()
-        .filter(|t| *t != TerminalApp::Kooky || kooky_speaks(agent))
+        .filter(|t| match t {
+            TerminalApp::Kooky => kooky_speaks(agent),
+            TerminalApp::ClaudeDesktop => agent == AgentId::ClaudeCode,
+            TerminalApp::CodexDesktop => agent == AgentId::Codex,
+            _ => true,
+        })
         .collect()
 }
 
-/// 已安装终端(启动后不变,进程内缓存)
+/// 已安装终端(启动后不变,进程内缓存)。首位是 terminals_for 的回退值
+/// (偏好被会话过滤时左段按钮显示它),恒为 Terminal——desktop 目标排在
+/// Kooky 侧属"宿主 app"一档,不抢默认。
 pub fn installed_terminals() -> &'static [TerminalApp] {
     use std::sync::OnceLock;
     static CACHE: OnceLock<Vec<TerminalApp>> = OnceLock::new();
@@ -213,6 +271,8 @@ pub fn installed_terminals() -> &'static [TerminalApp] {
         [
             TerminalApp::Terminal,
             TerminalApp::Kooky,
+            TerminalApp::ClaudeDesktop,
+            TerminalApp::CodexDesktop,
             TerminalApp::ITerm,
             TerminalApp::Warp,
             TerminalApp::Ghostty,
@@ -426,6 +486,128 @@ fn launch_kooky(meta: &SessionMeta) -> ResumeOutcome {
     }
 }
 
+/// Claude/Codex 桌面版深链。两端处理器只认裸 UUID 形态的会话 id(实测
+/// 2026-09-01:Claude 的 claudeURLHandler 与 Codex 的 threads 路由同为
+/// 8-4-4-4-12 hex 校验),而 Wake 这两家 adapter 的 native id 恰是该形态
+/// ——不匹配就地报错,别发一条对端静默丢弃的 URL(`open` 对已注册 scheme
+/// 恒退 0,拒绝在 Wake 侧看不见)。app 侧的失败(transcript 不在盘上、
+/// 会话正被 CLI 占用)由 desktop 自己弹 toast,Wake 与 Kooky 深链同款
+/// 只报"已送达"。
+///
+/// Claude Desktop 的深链导入只按 `local_<传入id>` 精确查重,不认会话链
+/// 归属(desktop 内 resume picker 走 resolveForResume 才认)。已导入的
+/// desktop 会话续聊后,其 CLI 链会推进到新 id——此时 Wake 直发盘上
+/// transcript 的 id,desktop 会给同一条对话再复制一个会话。所以深链前
+/// 先只读扫一遍 desktop 的会话索引(claude-code-sessions/<acct>/<org>/
+/// local_*.json,每条含 cliSessionId/unarchivedCliSessionId/
+/// preClearCliSessionId),命中就改发那条记录自己的 stem uuid,desktop
+/// 对已存在的 local_<stem> 走复用+聚焦(实测 2026-09-01)。
+fn launch_claude_desktop(meta: &SessionMeta) -> ResumeOutcome {
+    // 非 UUID(含坏文件产生的空 id)直接走 launch_desktop_id 的报错路径,
+    // 不进索引扫描——空 needle 会让预筛的 windows(0) panic
+    let id = is_uuid(&meta.id)
+        .then(|| claude_desktop_owned_stem(&meta.id))
+        .flatten()
+        .unwrap_or_else(|| meta.id.clone());
+    launch_desktop_id(&id, "claude://resume?session=", TerminalApp::ClaudeDesktop)
+}
+
+/// 在 desktop 会话索引里找拥有 `cli_id` 的会话,返回其 stem uuid。
+/// 索引是数百个 KB 级 json,每次点击现扫(读几 ms,别缓存——desktop
+/// 侧随时在写)。解析失败/结构不符的文件跳过,扫不到回 None 走原 id。
+fn claude_desktop_owned_stem(cli_id: &str) -> Option<String> {
+    // home_dir 走 adapters 的 WAKE_HOME 改道,fixture 测试可以铺假索引
+    let root = crate::adapters::home_dir()?
+        .join("Library/Application Support/Claude/claude-code-sessions");
+    let sub = |d: std::fs::DirEntry| std::fs::read_dir(d.path()).into_iter().flatten().flatten();
+    // desktop 可能留有多个 <acct>/<org> 目录,而 claude://resume 只在当前
+    // 登录账户下找 local_<stem>;当前账户 Wake 无从得知,多份命中时取
+    // mtime 最新的记录(基本即活跃账户),别听目录枚举顺序的
+    std::fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .flat_map(sub)
+        .flat_map(sub)
+        .filter_map(|f| {
+            let p = f.path();
+            let stem = owned_stem_in(&p, cli_id)?;
+            let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+            Some((mtime, stem))
+        })
+        .max_by_key(|(mtime, _)| *mtime)
+        .map(|(_, stem)| stem)
+}
+
+/// 单条索引记录的归属判定。先做字节级预筛——绝大多数文件不含这个 id,
+/// 省掉整篇 json 解析(命中的通常恰一份)。调用方保证 cli_id 非空
+/// (空 needle 会 panic)
+fn owned_stem_in(p: &Path, cli_id: &str) -> Option<String> {
+    if p.extension().and_then(|e| e.to_str()) != Some("json") {
+        return None;
+    }
+    let data = std::fs::read(p).ok()?;
+    let needle = cli_id.as_bytes();
+    if !data.windows(needle.len()).any(|w| w == needle) {
+        return None;
+    }
+    let v = serde_json::from_slice::<serde_json::Value>(&data).ok()?;
+    // 标量三字段 + 历史数组(多次 clear/resume 后旧 CLI id 归档在
+    // priorCliSessionIds 里,漏了它老会话又会被重复导入)
+    let owns = [
+        "cliSessionId",
+        "unarchivedCliSessionId",
+        "preClearCliSessionId",
+    ]
+    .iter()
+    .any(|k| v.get(k).and_then(|x| x.as_str()) == Some(cli_id))
+        || v.get("priorCliSessionIds")
+            .and_then(|x| x.as_array())
+            .is_some_and(|a| a.iter().any(|x| x.as_str() == Some(cli_id)));
+    owns.then(|| {
+        v.get("sessionId")?
+            .as_str()?
+            .strip_prefix("local_")
+            .filter(|s| is_uuid(s))
+            .map(str::to_string)
+    })
+    .flatten()
+}
+
+fn launch_desktop_id(id: &str, prefix: &str, term: TerminalApp) -> ResumeOutcome {
+    if !is_uuid(id) {
+        return ResumeOutcome {
+            ok: false,
+            command: String::new(),
+            error: Some(format!(
+                "{} can only open sessions with a UUID id (got `{id}`)",
+                term.display_name(),
+            )),
+        };
+    }
+    let url = format!("{prefix}{id}");
+    let ok = Command::new("open")
+        .arg(&url)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    ResumeOutcome {
+        ok,
+        command: url,
+        error: (!ok).then(|| format!("Couldn't open {}", term.display_name())),
+    }
+}
+
+/// 裸 UUID(8-4-4-4-12 hex,大小写不限)——与两家 desktop 深链处理器的
+/// 校验正则同构
+fn is_uuid(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
 /// 逐文件让 Finder 删进废纸篓(osascript 首次触发自动化授权会停等用户
 /// 点选,可能长阻塞;首错即断,已删的留在废纸篓可恢复)
 pub(super) fn trash_existing(paths: &[&str]) -> anyhow::Result<()> {
@@ -465,4 +647,69 @@ pub(super) fn reveal_path(path: &str) {
     let mut cmd = Command::new("open");
     cmd.args(["-R", path]);
     let _ = spawn_and_reap(cmd);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uuid_gate_matches_desktop_handlers() {
+        assert!(is_uuid("01937a56-3a2c-43af-af68-a8d4e00d60ed"));
+        assert!(is_uuid("01A05A8B-2BB4-7DB3-B72C-3E9AAB7DF290")); // 大小写不限
+        assert!(!is_uuid("last"));
+        assert!(!is_uuid("local_01937a56-3a2c-43af-af68-a8d4e00d60ed"));
+        assert!(!is_uuid("01937a56-3a2c-43af-af68-a8d4e00d60e")); // 短一位
+        assert!(!is_uuid("01937a56x3a2c-43af-af68-a8d4e00d60ed")); // 错位分隔符
+        assert!(!is_uuid(""));
+    }
+
+    /// 非 UUID id 必须就地报错而不是发 URL——`open` 对已注册 scheme 恒退 0,
+    /// 发出去的坏 id 在 Wake 侧看不见失败
+    #[test]
+    fn desktop_deep_link_rejects_non_uuid_id_without_launching() {
+        let meta = crate::models::SessionMeta {
+            key: "claude-code:not-a-uuid".into(),
+            id: "not-a-uuid".into(),
+            agent: crate::models::AgentId::ClaudeCode,
+            title: String::new(),
+            project_path: String::new(),
+            project_name: String::new(),
+            file_path: String::new(),
+            created_at: 0,
+            updated_at: 0,
+            message_count: 0,
+            size_bytes: 0,
+            git_branch: None,
+            model: None,
+            tokens_used: None,
+            archived: false,
+            source: None,
+            favorite: false,
+            pinned: false,
+        };
+        for term in [TerminalApp::ClaudeDesktop, TerminalApp::CodexDesktop] {
+            let outcome = deep_link_resume(&meta, term).expect("desktop targets are deep-link");
+            assert!(!outcome.ok);
+            assert!(
+                outcome.command.is_empty(),
+                "must not build a URL for a bad id"
+            );
+            assert!(outcome
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains(term.display_name())));
+        }
+    }
+
+    #[test]
+    fn shell_launch_refuses_deep_link_targets() {
+        for term in [
+            TerminalApp::Kooky,
+            TerminalApp::ClaudeDesktop,
+            TerminalApp::CodexDesktop,
+        ] {
+            assert!(launch_shell(term, "echo hi").is_err());
+        }
+    }
 }

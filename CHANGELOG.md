@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- New: Open in now offers Claude Desktop for Claude Code sessions and Codex Desktop for Codex sessions, jumping straight to that session in the desktop app
+- New: Open in remembers your last choice per agent and keeps it across restarts
+- Fix: opening a session in Claude Desktop no longer creates a duplicate copy when the conversation already lives there
+- Update: Codex Desktop now shows the Codex brand icon in Open in instead of the ChatGPT app icon
+
 ## [0.3.4] — 2026-09-01
 
 - New: inline images from every readable agent transcript format now appear with compact thumbnails, full-window zoom, copy, and collision-safe save-to-Downloads actions; unsupported image formats can still be saved in their original bytes

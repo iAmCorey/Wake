@@ -1866,7 +1866,14 @@ pub struct Workbench {
     /// 终端 id → 提取好的应用图标 png(后台 JXA 提取,详情页 Open In 用)
     terminal_icons: HashMap<String, PathBuf>,
     /// Open In 上次选择(split 按钮左段直开目标),None = 已装列表首个
-    preferred_terminal: Option<terminal::TerminalApp>,
+    /// Open In 上次选择,按 agent 分记:agent 专属目标(两家 desktop、Kooky)
+    /// 只对自家会话有意义,单一全局值会被后选的专属目标冲掉,回头另一家
+    /// 会话就回退 Terminal(2026-09-01 用户反馈)。跨 agent 的次级回退走
+    /// `last_terminal`
+    preferred_terminal: HashMap<AgentId, terminal::TerminalApp>,
+    /// 最近一次显式选择(不分 agent),per-agent 无记录时若仍在该会话的
+    /// 可用列表内则用它——让"一直用 Ghostty"的人不用每家 agent 都选一遍
+    last_terminal: Option<terminal::TerminalApp>,
     _subs: Vec<Subscription>,
 }
 
@@ -2156,9 +2163,11 @@ impl Workbench {
             scan_events,
             watcher,
             terminal_icons: HashMap::new(),
-            preferred_terminal: None,
+            preferred_terminal: HashMap::new(),
+            last_terminal: None,
             _subs: subs,
         };
+        this.load_open_in_prefs();
         this.refresh(cx);
         this._calendar_task = Some(cx.spawn(async move |this, cx| loop {
             cx.background_executor()
@@ -3890,21 +3899,78 @@ impl Workbench {
         .detach();
     }
 
-    /// remember=false:本次目标是"偏好在这个会话上不可用"时的回退值(见 render
-    /// 里的 terminals_for),点它不该把回退值写成新偏好——否则一个 dsh 会话就能
-    /// 把用户的 Kooky 偏好冲成 Terminal,再回 Claude 会话也回不去了
+    // ---------- Open In 目标记忆 ----------
+
+    /// Open In 目标解析:本 agent 的记忆 → 最近全局选择(仍可用时)→
+    /// 列表首项
+    fn open_in_target(
+        &self,
+        agent: AgentId,
+        terms: &[terminal::TerminalApp],
+    ) -> Option<terminal::TerminalApp> {
+        self.preferred_terminal
+            .get(&agent)
+            .copied()
+            .filter(|t| terms.contains(t))
+            .or_else(|| self.last_terminal.filter(|t| terms.contains(t)))
+            .or_else(|| terms.first().copied())
+    }
+
+    /// Open In 记忆持久化(prefs 表,key `open_in`):
+    /// `{"agents":{"claude-code":"claude-desktop",…},"last":"ghostty"}`。
+    /// 读取时按 id 对回本机已装终端——卸载/换平台后的残值静默丢弃
+    fn load_open_in_prefs(&mut self) {
+        let Some(raw) = self.store.pref_get("open_in") else {
+            return;
+        };
+        let Ok(prefs) = serde_json::from_str::<OpenInPrefs>(&raw) else {
+            return;
+        };
+        let by_id = |s: &str| {
+            terminal::installed_terminals()
+                .iter()
+                .find(|t| t.id() == s)
+                .copied()
+        };
+        for (k, val) in &prefs.agents {
+            if let (Some(agent), Some(term)) = (AgentId::from_str(k), by_id(val)) {
+                self.preferred_terminal.insert(agent, term);
+            }
+        }
+        self.last_terminal = prefs.last.as_deref().and_then(by_id);
+    }
+
+    fn save_open_in_prefs(&self) {
+        let prefs = OpenInPrefs {
+            agents: self
+                .preferred_terminal
+                .iter()
+                .map(|(a, t)| (a.as_str().to_string(), t.id().to_string()))
+                .collect(),
+            last: self.last_terminal.map(|t| t.id().to_string()),
+        };
+        if let Ok(raw) = serde_json::to_string(&prefs) {
+            let _ = self.store.pref_set("open_in", &raw);
+        }
+    }
+
+    /// per-agent 记忆任何点击都写(只影响本 agent,收敛到用户实际用的);
+    /// 全局 last_terminal 只在 explicit(下拉显式选择)时写——左段点的可能
+    /// 是回退值,写进全局会让一个 dsh 会话把 Kooky 偏好冲成 Terminal
     fn do_resume(
         &mut self,
         term: terminal::TerminalApp,
-        remember: bool,
+        explicit: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(detail) = &self.detail else { return };
-        if remember {
-            self.preferred_terminal = Some(term);
-            cx.notify(); // split 按钮左段立即切到本次选择
+        self.preferred_terminal.insert(detail.meta.agent, term);
+        if explicit {
+            self.last_terminal = Some(term);
         }
+        self.save_open_in_prefs();
+        cx.notify(); // split 按钮左段立即切到本次选择
         let meta = detail.meta.clone();
         let task = cx.background_spawn(async move { terminal::resume_session_in(&meta, term) });
         Self::notify_when_done(window, cx, task, |outcome| {
@@ -5617,13 +5683,7 @@ impl Workbench {
                                         // 目标列表按 agent 过滤(Kooky 深链不认 dsh);
                                         // 偏好目标不在列表时(如 dsh 会话 + 偏好 Kooky)回退首项
                                         let terms = terminal::terminals_for(meta.agent);
-                                        let current = self
-                                            .preferred_terminal
-                                            .filter(|t| terms.contains(t))
-                                            .or_else(|| terms.first().copied());
-                                        // 偏好已存在时 current 要么就是它、要么是回退值,
-                                        // 两种情况点左段都不该改写偏好(见 do_resume)
-                                        let remember_current = self.preferred_terminal.is_none();
+                                        let current = self.open_in_target(meta.agent, &terms);
                                         let current_icon = current
                                             .and_then(|t| self.terminal_icons.get(t.id()).cloned());
                                         let term_items: Vec<(terminal::TerminalApp, Option<PathBuf>)> =
@@ -5653,15 +5713,13 @@ impl Workbench {
                                                     .cursor_pointer()
                                                     .hover(|s| s.bg(theme.secondary_hover))
                                                     .active(|s| s.bg(theme.secondary_active))
-                                                    .child(match &current_icon {
-                                                        Some(p) => img(p.clone())
-                                                            .size(px(14.))
-                                                            .into_any_element(),
-                                                        None => icon("icons/terminal.svg")
+                                                    .child(open_in_icon(
+                                                        current,
+                                                        current_icon.as_ref(),
+                                                        icon("icons/terminal.svg")
                                                             .with_size(px(13.))
-                                                            .text_color(theme.secondary_foreground)
-                                                            .into_any_element(),
-                                                    })
+                                                            .text_color(theme.secondary_foreground),
+                                                    ))
                                                     .tooltip({
                                                         let label: SharedString = match current {
                                                             Some(t) => format!("Open this session in {}", t.display_name()).into(),
@@ -5673,7 +5731,7 @@ impl Workbench {
                                                     })
                                                     .on_click(cx.listener(move |this, _, window, cx| {
                                                         if let Some(term) = current {
-                                                            this.do_resume(term, remember_current, window, cx);
+                                                            this.do_resume(term, false, window, cx);
                                                         } else {
                                                             // 空列表在 macOS 不可能(Terminal.app 恒在),
                                                             // Windows/Linux 上 PATH 被启动器改写时会发生
@@ -5719,14 +5777,12 @@ impl Workbench {
                                                                     h_flex()
                                                                         .gap(SPACE_SM)
                                                                         .items_center()
-                                                                        .child(match &icon_path {
-                                                                            Some(p) => img(p.clone())
-                                                                                .size(px(16.))
-                                                                                .into_any_element(),
-                                                                            None => icon("icons/terminal.svg")
-                                                                                .with_size(px(15.))
-                                                                                .into_any_element(),
-                                                                        })
+                                                                        .child(open_in_icon(
+                                                                            Some(term),
+                                                                            icon_path.as_ref(),
+                                                                            icon("icons/terminal.svg")
+                                                                                .with_size(px(15.)),
+                                                                        ))
                                                                         .child(term.display_name())
                                                                 })
                                                                 .on_click(move |_, window, cx| {
@@ -7555,6 +7611,31 @@ fn sidebar_row(
                     )))
                 }),
         )
+}
+
+/// Open In 记忆的落盘形态(prefs 表 `open_in`,id 字符串在加载时对回
+/// 本机已装终端,残值静默丢弃)
+#[derive(serde::Serialize, serde::Deserialize)]
+struct OpenInPrefs {
+    #[serde(default)]
+    agents: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    last: Option<String>,
+}
+
+/// Open In 的目标图标:内嵌品牌覆盖(见 TerminalApp::brand_icon)→
+/// 提取的 .app 图标 → 通用终端 svg。两处渲染(split 左段/下拉)共用,
+/// 精度规则只此一份
+fn open_in_icon(
+    term: Option<terminal::TerminalApp>,
+    icon_path: Option<&PathBuf>,
+    fallback: Icon,
+) -> AnyElement {
+    match (term.and_then(|t| t.brand_icon()), icon_path) {
+        (Some(b), _) => img(b).size(px(16.)).into_any_element(),
+        (None, Some(p)) => img(p.clone()).size(px(16.)).into_any_element(),
+        (None, None) => fallback.into_any_element(),
+    }
 }
 
 /// 详情工具栏图标按钮。选中态 = 填充版图标 + 语义色(macOS 惯例),

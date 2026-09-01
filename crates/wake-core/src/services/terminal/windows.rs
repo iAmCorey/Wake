@@ -70,6 +70,11 @@ impl TerminalApp {
         }
     }
 
+    /// 内嵌品牌图标覆盖(macOS 的 Codex desktop 用;此平台无深链目标)
+    pub fn brand_icon(&self) -> Option<&'static str> {
+        None
+    }
+
     /// 此宿主自身不是 shell,得再装一个 PowerShell 会话才跑得起命令
     /// (terminals_for 据此在没有 PowerShell 的机器上藏掉它们)
     fn needs_powershell(&self) -> bool {

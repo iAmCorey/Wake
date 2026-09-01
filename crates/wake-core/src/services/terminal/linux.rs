@@ -72,6 +72,11 @@ impl TerminalApp {
         }
     }
 
+    /// 内嵌品牌图标覆盖(macOS 的 Codex desktop 用;此平台无深链目标)
+    pub fn brand_icon(&self) -> Option<&'static str> {
+        None
+    }
+
     /// spawn 前缀:`<bin> <prefix…> <argv…>`,prefix 是各家"后面全是命令 argv"
     /// 的开关——gnome-terminal/kgx 用 `--`,wezterm 是子命令 `start --`,
     /// xfce4-terminal 用 `-x`(-e 是单串旧式),kitty 裸接,其余 `-e`

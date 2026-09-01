@@ -87,6 +87,14 @@ CREATE TABLE IF NOT EXISTS removed_default_roots (
   PRIMARY KEY (agent, path)
 );
 
+-- 应用级 UI 偏好。与 schema_meta 同形但语义不同:schema_meta 是索引
+-- 自身的迁移状态,迁移代码可随意增删;prefs 是用户数据(user_data 同类,
+-- 只是不挂在会话上),勿合并两表
+CREATE TABLE IF NOT EXISTS prefs (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS disabled_locations (
   agent       TEXT NOT NULL,
   path        TEXT NOT NULL,
@@ -446,6 +454,29 @@ impl Store {
                 pinned.map(|v| v as i64),
                 now_ms()
             ],
+        )?;
+        Ok(())
+    }
+
+    /// 应用级 KV 偏好(Open In 目标记忆等 UI 状态)。value 语义由调用方定
+    /// (多为 json),不存在回 None
+    pub fn pref_get(&self, key: &str) -> Option<String> {
+        let conn = self.write.lock().unwrap();
+        conn.query_row(
+            "SELECT value FROM prefs WHERE key = ?1",
+            params![key],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    pub fn pref_set(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.write.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO prefs(key, value) VALUES (?1, ?2)",
+            params![key, value],
         )?;
         Ok(())
     }

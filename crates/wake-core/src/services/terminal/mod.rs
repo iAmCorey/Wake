@@ -170,8 +170,9 @@ fn resume_args(agent: AgentId, id: &str) -> Option<(Vec<String>, bool)> {
 }
 
 pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome {
-    // 深链类目标(macOS Kooky)由平台整锅接管,不走 shell 命令构建;
-    // 新增非 shell 目标在平台的 deep_link_resume 里声明,这里无需加旁路
+    // 深链类目标(macOS 的 Kooky / Claude Desktop / Codex Desktop)由平台
+    // 整锅接管,不走 shell 命令构建;新增非 shell 目标在平台的
+    // deep_link_resume 里声明,这里无需加旁路
     if let Some(outcome) = platform::deep_link_resume(meta, term) {
         return outcome;
     }
