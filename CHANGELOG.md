@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: in a Codex branch or subagent thread, the parent conversation's transcript is injected as a `user` message — its assistant replies were being shown as if you had typed them, and were indexed for search. They are now treated as injected context, like the other `<environment_context>`-style blocks
+
 ## [0.3.1] — 2026-08-30
 
 - Fixed: agent CLI detection now ignores login-shell rc output, including unterminated ANSI title escapes, by parsing only newline-framed Wake probe records

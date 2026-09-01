@@ -341,6 +341,14 @@ pub fn is_injected_user_content(text: &str) -> bool {
         "IMPORTANT: Do NOT read",
         "Caveat: The messages below",
         "# Files pasted by the user",
+        "# Files mentioned by the user",
+        "## Referenced ChatGPT conversation",
+        // Codex 把 AGENTS.md 作为 user 消息注入
+        "# AGENTS.md instructions",
+        // Codex 的 subagent / 分支线程:父会话的整段 transcript 被打包成
+        // 一条 role=user 消息喂进来,里面含父会话的 assistant 输出。不认它
+        // 的话,父会话里 AI 说的话会显示成这个会话里用户发的
+        "The following is the Codex agent history",
     ];
     if PREFIXES.iter().any(|p| t.starts_with(p)) {
         return true;

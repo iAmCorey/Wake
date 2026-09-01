@@ -358,6 +358,13 @@ fn codex_ref() -> SessionFileRef {
         "22222222-aaaa-bbbb-cccc-000000000002",
     )
 }
+fn codex_subagent_ref() -> SessionFileRef {
+    fs_ref(
+        AgentId::Codex,
+        &fixture("codex/sessions/2026/08/07/rollout-2026-08-07T12-44-01-33333333-aaaa-bbbb-cccc-000000000003.jsonl"),
+        "33333333-aaaa-bbbb-cccc-000000000003",
+    )
+}
 fn qoder_ref() -> SessionFileRef {
     fs_ref(
         AgentId::Qoder,
@@ -1712,6 +1719,61 @@ fn removed_defaults_suppress_instances() {
         .data_roots()
         .iter()
         .all(|r| r.starts_with(dir.path())));
+}
+
+#[test]
+fn codex_subagent_transcript_injection_is_meta() {
+    setup();
+    let adapter = CodexAdapter::new();
+    let r = codex_subagent_ref();
+    let t = adapter
+        .parse_transcript(&r)
+        .expect("codex subagent parse_transcript");
+
+    // 分支 / subagent 线程把**父会话的整段 transcript** 打包成一条
+    // role=user 的消息喂进来,里面含父会话的 assistant 输出。不识别的话,
+    // 父会话里 AI 说的话会显示成这个会话里用户发的
+    let injected = t
+        .mainline
+        .iter()
+        .find(|m| {
+            m.text
+                .starts_with("The following is the Codex agent history")
+        })
+        .expect("注入的 transcript 应当仍在 mainline 里(只是归 Meta)");
+    assert_eq!(injected.kind, MessageKind::Meta);
+    assert!(
+        injected.text.contains("[2] assistant:"),
+        "父会话的 assistant 输出确实躺在这条 role=user 消息里"
+    );
+
+    // AGENTS.md 注入同理
+    let agents_md = t
+        .mainline
+        .iter()
+        .find(|m| m.text.starts_with("# AGENTS.md instructions"))
+        .expect("AGENTS.md 注入");
+    assert_eq!(agents_md.kind, MessageKind::Meta);
+
+    // 真实用户输入不受影响
+    let real = t
+        .mainline
+        .iter()
+        .find(|m| m.text == "继续")
+        .expect("真实用户消息");
+    assert_eq!(real.role, Role::User);
+    assert_eq!(real.kind, MessageKind::Text);
+
+    // Meta 不进 FTS:注入进来的父会话内容不该被搜索命中
+    let s = adapter
+        .parse_session(&r)
+        .expect("codex subagent parse_session");
+    assert!(
+        !s.units.iter().any(|u| u.text.contains("[2] assistant:")),
+        "注入的父会话 transcript 不得进入检索单元"
+    );
+    // 标题也不能取注入内容
+    assert_eq!(s.meta.title, "继续");
 }
 
 /// normalize_custom_root(静态分派,不依赖 roster——该家默认被移除时也要
