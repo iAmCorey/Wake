@@ -398,7 +398,11 @@ mod tests {
             &ctx,
         );
         assert_eq!(first, second);
-        assert_eq!(first.0, "/var/folders/xx/T/grok-501/wt-abcd1234");
+        let expected = PathBuf::from("/var/folders/xx/T/grok-501")
+            .join("wt-abcd1234")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(first.0, expected);
     }
 
     #[test]
