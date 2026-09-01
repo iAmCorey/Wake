@@ -232,6 +232,17 @@ impl Role {
     }
 }
 
+/// 会话正文里携带的一张图片。这里保存 PNG/JPEG 等原始编码字节，
+/// 不是解码后的像素；adapter 只在详情解析路径填充，索引路径仅保留占位符。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageAttachment {
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+    /// 图片在消息纯文本中的字节偏移。多个图片可共享同一偏移，表示连续图片块。
+    #[serde(default)]
+    pub text_offset: usize,
+}
+
 /// 详情页统一消息模型
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptMessage {
@@ -246,6 +257,9 @@ pub struct TranscriptMessage {
     /// epoch ms
     pub timestamp: Option<i64>,
     pub model: Option<String>,
+    /// 随消息出现的图片，保持源内容块的顺序。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -415,6 +429,10 @@ pub const HL_CLOSE: char = '\u{e001}';
 
 /// 单条消息正文入库/传输上限
 pub const MAX_MSG_TEXT: usize = 32 * 1024;
+/// 单张图片的 base64 文本上限（约 12 MiB 原始图片）。
+pub const MAX_IMAGE_B64: usize = 16 * 1024 * 1024;
+/// 本地引用图片的读取上限，与内联图片解码后的量级保持一致。
+pub const MAX_IMAGE_BYTES: u64 = 12 * 1024 * 1024;
 /// tool 输入/输出、thinking 上限
 pub const MAX_TOOL_IO: usize = 16 * 1024;
 pub const MAX_TITLE: usize = 80;

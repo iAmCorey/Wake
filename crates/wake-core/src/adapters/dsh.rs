@@ -138,7 +138,8 @@ struct DshParse {
     unknown_lines: u32,
 }
 
-fn parse_dsh_log(path: &Path) -> Result<DshParse> {
+fn parse_dsh_log(path: &Path, decode_images: bool) -> Result<DshParse> {
+    let _image_budget = transcript_image_decode_budget(decode_images);
     let reader = open_log(path, 1 << 20)?;
 
     let mut p = DshParse {
@@ -191,12 +192,16 @@ fn parse_dsh_log(path: &Path) -> Result<DshParse> {
                 }
             }
             "user/message" => {
-                let text = blocks_text(data.get("content").unwrap_or(&serde_json::Value::Null));
-                if text.is_empty() {
+                let parsed = content_parts(
+                    data.get("content").unwrap_or(&serde_json::Value::Null),
+                    decode_images,
+                );
+                if parsed.text.is_empty() && parsed.images.is_empty() {
                     continue;
                 }
                 let kind = data.pointer("/source/kind").and_then(|k| k.as_str());
-                let mut m = text_msg(Role::User, &text, ts);
+                let mut m = text_msg(Role::User, &parsed.text, ts);
+                m.images = parsed.images;
                 // dsh 的 source.kind 权威区分真人输入与注入上下文(实测一族:
                 // "agent-instructions"/"plugin"/"skill-catalog",后续还会长)。
                 // 白名单 "user":非真人一律归 Meta,缺失时当真人(宁可多显示)
@@ -210,7 +215,7 @@ fn parse_dsh_log(path: &Path) -> Result<DshParse> {
                 let content = msg.get("content").unwrap_or(&serde_json::Value::Null);
                 // 单遍分桶:text 进正文、reasoning 进 thinking、tool-call 进工具
                 // (blocks_text 类型盲,会把 reasoning 的 text 混进正文,不适用)
-                let mut text_parts: Vec<&str> = Vec::new();
+                let mut parsed_message = ParsedContent::default();
                 let mut thinking_parts: Vec<&str> = Vec::new();
                 let mut tools: Vec<ToolCallView> = Vec::new();
                 for b in content.as_array().into_iter().flatten() {
@@ -221,7 +226,11 @@ fn parse_dsh_log(path: &Path) -> Result<DshParse> {
                             .filter(|t| !t.is_empty())
                     };
                     match b.get("type").and_then(|v| v.as_str()) {
-                        Some("text") => text_parts.extend(block_text()),
+                        Some("text") => {
+                            if let Some(text) = block_text() {
+                                parsed_message.push_text(text);
+                            }
+                        }
                         Some("reasoning") => thinking_parts.extend(block_text()),
                         Some("tool-call") => {
                             let id = b.get("id").and_then(|v| v.as_str()).unwrap_or_default();
@@ -234,6 +243,10 @@ fn parse_dsh_log(path: &Path) -> Result<DshParse> {
                             let input = serde_json::from_str::<serde_json::Value>(raw)
                                 .unwrap_or(serde_json::Value::String(raw.to_string()));
                             tools.push(tool_call_view(id.to_string(), name, &input, None, false));
+                        }
+                        _ if is_image_part(b) => {
+                            let parsed = content_parts(b, decode_images);
+                            parsed_message.append(parsed);
                         }
                         _ => {}
                     }
@@ -266,10 +279,13 @@ fn parse_dsh_log(path: &Path) -> Result<DshParse> {
                         p.tokens_used = Some(p.tokens_used.unwrap_or(0) + sum);
                     }
                 }
-                if text_parts.is_empty() && tools.is_empty() && thinking_parts.is_empty() {
+                if parsed_message.text.is_empty()
+                    && tools.is_empty()
+                    && thinking_parts.is_empty()
+                    && parsed_message.images.is_empty()
+                {
                     continue;
                 }
-                let text = text_parts.join("\n\n");
                 // 一个 turn 多个 step,每 step 一条 assistant/message;连续 assistant
                 // 行(中间只隔 tool/result)合并成一条,详情页每回合一条助手消息
                 // (合并 + 整体 clip 机制与 pi.rs 同构,改动需两侧同步)
@@ -278,11 +294,12 @@ fn parse_dsh_log(path: &Path) -> Result<DshParse> {
                 }
                 let base = p.messages.len() - 1;
                 let last = &mut p.messages[base];
-                if !text.is_empty() && last.text.len() < MAX_MSG_TEXT {
-                    if !last.text.is_empty() {
-                        last.text.push_str("\n\n");
+                if !parsed_message.text.is_empty() || !parsed_message.images.is_empty() {
+                    if last.text.len() < MAX_MSG_TEXT {
+                        append_content_to_message(last, parsed_message, "\n\n");
+                    } else {
+                        append_images_to_message_end(last, parsed_message.images);
                     }
-                    last.text.push_str(&text);
                     if last.text.len() > MAX_MSG_TEXT {
                         let (t, _) = clip(&last.text, MAX_MSG_TEXT);
                         last.text = t;
@@ -322,17 +339,21 @@ fn parse_dsh_log(path: &Path) -> Result<DshParse> {
                     continue;
                 };
                 if let Some(&(mi, ti)) = tool_index.get(call_id) {
-                    let tc = &mut p.messages[mi].tool_calls[ti];
-                    let text =
-                        blocks_text(block.get("content").unwrap_or(&serde_json::Value::Null));
-                    if !text.is_empty() {
-                        tc.output = Some(clip(&text, MAX_TOOL_IO).0);
+                    let parsed = content_parts(
+                        block.get("content").unwrap_or(&serde_json::Value::Null),
+                        decode_images,
+                    );
+                    let message = &mut p.messages[mi];
+                    let tc = &mut message.tool_calls[ti];
+                    if !parsed.text.is_empty() {
+                        tc.output = Some(clip(&parsed.text, MAX_TOOL_IO).0);
                     }
                     if block.get("isError").and_then(|v| v.as_bool()) == Some(true)
                         || data.get("error").is_some_and(|e| !e.is_null())
                     {
                         tc.is_error = true;
                     }
+                    append_images_to_message_end(message, parsed.images);
                 }
             }
             "session/title" => {
@@ -471,7 +492,7 @@ impl AgentAdapter for DshAdapter {
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
-        let parsed = parse_dsh_log(Path::new(&r.file_path))?;
+        let parsed = parse_dsh_log(Path::new(&r.file_path), false)?;
         let meta = build_meta(r, &parsed);
         let units = units_from_messages(&parsed.messages);
         Ok(ParsedSession {
@@ -482,7 +503,7 @@ impl AgentAdapter for DshAdapter {
     }
 
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript> {
-        let parsed = parse_dsh_log(Path::new(&r.file_path))?;
+        let parsed = parse_dsh_log(Path::new(&r.file_path), true)?;
         Ok(ParsedTranscript {
             meta: build_meta(r, &parsed),
             mainline: parsed.messages,

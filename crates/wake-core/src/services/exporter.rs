@@ -47,8 +47,26 @@ fn render_message(m: &TranscriptMessage, out: &mut String) {
             "<details><summary>🧠 Thinking</summary>\n\n{th}\n\n</details>\n\n"
         ));
     }
-    if !m.text.is_empty() {
-        out.push_str(&m.text);
+    let mut cursor = 0usize;
+    for image in &m.images {
+        let mut offset = image.text_offset.min(m.text.len());
+        while offset > cursor && !m.text.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        offset = offset.max(cursor);
+        if offset > cursor {
+            out.push_str(&m.text[cursor..offset]);
+            out.push_str("\n\n");
+        }
+        out.push_str(&format!(
+            "> 🖼 Image attachment · {} · {} bytes\n\n",
+            image.media_type,
+            image.bytes.len()
+        ));
+        cursor = offset;
+    }
+    if cursor < m.text.len() {
+        out.push_str(&m.text[cursor..]);
         out.push_str("\n\n");
     }
     for tc in &m.tool_calls {

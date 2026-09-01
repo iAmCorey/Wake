@@ -68,7 +68,8 @@ fn read_sidecar(jsonl_path: &Path) -> Sidecar {
     side
 }
 
-fn parse_kiro_jsonl(path: &Path) -> Result<(Vec<TranscriptMessage>, u32)> {
+fn parse_kiro_jsonl(path: &Path, decode_images: bool) -> Result<(Vec<TranscriptMessage>, u32)> {
+    let _image_budget = transcript_image_decode_budget(decode_images);
     let file = fs::File::open(path)?;
     let reader = BufReader::with_capacity(1 << 20, file);
     let mut messages: Vec<TranscriptMessage> = Vec::new();
@@ -98,20 +99,8 @@ fn parse_kiro_jsonl(path: &Path) -> Result<(Vec<TranscriptMessage>, u32)> {
             unknown += 1;
             continue;
         };
-        let mut parts: Vec<String> = Vec::new();
-        if let Some(Value::Array(blocks)) = data.get("content") {
-            for b in blocks {
-                if b.get("kind").and_then(|v| v.as_str()) == Some("text") {
-                    if let Some(t) = b.get("data").and_then(|v| v.as_str()) {
-                        if !t.trim().is_empty() {
-                            parts.push(t.trim().to_string());
-                        }
-                    }
-                }
-            }
-        }
-        let text = parts.join("\n\n");
-        if text.is_empty() {
+        let parsed = content_parts(data.get("content").unwrap_or(&Value::Null), decode_images);
+        if parsed.text.is_empty() && parsed.images.is_empty() {
             continue;
         }
         let ts_sec = data
@@ -119,7 +108,9 @@ fn parse_kiro_jsonl(path: &Path) -> Result<(Vec<TranscriptMessage>, u32)> {
             .and_then(|m| m.get("timestamp"))
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
-        messages.push(text_msg(role, &text, ts_sec * 1000));
+        let mut message = text_msg(role, &parsed.text, ts_sec * 1000);
+        message.images = parsed.images;
+        messages.push(message);
     }
     assign_seq(&mut messages);
     Ok((messages, unknown))
@@ -177,7 +168,7 @@ impl AgentAdapter for KiroAdapter {
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
-        let (messages, unknown) = parse_kiro_jsonl(Path::new(&r.file_path))?;
+        let (messages, unknown) = parse_kiro_jsonl(Path::new(&r.file_path), false)?;
         let side = read_sidecar(Path::new(&r.file_path));
         let meta = build_meta(r, &side, &messages);
         let units = units_from_messages(&messages);
@@ -189,7 +180,7 @@ impl AgentAdapter for KiroAdapter {
     }
 
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript> {
-        let (messages, unknown) = parse_kiro_jsonl(Path::new(&r.file_path))?;
+        let (messages, unknown) = parse_kiro_jsonl(Path::new(&r.file_path), true)?;
         let side = read_sidecar(Path::new(&r.file_path));
         Ok(ParsedTranscript {
             meta: build_meta(r, &side, &messages),

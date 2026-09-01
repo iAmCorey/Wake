@@ -67,7 +67,8 @@ struct GeminiParse {
     unknown_lines: u32,
 }
 
-fn parse_gemini_jsonl(path: &Path) -> Result<GeminiParse> {
+fn parse_gemini_jsonl(path: &Path, decode_images: bool) -> Result<GeminiParse> {
+    let _image_budget = transcript_image_decode_budget(decode_images);
     let file = fs::File::open(path)?;
     let reader = BufReader::with_capacity(1 << 20, file);
 
@@ -120,18 +121,8 @@ fn parse_gemini_jsonl(path: &Path) -> Result<GeminiParse> {
                         continue;
                     }
                 };
-                let mut parts: Vec<String> = Vec::new();
-                if let Some(Value::Array(blocks)) = m.get("content") {
-                    for b in blocks {
-                        if let Some(t) = b.get("text").and_then(|v| v.as_str()) {
-                            if !t.trim().is_empty() {
-                                parts.push(t.trim().to_string());
-                            }
-                        }
-                    }
-                }
-                let text = parts.join("\n\n");
-                if text.is_empty() {
+                let parsed = content_parts(m.get("content").unwrap_or(&Value::Null), decode_images);
+                if parsed.text.is_empty() && parsed.images.is_empty() {
                     continue;
                 }
                 let ts = m
@@ -145,7 +136,9 @@ fn parse_gemini_jsonl(path: &Path) -> Result<GeminiParse> {
                     }
                     updated_at = updated_at.max(ts);
                 }
-                messages.push(text_msg(role, &text, ts));
+                let mut message = text_msg(role, &parsed.text, ts);
+                message.images = parsed.images;
+                messages.push(message);
             }
         }
     }
@@ -258,7 +251,7 @@ impl AgentAdapter for GeminiAdapter {
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
-        let parsed = parse_gemini_jsonl(Path::new(&r.file_path))?;
+        let parsed = parse_gemini_jsonl(Path::new(&r.file_path), false)?;
         let meta = build_meta(r, &parsed, &self.cwd_for(r));
         let units = units_from_messages(&parsed.messages);
         Ok(ParsedSession {
@@ -269,7 +262,7 @@ impl AgentAdapter for GeminiAdapter {
     }
 
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript> {
-        let parsed = parse_gemini_jsonl(Path::new(&r.file_path))?;
+        let parsed = parse_gemini_jsonl(Path::new(&r.file_path), true)?;
         Ok(ParsedTranscript {
             meta: build_meta(r, &parsed, &self.cwd_for(r)),
             mainline: parsed.messages,

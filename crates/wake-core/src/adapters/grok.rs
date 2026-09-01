@@ -138,6 +138,7 @@ struct Replay {
     cur_text: String,
     cur_thinking: String,
     cur_tools: Vec<ToolCallView>,
+    cur_images: Vec<ImageAttachment>,
     cur_ts: i64,
 }
 
@@ -150,6 +151,7 @@ impl Replay {
             cur_text: String::new(),
             cur_thinking: String::new(),
             cur_tools: Vec::new(),
+            cur_images: Vec::new(),
             cur_ts: 0,
         }
     }
@@ -161,13 +163,19 @@ impl Replay {
         let text = std::mem::take(&mut self.cur_text);
         let thinking = std::mem::take(&mut self.cur_thinking);
         let tools = std::mem::take(&mut self.cur_tools);
-        if text.trim().is_empty() && thinking.trim().is_empty() && tools.is_empty() {
+        let images = std::mem::take(&mut self.cur_images);
+        if text.trim().is_empty()
+            && thinking.trim().is_empty()
+            && tools.is_empty()
+            && images.is_empty()
+        {
             return;
         }
         let mut m = text_msg(role, &text, self.cur_ts);
         if !thinking.trim().is_empty() {
             m.thinking = Some(clip(thinking.trim(), MAX_TOOL_IO).0);
         }
+        m.images = images;
         let base = self.messages.len();
         for (ix, tc) in tools.into_iter().enumerate() {
             self.tool_index.insert(tc.id.clone(), (base, ix));
@@ -194,29 +202,39 @@ fn chunk_text(update: &Value) -> &str {
         .unwrap_or_default()
 }
 
-fn tool_content_text(content: &Value) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    for item in content.as_array().into_iter().flatten() {
-        let inner = item.get("content").unwrap_or(item);
-        let t = inner
-            .get("text")
-            .and_then(|x| x.as_str())
-            .unwrap_or_default();
-        if !t.trim().is_empty() {
-            parts.push(t.trim().to_string());
-        }
+/// Grok 的文本 chunk 是增量片段，不能经 `content_parts` 的 trim/join，
+/// 否则模型在 token 边界写入的空格会被吃掉。只有图片块走通用附件解析。
+fn append_message_chunk(rp: &mut Replay, update: &Value, role: Role, ts: i64, decode_images: bool) {
+    rp.ensure(role, ts);
+    let content = update.get("content").unwrap_or(&Value::Null);
+    if has_image_content(content) {
+        let parsed = content_parts(content, decode_images);
+        let mut combined = ParsedContent {
+            text: std::mem::take(&mut rp.cur_text),
+            images: std::mem::take(&mut rp.cur_images),
+        };
+        combined.append_with_separator(parsed, "");
+        rp.cur_text = combined.text;
+        rp.cur_images = combined.images;
+    } else {
+        rp.cur_text.push_str(chunk_text(update));
     }
-    parts.join("\n")
 }
 
 /// tool_call_update 回填:完成态带 content(文本输出,覆盖式取最终态),
 /// status failed 置错;初始 tool_call 缺 rawInput 时由 update 补
-fn apply_tool_update(tc: &mut ToolCallView, update: &Value) {
+fn apply_tool_update(
+    tc: &mut ToolCallView,
+    update: &Value,
+    decode_images: bool,
+) -> Vec<ImageAttachment> {
+    let mut images = Vec::new();
     if let Some(content) = update.get("content") {
-        let t = tool_content_text(content);
-        if !t.is_empty() {
-            tc.output = Some(clip(&t, MAX_TOOL_IO).0);
+        let parsed = content_parts(content, decode_images);
+        if !parsed.text.is_empty() {
+            tc.output = Some(clip(&parsed.text, MAX_TOOL_IO).0);
         }
+        images = parsed.images;
     }
     if update.get("status").and_then(|v| v.as_str()) == Some("failed") {
         tc.is_error = true;
@@ -229,9 +247,11 @@ fn apply_tool_update(tc: &mut ToolCallView, update: &Value) {
             }
         }
     }
+    images
 }
 
-fn parse_grok_updates(path: &Path) -> Result<(Vec<TranscriptMessage>, u32)> {
+fn parse_grok_updates(path: &Path, decode_images: bool) -> Result<(Vec<TranscriptMessage>, u32)> {
+    let _image_budget = transcript_image_decode_budget(decode_images);
     let file = fs::File::open(path)?;
     let reader = BufReader::with_capacity(1 << 20, file);
     let mut rp = Replay::new();
@@ -256,12 +276,10 @@ fn parse_grok_updates(path: &Path) -> Result<(Vec<TranscriptMessage>, u32)> {
         };
         match update.get("sessionUpdate").and_then(|v| v.as_str()) {
             Some("user_message_chunk") => {
-                rp.ensure(Role::User, ts);
-                rp.cur_text.push_str(chunk_text(update));
+                append_message_chunk(&mut rp, update, Role::User, ts, decode_images);
             }
             Some("agent_message_chunk") => {
-                rp.ensure(Role::Assistant, ts);
-                rp.cur_text.push_str(chunk_text(update));
+                append_message_chunk(&mut rp, update, Role::Assistant, ts, decode_images);
             }
             Some("agent_thought_chunk") => {
                 rp.ensure(Role::Assistant, ts);
@@ -286,10 +304,19 @@ fn parse_grok_updates(path: &Path) -> Result<(Vec<TranscriptMessage>, u32)> {
                     continue;
                 };
                 // 目标 tool 可能还在当前未 flush 的段里,也可能已入 messages
-                if let Some(tc) = rp.cur_tools.iter_mut().find(|tc| tc.id == id) {
-                    apply_tool_update(tc, update);
+                if let Some(tool_ix) = rp.cur_tools.iter().position(|tc| tc.id == id) {
+                    let images =
+                        apply_tool_update(&mut rp.cur_tools[tool_ix], update, decode_images);
+                    let mut images = images;
+                    for image in &mut images {
+                        image.text_offset = rp.cur_text.len();
+                    }
+                    rp.cur_images.extend(images);
                 } else if let Some(&(mi, ti)) = rp.tool_index.get(id) {
-                    apply_tool_update(&mut rp.messages[mi].tool_calls[ti], update);
+                    let message = &mut rp.messages[mi];
+                    let images =
+                        apply_tool_update(&mut message.tool_calls[ti], update, decode_images);
+                    append_images_to_message_end(message, images);
                 }
             }
             // 已知的非内容更新:任务后台化/压缩等
@@ -428,7 +455,7 @@ impl AgentAdapter for GrokAdapter {
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
-        let (messages, unknown) = parse_grok_updates(Path::new(&r.file_path))?;
+        let (messages, unknown) = parse_grok_updates(Path::new(&r.file_path), false)?;
         let side = read_summary(Path::new(&r.file_path));
         let meta = build_meta(r, &side, &messages, &self.grok_home, &self.group_ctx());
         let units = units_from_messages(&messages);
@@ -440,7 +467,7 @@ impl AgentAdapter for GrokAdapter {
     }
 
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript> {
-        let (messages, unknown) = parse_grok_updates(Path::new(&r.file_path))?;
+        let (messages, unknown) = parse_grok_updates(Path::new(&r.file_path), true)?;
         let side = read_summary(Path::new(&r.file_path));
         Ok(ParsedTranscript {
             meta: build_meta(r, &side, &messages, &self.grok_home, &self.group_ctx()),

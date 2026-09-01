@@ -60,7 +60,8 @@ struct PiParse {
     unknown_lines: u32,
 }
 
-fn parse_pi_jsonl(path: &Path) -> Result<PiParse> {
+fn parse_pi_jsonl(path: &Path, decode_images: bool) -> Result<PiParse> {
+    let _image_budget = transcript_image_decode_budget(decode_images);
     let file = fs::File::open(path)?;
     let reader = BufReader::with_capacity(1 << 20, file);
 
@@ -115,13 +116,15 @@ fn parse_pi_jsonl(path: &Path) -> Result<PiParse> {
                 let content = msg.get("content").unwrap_or(&serde_json::Value::Null);
                 match msg.get("role").and_then(|v| v.as_str()) {
                     Some("user") => {
-                        let text = blocks_text(content);
-                        if !text.is_empty() {
-                            p.messages.push(text_msg(Role::User, &text, ts));
+                        let parsed = content_parts(content, decode_images);
+                        if !parsed.text.is_empty() || !parsed.images.is_empty() {
+                            let mut message = text_msg(Role::User, &parsed.text, ts);
+                            message.images = parsed.images;
+                            p.messages.push(message);
                         }
                     }
                     Some("assistant") => {
-                        let text = blocks_text(content);
+                        let parsed = content_parts(content, decode_images);
                         let mut tools: Vec<ToolCallView> = Vec::new();
                         for b in content.as_array().into_iter().flatten() {
                             if b.get("type").and_then(|v| v.as_str()) == Some("toolCall") {
@@ -141,7 +144,7 @@ fn parse_pi_jsonl(path: &Path) -> Result<PiParse> {
                                 ));
                             }
                         }
-                        if text.is_empty() && tools.is_empty() {
+                        if parsed.text.is_empty() && tools.is_empty() && parsed.images.is_empty() {
                             continue;
                         }
                         let model = msg.get("model").and_then(|v| v.as_str()).map(String::from);
@@ -164,11 +167,12 @@ fn parse_pi_jsonl(path: &Path) -> Result<PiParse> {
                         let last = &mut p.messages[base];
                         // 合并后统一压 MAX_MSG_TEXT 上限(整个 agentic 回合并成
                         // 一条消息,不能靠单行的 text_msg clip)
-                        if !text.is_empty() && last.text.len() < MAX_MSG_TEXT {
-                            if !last.text.is_empty() {
-                                last.text.push_str("\n\n");
+                        if !parsed.text.is_empty() || !parsed.images.is_empty() {
+                            if last.text.len() < MAX_MSG_TEXT {
+                                append_content_to_message(last, parsed, "\n\n");
+                            } else {
+                                append_images_to_message_end(last, parsed.images);
                             }
-                            last.text.push_str(&text);
                             if last.text.len() > MAX_MSG_TEXT {
                                 let (t, _) = clip(&last.text, MAX_MSG_TEXT);
                                 last.text = t;
@@ -188,14 +192,16 @@ fn parse_pi_jsonl(path: &Path) -> Result<PiParse> {
                             continue;
                         };
                         if let Some(&(mi, ti)) = tool_index.get(call_id) {
-                            let tc = &mut p.messages[mi].tool_calls[ti];
-                            let text = blocks_text(content);
-                            if !text.is_empty() {
-                                tc.output = Some(clip(&text, MAX_TOOL_IO).0);
+                            let parsed = content_parts(content, decode_images);
+                            let message = &mut p.messages[mi];
+                            let tc = &mut message.tool_calls[ti];
+                            if !parsed.text.is_empty() {
+                                tc.output = Some(clip(&parsed.text, MAX_TOOL_IO).0);
                             }
                             if msg.get("isError").and_then(|v| v.as_bool()) == Some(true) {
                                 tc.is_error = true;
                             }
+                            append_images_to_message_end(message, parsed.images);
                         }
                     }
                     _ => {
@@ -263,7 +269,7 @@ impl AgentAdapter for PiAdapter {
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
-        let parsed = parse_pi_jsonl(Path::new(&r.file_path))?;
+        let parsed = parse_pi_jsonl(Path::new(&r.file_path), false)?;
         let meta = build_meta(self.agent, r, &parsed);
         let units = units_from_messages(&parsed.messages);
         Ok(ParsedSession {
@@ -274,7 +280,7 @@ impl AgentAdapter for PiAdapter {
     }
 
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript> {
-        let parsed = parse_pi_jsonl(Path::new(&r.file_path))?;
+        let parsed = parse_pi_jsonl(Path::new(&r.file_path), true)?;
         Ok(ParsedTranscript {
             meta: build_meta(self.agent, r, &parsed),
             mainline: parsed.messages,

@@ -1,0 +1,71 @@
+[
+  {
+    "name": "anthropic-source",
+    "agents": ["claude-code", "qoder", "cursor"],
+    "content": {
+      "type": "image",
+      "source": {
+        "type": "base64",
+        "media_type": "image/png",
+        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+      }
+    }
+  },
+  {
+    "name": "openai-input-image",
+    "agents": ["codex"],
+    "content": {
+      "type": "input_image",
+      "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    }
+  },
+  {
+    "name": "gemini-inline-data",
+    "agents": ["gemini"],
+    "content": {
+      "inlineData": {
+        "mimeType": "image/png",
+        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+      }
+    }
+  },
+  {
+    "name": "direct-image-data",
+    "agents": ["pi", "omp", "dsh"],
+    "content": {
+      "type": "image",
+      "mimeType": "image/png",
+      "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    }
+  },
+  {
+    "name": "nested-image-data",
+    "agents": ["kiro", "kimi"],
+    "content": {
+      "kind": "image",
+      "data": {
+        "mimeType": "image/png",
+        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+      }
+    }
+  },
+  {
+    "name": "opencode-file",
+    "agents": ["opencode"],
+    "content": {
+      "type": "file",
+      "mime": "image/png",
+      "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    }
+  },
+  {
+    "name": "camel-case-image-url",
+    "agents": ["grok"],
+    "content": {
+      "type": "image",
+      "imageUrl": {
+        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+      }
+    }
+  }
+]

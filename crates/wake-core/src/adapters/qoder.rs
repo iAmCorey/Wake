@@ -85,7 +85,7 @@ enum ActiveLeaf {
 #[derive(Default)]
 struct PendingAssistant {
     msg_id: Option<String>,
-    text: Vec<String>,
+    content: ParsedContent,
     thinking: Vec<String>,
     tool_calls: Vec<ToolCallView>,
     timestamp: Option<i64>,
@@ -156,36 +156,18 @@ fn usage_tokens(usage: &Value) -> i64 {
         .sum()
 }
 
-fn stringify_tool_result(v: Option<&Value>) -> String {
-    match v {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(|item| {
-                item.get("text")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .or_else(|| {
-                        item.as_str()
-                            .map(str::to_string)
-                            .or_else(|| serde_json::to_string(item).ok())
-                    })
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Some(Value::Null) | None => String::new(),
-        Some(other) => serde_json::to_string(other).unwrap_or_default(),
-    }
-}
-
 fn flush_assistant(
     pending: &mut Option<PendingAssistant>,
     messages: &mut Vec<TranscriptMessage>,
     tool_index: &mut HashMap<String, (usize, usize)>,
 ) {
     let Some(p) = pending.take() else { return };
-    let text = p.text.join("\n\n");
-    if text.trim().is_empty() && p.tool_calls.is_empty() && p.thinking.is_empty() {
+    let ParsedContent { text, images } = p.content;
+    if text.trim().is_empty()
+        && p.tool_calls.is_empty()
+        && p.thinking.is_empty()
+        && images.is_empty()
+    {
         return;
     }
     let (text, truncated) = clip(text.trim(), MAX_MSG_TEXT);
@@ -210,6 +192,7 @@ fn flush_assistant(
         thinking,
         timestamp: p.timestamp,
         model: p.model,
+        images,
     });
 }
 
@@ -335,7 +318,8 @@ fn active_chain(
     out
 }
 
-fn parse_qoder_jsonl(path: &Path) -> Result<QoderParse> {
+fn parse_qoder_jsonl(path: &Path, decode_images: bool) -> Result<QoderParse> {
+    let _image_budget = transcript_image_decode_budget(decode_images);
     let file = fs::File::open(path)?;
     let reader = BufReader::with_capacity(1 << 20, file);
     let mut nodes: HashMap<String, MessageNode> = HashMap::new();
@@ -477,6 +461,7 @@ fn parse_qoder_jsonl(path: &Path) -> Result<QoderParse> {
                     thinking: None,
                     timestamp: (ts > 0).then_some(ts),
                     model: None,
+                    images: Vec::new(),
                 });
             }
             continue;
@@ -492,36 +477,39 @@ fn parse_qoder_jsonl(path: &Path) -> Result<QoderParse> {
         };
         if typ == "user" {
             flush_assistant(&mut pending, &mut messages, &mut tool_index);
-            let mut parts = Vec::new();
+            let mut parsed_message = ParsedContent::default();
             match message.get("content") {
-                Some(Value::String(text)) => parts.push(text.clone()),
+                Some(Value::String(text)) => parsed_message.push_text(text),
                 Some(Value::Array(blocks)) => {
                     for block in blocks {
                         match block.get("type").and_then(Value::as_str) {
                             Some("text") => {
                                 if let Some(text) = block.get("text").and_then(Value::as_str) {
-                                    parts.push(text.to_string());
+                                    parsed_message.push_text(text);
                                 }
                             }
-                            Some("image") => parts.push("[image]".to_string()),
+                            _ if is_image_part(block) => {
+                                let parsed = content_parts(block, decode_images);
+                                parsed_message.append(parsed);
+                            }
                             Some("tool_result") => {
                                 let id = block
                                     .get("tool_use_id")
                                     .and_then(Value::as_str)
                                     .unwrap_or("");
                                 if let Some(&(msg_ix, tool_ix)) = tool_index.get(id) {
-                                    let tool = &mut messages[msg_ix].tool_calls[tool_ix];
-                                    tool.output = Some(
-                                        clip(
-                                            &stringify_tool_result(block.get("content")),
-                                            MAX_TOOL_IO,
-                                        )
-                                        .0,
+                                    let parsed = tool_result_parts(
+                                        block.get("content").unwrap_or(&Value::Null),
+                                        decode_images,
                                     );
+                                    let message = &mut messages[msg_ix];
+                                    let tool = &mut message.tool_calls[tool_ix];
+                                    tool.output = Some(clip(&parsed.text, MAX_TOOL_IO).0);
                                     tool.is_error = block
                                         .get("is_error")
                                         .and_then(Value::as_bool)
                                         .unwrap_or(false);
+                                    append_images_to_message_end(message, parsed.images);
                                 }
                             }
                             _ => {}
@@ -530,8 +518,8 @@ fn parse_qoder_jsonl(path: &Path) -> Result<QoderParse> {
                 }
                 _ => {}
             }
-            let text = parts.join("\n\n").trim().to_string();
-            if text.is_empty() {
+            let ParsedContent { text, images } = parsed_message;
+            if text.is_empty() && images.is_empty() {
                 continue;
             }
             let compact = row.get("isCompactSummary").and_then(Value::as_bool) == Some(true);
@@ -563,6 +551,7 @@ fn parse_qoder_jsonl(path: &Path) -> Result<QoderParse> {
                 thinking: None,
                 timestamp: (ts > 0).then_some(ts),
                 model: None,
+                images,
             });
             continue;
         }
@@ -602,7 +591,7 @@ fn parse_qoder_jsonl(path: &Path) -> Result<QoderParse> {
         }
         match message.get("content") {
             Some(Value::String(text)) if !text.trim().is_empty() => {
-                current.text.push(text.clone());
+                current.content.push_text(text);
             }
             Some(Value::Array(blocks)) => {
                 for block in blocks {
@@ -610,7 +599,7 @@ fn parse_qoder_jsonl(path: &Path) -> Result<QoderParse> {
                         Some("text") => {
                             if let Some(text) = block.get("text").and_then(Value::as_str) {
                                 if !text.trim().is_empty() {
-                                    current.text.push(text.to_string());
+                                    current.content.push_text(text);
                                 }
                             }
                         }
@@ -632,6 +621,10 @@ fn parse_qoder_jsonl(path: &Path) -> Result<QoderParse> {
                             current
                                 .tool_calls
                                 .push(tool_call_view(id, name, &input, None, false));
+                        }
+                        _ if is_image_part(block) => {
+                            let parsed = content_parts(block, decode_images);
+                            current.content.append(parsed);
                         }
                         _ => {}
                     }
@@ -727,7 +720,7 @@ impl AgentAdapter for QoderAdapter {
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
-        let parsed = parse_qoder_jsonl(Path::new(&r.file_path))?;
+        let parsed = parse_qoder_jsonl(Path::new(&r.file_path), false)?;
         let meta = build_meta(r, &parsed);
         let units = units_from_messages(&parsed.messages);
         Ok(ParsedSession {
@@ -738,7 +731,7 @@ impl AgentAdapter for QoderAdapter {
     }
 
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript> {
-        let parsed = parse_qoder_jsonl(Path::new(&r.file_path))?;
+        let parsed = parse_qoder_jsonl(Path::new(&r.file_path), true)?;
         Ok(ParsedTranscript {
             meta: build_meta(r, &parsed),
             mainline: parsed.messages,

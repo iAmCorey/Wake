@@ -284,7 +284,12 @@ impl OpencodeAdapter {
 
     /// 单会话解析:一次连接;v2 行命中走 session_message,否则回落 v1 的
     /// message + part 两表路径
-    fn parse(&self, r: &SessionFileRef) -> Result<(SessionMeta, Vec<TranscriptMessage>, u32)> {
+    fn parse(
+        &self,
+        r: &SessionFileRef,
+        decode_images: bool,
+    ) -> Result<(SessionMeta, Vec<TranscriptMessage>, u32)> {
+        let _image_budget = transcript_image_decode_budget(decode_images);
         let db = self
             .db_for_ref(r)
             .ok_or_else(|| anyhow!("opencode database is outside adapter roots"))?;
@@ -294,8 +299,8 @@ impl OpencodeAdapter {
             .next()
             .ok_or_else(|| anyhow!("opencode session {} not in db", r.native_id))?;
         let (messages, unknown) = match row.v2_messages {
-            true => parse_v2_messages(&ro, &r.native_id)?,
-            false => parse_v1_messages(&ro, &r.native_id)?,
+            true => parse_v2_messages(&ro, &r.native_id, decode_images)?,
+            false => parse_v1_messages(&ro, &r.native_id, decode_images)?,
         };
         let count = messages
             .iter()
@@ -307,7 +312,11 @@ impl OpencodeAdapter {
 }
 
 /// v1 正文:message 表(角色/时间)+ part 表(内容块)按 message_id 分组
-fn parse_v1_messages(ro: &SqliteRo, sid: &str) -> Result<(Vec<TranscriptMessage>, u32)> {
+fn parse_v1_messages(
+    ro: &SqliteRo,
+    sid: &str,
+    decode_images: bool,
+) -> Result<(Vec<TranscriptMessage>, u32)> {
     // part 按 (message_id, id) 排序分组;id 前缀时间有序
     let mut parts_by_msg: HashMap<String, Vec<Value>> = HashMap::new();
     {
@@ -358,13 +367,15 @@ fn parse_v1_messages(ro: &SqliteRo, sid: &str) -> Result<(Vec<TranscriptMessage>
                     if p.get("synthetic").and_then(|v| v.as_bool()) == Some(true) {
                         acc.synthetic.push(t.trim().to_string());
                     } else {
-                        acc.text.push(t.trim().to_string());
+                        acc.content.push_text(t);
                     }
                 }
                 Some("reasoning") => acc.push_reasoning(&p),
-                Some("tool") => acc.push_tool(&p),
-                Some("step-start") | Some("step-finish") | Some("snapshot") | Some("patch")
-                | Some("file") => {}
+                Some("tool") => acc.push_tool(&p, decode_images),
+                Some("image") => acc.push_image(&p, decode_images),
+                Some("step-start") | Some("step-finish") | Some("snapshot") | Some("patch") => {}
+                Some("file") if is_image_part(&p) => acc.push_image(&p, decode_images),
+                Some("file") => {}
                 _ => unknown += 1,
             }
         }
@@ -378,7 +389,11 @@ fn parse_v1_messages(ro: &SqliteRo, sid: &str) -> Result<(Vec<TranscriptMessage>
 
 /// v2 正文:session_message 单表按 seq 有序,type 列分 user/synthetic/assistant,
 /// data JSON——user 的 text 在顶层,assistant 的 content 是块数组
-fn parse_v2_messages(ro: &SqliteRo, sid: &str) -> Result<(Vec<TranscriptMessage>, u32)> {
+fn parse_v2_messages(
+    ro: &SqliteRo,
+    sid: &str,
+    decode_images: bool,
+) -> Result<(Vec<TranscriptMessage>, u32)> {
     let mut messages: Vec<TranscriptMessage> = Vec::new();
     let mut unknown = 0u32;
     let mut stmt = ro
@@ -400,8 +415,24 @@ fn parse_v2_messages(ro: &SqliteRo, sid: &str) -> Result<(Vec<TranscriptMessage>
         match mtype.as_str() {
             "user" => {
                 let text = md.get("text").and_then(|v| v.as_str()).unwrap_or("").trim();
-                if !text.is_empty() {
-                    messages.push(text_msg(Role::User, text, ts));
+                let mut parsed = content_parts(
+                    md.get("content")
+                        .or_else(|| md.get("attachments"))
+                        .unwrap_or(&Value::Null),
+                    decode_images,
+                );
+                if text == parsed.text.trim() {
+                    parsed.text = text.to_string();
+                } else if !text.is_empty() {
+                    let mut combined = ParsedContent::default();
+                    combined.push_text(text);
+                    combined.append(parsed);
+                    parsed = combined;
+                }
+                if !parsed.text.is_empty() || !parsed.images.is_empty() {
+                    let mut message = text_msg(Role::User, &parsed.text, ts);
+                    message.images = parsed.images;
+                    messages.push(message);
                 }
             }
             "synthetic" => {
@@ -460,14 +491,17 @@ fn parse_v2_messages(ro: &SqliteRo, sid: &str) -> Result<(Vec<TranscriptMessage>
                         Some("text") => {
                             if let Some(t) = b.get("text").and_then(|v| v.as_str()) {
                                 if !t.trim().is_empty() {
-                                    acc.text.push(t.trim().to_string());
+                                    acc.content.push_text(t);
                                 }
                             }
                         }
                         Some("reasoning") => acc.push_reasoning(b),
-                        Some("tool") => acc.push_tool(b),
+                        Some("tool") => acc.push_tool(b, decode_images),
+                        Some("image") => acc.push_image(b, decode_images),
                         Some("step-start") | Some("step-finish") | Some("snapshot")
-                        | Some("patch") | Some("file") => {}
+                        | Some("patch") => {}
+                        Some("file") if is_image_part(b) => acc.push_image(b, decode_images),
+                        Some("file") => {}
                         _ => unknown += 1,
                     }
                 }
@@ -499,7 +533,7 @@ fn parse_v2_messages(ro: &SqliteRo, sid: &str) -> Result<(Vec<TranscriptMessage>
 /// 一条消息的内容块累加器(text/synthetic/reasoning/tool),两代路径共用
 #[derive(Default)]
 struct BlockAcc {
-    text: Vec<String>,
+    content: ParsedContent,
     synthetic: Vec<String>,
     thinking: Vec<String>,
     tools: Vec<ToolCallView>,
@@ -517,10 +551,21 @@ impl BlockAcc {
     /// tool 块兼容两种形态:
     /// preview 早期 `{callID,tool,state:{input,output}}` 与真实 next
     /// `{id,name,state:{input,content,result,error}}`。
-    fn push_tool(&mut self, b: &Value) {
+    fn push_tool(&mut self, b: &Value, decode_images: bool) {
         let state = b.get("state").cloned().unwrap_or(Value::Null);
         let input = state.get("input").cloned().unwrap_or(Value::Null);
-        let output = opencode_tool_output(&state);
+        let mut output = opencode_tool_output(&state);
+        if let Some(content) = state.get("content") {
+            let parsed = content_parts(content, decode_images);
+            if !parsed.text.is_empty() {
+                output = Some(parsed.text);
+            }
+            let mut images = parsed.images;
+            for image in &mut images {
+                image.text_offset = self.content.text.len();
+            }
+            self.content.images.extend(images);
+        }
         self.tools.push(tool_call_view(
             b.get("callID")
                 .or_else(|| b.get("id"))
@@ -537,14 +582,21 @@ impl BlockAcc {
         ));
     }
 
+    fn push_image(&mut self, block: &Value, decode_images: bool) {
+        let parsed = content_parts(block, decode_images);
+        self.content.append(parsed);
+    }
+
     /// 组装为消息;全空返回 None。只有注入内容的消息归 Meta 折叠。
     fn into_message(self, role: Role, ts: i64, model: Option<String>) -> Option<TranscriptMessage> {
-        let (text, kind) = if self.text.is_empty() && !self.synthetic.is_empty() {
+        let ParsedContent { text, images } = self.content;
+        let (text, kind) = if text.is_empty() && !self.synthetic.is_empty() {
             (self.synthetic.join("\n\n"), MessageKind::Meta)
         } else {
-            (self.text.join("\n\n"), MessageKind::Text)
+            (text, MessageKind::Text)
         };
-        if text.is_empty() && self.thinking.is_empty() && self.tools.is_empty() {
+        if text.is_empty() && self.thinking.is_empty() && self.tools.is_empty() && images.is_empty()
+        {
             return None;
         }
         let (clipped, truncated) = clip(&text, MAX_MSG_TEXT);
@@ -562,6 +614,7 @@ impl BlockAcc {
             },
             timestamp: if ts > 0 { Some(ts) } else { None },
             model,
+            images,
         })
     }
 }
@@ -680,7 +733,7 @@ impl AgentAdapter for OpencodeAdapter {
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
-        let (meta, messages, unknown) = self.parse(r)?;
+        let (meta, messages, unknown) = self.parse(r, false)?;
         let units = units_from_messages(&messages);
         Ok(ParsedSession {
             meta,
@@ -690,7 +743,7 @@ impl AgentAdapter for OpencodeAdapter {
     }
 
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript> {
-        let (meta, messages, unknown) = self.parse(r)?;
+        let (meta, messages, unknown) = self.parse(r, true)?;
         Ok(ParsedTranscript {
             meta,
             mainline: messages,

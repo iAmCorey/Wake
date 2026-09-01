@@ -1440,6 +1440,7 @@ fn load_visible_transcript(
                 && (!message.text.trim().is_empty()
                     || !message.tool_calls.is_empty()
                     || message.thinking.is_some()
+                    || !message.images.is_empty()
                     || message.kind == MessageKind::CompactSummary)
         })
         .collect())
@@ -1466,12 +1467,109 @@ struct DetailState {
     expanded_thinking: HashSet<usize>,
     /// 搜索跳转目标(FTS seq,契约=消息 seq);解析完成后滚到该消息并保持高亮
     jump_seq: Option<i64>,
+    /// 与 transcript 同下标；原始字节只保留在 Arc<Image> 内，避免双份内存。
+    images: Vec<Vec<ImageSlot>>,
+    /// 放大预览中的图片：(消息下标, 消息内图片下标)。
+    zoom: Option<(usize, usize)>,
+    /// 放大预览操作的短暂就地反馈。绑定具体图片，避免切换预览后把上一张的
+    /// 成功状态带过来；generation 让较早的复位计时器不能清掉较新的反馈。
+    image_action_feedback: [Option<ImageActionFeedback>; 2],
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ImageAction {
+    Copy,
+    Save,
+}
+
+impl ImageAction {
+    const fn index(self) -> usize {
+        match self {
+            Self::Copy => 0,
+            Self::Save => 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ImageActionFeedback {
+    target: (usize, usize),
+    action: ImageAction,
+    generation: u64,
+}
+
+#[derive(Clone)]
+enum ImageSlot {
+    Ready {
+        image: Arc<gpui::Image>,
+        dims: Option<(u32, u32)>,
+        text_offset: usize,
+    },
+    Unsupported {
+        media_type: SharedString,
+        bytes: Arc<Vec<u8>>,
+        text_offset: usize,
+    },
+    Omitted {
+        text_offset: usize,
+    },
+}
+
+impl ImageSlot {
+    fn text_offset(&self) -> usize {
+        match self {
+            Self::Ready { text_offset, .. }
+            | Self::Unsupported { text_offset, .. }
+            | Self::Omitted { text_offset } => *text_offset,
+        }
+    }
+}
+
+fn take_image_slots(messages: &mut [TranscriptMessage]) -> Vec<Vec<ImageSlot>> {
+    const TRANSCRIPT_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+    const TRANSCRIPT_DECODED_PIXELS: u64 = 96_000_000;
+    let mut remaining_bytes = TRANSCRIPT_IMAGE_BYTES;
+    let mut remaining_pixels = TRANSCRIPT_DECODED_PIXELS;
+
+    messages
+        .iter_mut()
+        .map(|message| {
+            std::mem::take(&mut message.images)
+                .into_iter()
+                .map(|attachment| {
+                    let text_offset = attachment.text_offset.min(message.text.len());
+                    if attachment.bytes.len() > remaining_bytes {
+                        return ImageSlot::Omitted { text_offset };
+                    }
+                    remaining_bytes -= attachment.bytes.len();
+                    match image_format_of(&attachment.media_type).and_then(|format| {
+                        image_probe(&attachment.bytes, format).map(|probe| (format, probe))
+                    }) {
+                        Some((format, probe)) if probe.decoded_pixels <= remaining_pixels => {
+                            remaining_pixels -= probe.decoded_pixels;
+                            ImageSlot::Ready {
+                                image: Arc::new(gpui::Image::from_bytes(format, attachment.bytes)),
+                                dims: Some(probe.dims),
+                                text_offset,
+                            }
+                        }
+                        _ => ImageSlot::Unsupported {
+                            media_type: attachment.media_type.into(),
+                            bytes: Arc::new(attachment.bytes),
+                            text_offset,
+                        },
+                    }
+                })
+                .collect()
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod detail_selection_tests {
     use std::time::Duration;
 
+    use super::image_probe;
     use gpui::{
         div, list, point, px, AppContext as _, Context, Element as _, InteractiveElement as _,
         IntoElement, ListAlignment, ListState, Modifiers, MouseButton, MouseMoveEvent,
@@ -1676,6 +1774,20 @@ mod detail_selection_tests {
         );
         assert!(!view.read_with(cx, |view, _| view.auto_scroll.is_active()));
     }
+
+    #[test]
+    fn image_probe_accepts_small_matching_images_and_rejects_mime_mismatch() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 3)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("png fixture");
+        let bytes = png.into_inner();
+
+        let probe = image_probe(&bytes, gpui::ImageFormat::Png).expect("safe png");
+        assert_eq!(probe.dims, (2, 3));
+        assert_eq!(probe.decoded_pixels, 6);
+        assert!(image_probe(&bytes, gpui::ImageFormat::Jpeg).is_none());
+    }
 }
 
 // ---------------- Workbench ----------------
@@ -1734,6 +1846,9 @@ pub struct Workbench {
     /// 文本拖选靠近详情视口边缘时，持续推动外层消息列表。
     detail_selection_auto_scroll: AutoScroll,
     detail: Option<DetailState>,
+    /// 图片操作反馈的全局递增代次。即使关闭后重新打开同一会话和图片，旧计时
+    /// 器也不会误清新状态。
+    image_action_feedback_generation: u64,
 
     /// Insights 页(侧栏底部入口):打开时替换中栏+右栏。与其他导航目的地
     /// 互斥(侧栏单选模型);数据在 open/refresh 时后台重算,Rc 免深拷贝
@@ -2031,6 +2146,7 @@ impl Workbench {
             _calendar_task: None,
             detail_selection_auto_scroll: AutoScroll::default(),
             detail: None,
+            image_action_feedback_generation: 0,
             insights_open: false,
             insights: None,
             insights_loading: false,
@@ -3209,6 +3325,7 @@ impl Workbench {
                         // ↑↓ 在 Input 内不被消费,冒泡到这里走 main.rs 的
                         // PALETTE_CONTEXT 键位(Input 拆出 List 后原生 List 绑定够不着)
                         .key_context(PALETTE_CONTEXT)
+                        .relative()
                         .on_action(window.listener_for(
                             &this,
                             |wb: &mut Self, _: &PaletteUp, window, cx| {
@@ -3225,6 +3342,40 @@ impl Workbench {
                         // 不用手工重算列表高度
                         .h(PALETTE_HEIGHT)
                         .gap(SPACE_MD)
+                        .child(
+                            // gpui-component 0.5.1 的 Dialog 把遮罩关闭挂在冒泡
+                            // 阶段，而遮罩自身的 occlude 在当前 GPUI 版本会让该
+                            // 路径失效。用面板实际布局边界做窗口级捕获，确保任何
+                            // 面板外左键都能关闭；面板内输入、结果点击不受影响。
+                            canvas(
+                                |_, _, _| {},
+                                |content_bounds, _, window, _| {
+                                    let dialog_bounds = Bounds {
+                                        origin: point(
+                                            content_bounds.origin.x - SPACE_XL,
+                                            content_bounds.origin.y - px(24.),
+                                        ),
+                                        size: size(
+                                            content_bounds.size.width + SPACE_XL * 2.,
+                                            content_bounds.size.height + px(48.),
+                                        ),
+                                    };
+                                    window.on_mouse_event(
+                                        move |event: &MouseDownEvent, phase, window, cx| {
+                                            if phase.capture()
+                                                && event.button == MouseButton::Left
+                                                && !dialog_bounds.contains(&event.position)
+                                            {
+                                                cx.stop_propagation();
+                                                window.close_dialog(cx);
+                                            }
+                                        },
+                                    );
+                                },
+                            )
+                            .absolute()
+                            .inset_0(),
+                        )
                         .child(
                             div()
                                 .flex_shrink_0()
@@ -3433,6 +3584,9 @@ impl Workbench {
             expanded_tools: HashSet::new(),
             expanded_thinking: HashSet::new(),
             jump_seq,
+            images: Vec::new(),
+            zoom: None,
+            image_action_feedback: [None; 2],
         });
         // 搜索路径:中栏列表同步选中并滚到该会话。
         // 列表点击路径(jump=None)不走——List 点击自带选中,再滚会跳视口
@@ -3443,7 +3597,10 @@ impl Workbench {
 
         let adapters = self.adapters.clone();
         let task = cx.background_spawn(async move {
-            let result = load_visible_transcript(&adapters, &meta);
+            let result = load_visible_transcript(&adapters, &meta).map(|mut messages| {
+                let images = take_image_slots(&mut messages);
+                (messages, images)
+            });
             (meta.key.clone(), result)
         });
         cx.spawn_in(window, async move |this, cx| {
@@ -3453,7 +3610,7 @@ impl Workbench {
                     if key == detail.meta.key {
                         detail.loading = false;
                         match result {
-                            Ok(messages) => {
+                            Ok((messages, images)) => {
                                 detail.msg_list = gpui::ListState::new(
                                     messages.len(),
                                     gpui::ListAlignment::Bottom,
@@ -3474,10 +3631,14 @@ impl Workbench {
                                     }
                                 }
                                 detail.transcript = Rc::new(messages);
+                                detail.images = images;
+                                detail.zoom = None;
                                 detail.error = None;
                             }
                             Err(error) => {
                                 detail.transcript = Rc::new(Vec::new());
+                                detail.images.clear();
+                                detail.zoom = None;
                                 detail.msg_list =
                                     gpui::ListState::new(0, gpui::ListAlignment::Bottom, px(512.));
                                 detail.error = Some(error.into());
@@ -4479,6 +4640,278 @@ impl Workbench {
             })
     }
 
+    fn show_image_action_success(
+        &mut self,
+        target: (usize, usize),
+        action: ImageAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.image_action_feedback_generation =
+            self.image_action_feedback_generation.wrapping_add(1);
+        let feedback = ImageActionFeedback {
+            target,
+            action,
+            generation: self.image_action_feedback_generation,
+        };
+        let Some(detail) = &mut self.detail else {
+            return;
+        };
+        if detail.zoom != Some(target) {
+            return;
+        }
+        detail.image_action_feedback[action.index()] = Some(feedback);
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1_600))
+                .await;
+            this.update(cx, |this, cx| {
+                if let Some(detail) = &mut this.detail {
+                    if detail.image_action_feedback[action.index()] == Some(feedback) {
+                        detail.image_action_feedback[action.index()] = None;
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn render_image_zoom(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some((message_index, image_index)) =
+            self.detail.as_ref().and_then(|detail| detail.zoom)
+        else {
+            return div().into_any_element();
+        };
+        let Some(ImageSlot::Ready { image, dims, .. }) = self
+            .detail
+            .as_ref()
+            .and_then(|detail| detail.images.get(message_index))
+            .and_then(|images| images.get(image_index))
+            .cloned()
+        else {
+            return div().into_any_element();
+        };
+
+        let kind = image
+            .format
+            .mime_type()
+            .trim_start_matches("image/")
+            .to_ascii_uppercase();
+        let size = crate::format::human_bytes(image.bytes.len());
+        let metadata = match dims {
+            Some((width, height)) => format!("{kind} · {width} × {height} · {size}"),
+            None => format!("{kind} · {size}"),
+        };
+        let shown = zoom_fit(dims, window.viewport_size());
+        let feedback = self
+            .detail
+            .as_ref()
+            .map(|detail| detail.image_action_feedback)
+            .unwrap_or([None; 2]);
+        let target = (message_index, image_index);
+        let copy_succeeded =
+            feedback[ImageAction::Copy.index()].is_some_and(|feedback| feedback.target == target);
+        let save_succeeded =
+            feedback[ImageAction::Save.index()].is_some_and(|feedback| feedback.target == target);
+        let success = cx.theme().success;
+
+        let close_backdrop = cx.listener(|this, _, _, cx| {
+            if let Some(detail) = &mut this.detail {
+                detail.zoom = None;
+                detail.image_action_feedback = [None; 2];
+                cx.notify();
+            }
+        });
+        let close_button = cx.listener(|this, _, _, cx| {
+            if let Some(detail) = &mut this.detail {
+                detail.zoom = None;
+                detail.image_action_feedback = [None; 2];
+                cx.notify();
+            }
+        });
+        let copy_image = image.clone();
+        let save_image = image.clone();
+        let copy_action = cx.listener(move |this, _, window, cx| {
+            cx.stop_propagation();
+            cx.write_to_clipboard(ClipboardItem::new_image(&copy_image));
+            this.show_image_action_success(target, ImageAction::Copy, cx);
+            window.push_notification(Notification::success("Image copied"), cx);
+        });
+        let save_action = cx.listener(move |this, _, window, cx| {
+            cx.stop_propagation();
+            match save_image_to_downloads(&save_image.bytes, save_image.format.mime_type()) {
+                Some(path) => {
+                    this.show_image_action_success(target, ImageAction::Save, cx);
+                    window.push_notification(
+                        Notification::success(format!("Saved to {}", path.display())),
+                        cx,
+                    );
+                }
+                None => {
+                    window.push_notification(Notification::error("Couldn't save the image"), cx)
+                }
+            }
+        });
+
+        div()
+            .id("image-zoom")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(gpui::black().opacity(IMAGE_SCRIM))
+            .on_click(close_backdrop)
+            .child(
+                v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .gap(SPACE_XL)
+                    .px(px(56.))
+                    .py(px(52.))
+                    .child(
+                        gpui::img(image)
+                            .id("image-zoom-figure")
+                            .w(shown.width)
+                            .h(shown.height)
+                            .rounded(SPACE_SM)
+                            .shadow(vec![zoom_shadow(px(18.), px(48.), 0.45)])
+                            .on_click(|_, _, cx| cx.stop_propagation()),
+                    )
+                    .child(
+                        h_flex()
+                            .id("image-zoom-actions")
+                            .flex_shrink_0()
+                            .h(px(40.))
+                            .items_center()
+                            .gap(SPACE_SM)
+                            .pl(SPACE_LG)
+                            .pr(SPACE_SM)
+                            .rounded(px(20.))
+                            .bg(gpui::black().opacity(0.78))
+                            .border_1()
+                            .border_color(gpui::white().opacity(0.13))
+                            .shadow(vec![zoom_shadow(px(8.), px(26.), 0.35)])
+                            .on_click(|_, _, cx| cx.stop_propagation())
+                            .child(
+                                div()
+                                    .text_size(FONT_LABEL)
+                                    .text_color(gpui::white().opacity(0.64))
+                                    .child(metadata),
+                            )
+                            .child(div().w(px(1.)).h(px(16.)).bg(gpui::white().opacity(0.16)))
+                            .child(
+                                h_flex()
+                                    .id("image-copy")
+                                    .size(px(30.))
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(RADIUS_BUTTON)
+                                    .cursor_pointer()
+                                    .when(copy_succeeded, |style| style.bg(success.opacity(0.2)))
+                                    .hover(move |style| {
+                                        style.bg(if copy_succeeded {
+                                            success.opacity(0.3)
+                                        } else {
+                                            gpui::white().opacity(0.16)
+                                        })
+                                    })
+                                    .tooltip(move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(if copy_succeeded {
+                                            "Copied"
+                                        } else {
+                                            "Copy image"
+                                        })
+                                        .build(window, cx)
+                                    })
+                                    .on_click(copy_action)
+                                    .child(
+                                        icon(if copy_succeeded {
+                                            "icons/check.svg"
+                                        } else {
+                                            "icons/copy.svg"
+                                        })
+                                        .with_size(px(15.))
+                                        .text_color(
+                                            if copy_succeeded {
+                                                success
+                                            } else {
+                                                gpui::white().opacity(0.84)
+                                            },
+                                        ),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .id("image-save")
+                                    .size(px(30.))
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(RADIUS_BUTTON)
+                                    .cursor_pointer()
+                                    .when(save_succeeded, |style| style.bg(success.opacity(0.2)))
+                                    .hover(move |style| {
+                                        style.bg(if save_succeeded {
+                                            success.opacity(0.3)
+                                        } else {
+                                            gpui::white().opacity(0.16)
+                                        })
+                                    })
+                                    .tooltip(move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(if save_succeeded {
+                                            "Saved"
+                                        } else {
+                                            "Save to Downloads"
+                                        })
+                                        .build(window, cx)
+                                    })
+                                    .on_click(save_action)
+                                    .child(
+                                        icon(if save_succeeded {
+                                            "icons/check.svg"
+                                        } else {
+                                            "icons/download.svg"
+                                        })
+                                        .with_size(px(15.))
+                                        .text_color(
+                                            if save_succeeded {
+                                                success
+                                            } else {
+                                                gpui::white().opacity(0.84)
+                                            },
+                                        ),
+                                    ),
+                            ),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .id("image-zoom-close")
+                    .absolute()
+                    .top(SPACE_LG)
+                    .right(SPACE_LG)
+                    .size(px(32.))
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(9.))
+                    .bg(gpui::white().opacity(0.11))
+                    .hover(|style| style.bg(gpui::white().opacity(0.2)))
+                    .cursor_pointer()
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new("Close").build(window, cx)
+                    })
+                    .on_click(close_button)
+                    .child(
+                        icon("icons/x.svg")
+                            .with_size(px(15.))
+                            .text_color(gpui::white().opacity(0.86)),
+                    ),
+            )
+            .into_any_element()
+    }
+
     // ---------- 对话区逐消息渲染(设计语言:用户右气泡 / 助手平铺 / 工具折叠簇) ----------
 
     /// gpui::list 的行渲染。在布局阶段经 entity.update 调用(render 已返回,
@@ -4502,6 +4935,9 @@ impl Workbench {
         // 尾部要用的 Copy 值提前取出,theme 借用不跨越 inner 构建期的 &mut cx
         let jump_bg = theme.primary.opacity(0.09);
         let jump_radius = theme.radius;
+        let image_border = theme.border;
+        let image_panel = theme.popover;
+        let image_muted = theme.muted_foreground;
         let Some(detail) = &self.detail else {
             return div().into_any_element();
         };
@@ -4511,6 +4947,7 @@ impl Workbench {
         let jump_seq = detail.jump_seq;
         // Rc 克隆只加引用计数;逐行借用,避免每帧深拷贝整条消息(text 可达 32KB)
         let transcript = detail.transcript.clone();
+        let shots = detail.images.get(ix).cloned().unwrap_or_default();
         let Some(m) = transcript.get(ix) else {
             return div().into_any_element();
         };
@@ -4520,6 +4957,7 @@ impl Workbench {
             && m.text.is_empty()
             && m.tool_calls.is_empty()
             && m.thinking.is_some()
+            && shots.is_empty()
         {
             return div().into_any_element();
         }
@@ -4530,30 +4968,44 @@ impl Workbench {
             centered_pill("Context compacted", cx).into_any_element()
         } else {
             match m.role {
-                MessageRole::User => h_flex()
-                    .w_full()
-                    .justify_end()
-                    .child(
-                        div()
-                            .max_w(px(540.))
-                            .min_w_0()
-                            .rounded(theme.radius_lg)
-                            .bg(theme.muted)
-                            .px(px(14.))
-                            .py(SPACE_SM)
-                            .text_size(FONT_MSG_USER)
-                            .line_height(relative(1.85))
-                            .child(markdown_body(
-                                format!("dmsg-{}", m.seq).into(),
-                                m.text.clone(),
-                                FONT_MSG_USER,
-                                gpui::rems(0.5),
-                                dark,
-                                window,
-                                cx,
-                            )),
-                    )
-                    .into_any_element(),
+                MessageRole::User => {
+                    let has_text = !m.text.trim().is_empty();
+                    let mut bubble = v_flex()
+                        .max_w(px(540.))
+                        .min_w_0()
+                        .gap(SPACE_SM)
+                        .rounded(theme.radius_lg)
+                        .bg(theme.muted)
+                        .text_size(FONT_MSG_USER)
+                        .line_height(relative(1.85));
+                    bubble = if !shots.is_empty() && !has_text {
+                        bubble.p(px(7.))
+                    } else {
+                        bubble.px(px(14.)).py(SPACE_SM)
+                    };
+                    if has_text || !shots.is_empty() {
+                        bubble = bubble.child(message_content(
+                            ix,
+                            m.seq,
+                            &m.text,
+                            &shots,
+                            FONT_MSG_USER,
+                            gpui::rems(0.5),
+                            dark,
+                            image_border,
+                            image_panel,
+                            image_muted,
+                            cx.entity(),
+                            window,
+                            cx,
+                        ));
+                    }
+                    h_flex()
+                        .w_full()
+                        .justify_end()
+                        .child(bubble)
+                        .into_any_element()
+                }
                 MessageRole::Assistant => {
                     let mut col = v_flex().w_full().min_w_0().gap(SPACE_SM);
                     if let Some(thinking) = &m.thinking {
@@ -4571,17 +5023,23 @@ impl Workbench {
                             cx,
                         ));
                     }
-                    if !m.text.is_empty() {
+                    if !m.text.is_empty() || !shots.is_empty() {
                         col = col.child(
                             div()
                                 .text_size(FONT_MSG_BODY)
                                 .line_height(relative(1.9))
-                                .child(markdown_body(
-                                    format!("dmsg-{}", m.seq).into(),
-                                    m.text.clone(),
+                                .child(message_content(
+                                    ix,
+                                    m.seq,
+                                    &m.text,
+                                    &shots,
                                     FONT_MSG_BODY,
                                     gpui::rems(0.6),
                                     dark,
+                                    image_border,
+                                    image_panel,
+                                    image_muted,
+                                    cx.entity(),
                                     window,
                                     cx,
                                 )),
@@ -6107,6 +6565,369 @@ fn empty_state(
         .child(div().text_size(FONT_CAPTION).child(caption.into()))
 }
 
+fn image_format_of(media_type: &str) -> Option<gpui::ImageFormat> {
+    use gpui::ImageFormat as Format;
+    Some(match media_type.trim().to_ascii_lowercase().as_str() {
+        "image/png" => Format::Png,
+        "image/jpeg" | "image/jpg" => Format::Jpeg,
+        "image/webp" => Format::Webp,
+        "image/gif" => Format::Gif,
+        // SVG 的画布与滤镜开销无法在 GPUI 解码前可靠约束，保留原始下载即可。
+        "image/svg+xml" => return None,
+        "image/bmp" => Format::Bmp,
+        "image/tiff" | "image/tif" => Format::Tiff,
+        _ => return None,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct ImageProbe {
+    dims: (u32, u32),
+    decoded_pixels: u64,
+}
+
+fn image_probe(bytes: &[u8], format: gpui::ImageFormat) -> Option<ImageProbe> {
+    use image::AnimationDecoder as _;
+
+    const MAX_DIMENSION: u32 = 8_192;
+    const MAX_STATIC_PIXELS: u64 = 16_000_000;
+    const MAX_ANIMATED_PIXELS: u64 = 32_000_000;
+    const MAX_ANIMATION_FRAMES: usize = 120;
+
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let guessed = reader.format()?;
+    let expected = match format {
+        gpui::ImageFormat::Png => image::ImageFormat::Png,
+        gpui::ImageFormat::Jpeg => image::ImageFormat::Jpeg,
+        gpui::ImageFormat::Gif => image::ImageFormat::Gif,
+        gpui::ImageFormat::Webp => image::ImageFormat::WebP,
+        gpui::ImageFormat::Bmp => image::ImageFormat::Bmp,
+        gpui::ImageFormat::Tiff => image::ImageFormat::Tiff,
+        gpui::ImageFormat::Svg | gpui::ImageFormat::Ico | gpui::ImageFormat::Pnm => return None,
+    };
+    if guessed != expected {
+        return None;
+    }
+    let dims = reader.into_dimensions().ok()?;
+    if dims.0 == 0 || dims.1 == 0 || dims.0 > MAX_DIMENSION || dims.1 > MAX_DIMENSION {
+        return None;
+    }
+    let pixels = u64::from(dims.0) * u64::from(dims.1);
+    if pixels > MAX_STATIC_PIXELS {
+        return None;
+    }
+
+    let frame_count = match format {
+        gpui::ImageFormat::Gif => {
+            let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).ok()?;
+            bounded_animation_frames(decoder.into_frames(), pixels, MAX_ANIMATED_PIXELS)?
+        }
+        gpui::ImageFormat::Webp => {
+            let decoder =
+                image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes)).ok()?;
+            if decoder.has_animation() {
+                bounded_animation_frames(decoder.into_frames(), pixels, MAX_ANIMATED_PIXELS)?
+            } else {
+                1
+            }
+        }
+        _ => 1,
+    };
+    if frame_count > MAX_ANIMATION_FRAMES {
+        return None;
+    }
+    Some(ImageProbe {
+        dims,
+        decoded_pixels: pixels.checked_mul(frame_count as u64)?,
+    })
+}
+
+fn bounded_animation_frames<'a>(
+    frames: image::Frames<'a>,
+    pixels_per_frame: u64,
+    max_pixels: u64,
+) -> Option<usize> {
+    let limit = (max_pixels / pixels_per_frame).clamp(1, 120) as usize;
+    let mut count = 0usize;
+    for frame in frames.take(limit + 1) {
+        frame.ok()?;
+        count += 1;
+        if count > limit {
+            return None;
+        }
+    }
+    (count > 0).then_some(count)
+}
+
+fn image_extension(media_type: &str) -> &'static str {
+    match media_type.trim().to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/svg+xml" => "svg",
+        "image/bmp" => "bmp",
+        "image/tiff" | "image/tif" => "tiff",
+        "image/heic" | "image/heif" => "heic",
+        "image/avif" => "avif",
+        _ => "png",
+    }
+}
+
+fn save_image_to_downloads(bytes: &[u8], media_type: &str) -> Option<PathBuf> {
+    use std::hash::{Hash as _, Hasher as _};
+    use std::io::Write as _;
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    let stem = format!("wake-image-{:016x}", hasher.finish());
+    let extension = image_extension(media_type);
+    let downloads = dirs::download_dir()?;
+    for suffix in 0..1000 {
+        let name = if suffix == 0 {
+            format!("{stem}.{extension}")
+        } else {
+            format!("{stem}-{suffix}.{extension}")
+        };
+        let path = downloads.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                if file.write_all(bytes).is_ok() {
+                    return Some(path);
+                }
+                let _ = std::fs::remove_file(&path);
+                return None;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if std::fs::read(&path).ok().as_deref() == Some(bytes) {
+                    return Some(path);
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+fn zoom_fit(dims: Option<(u32, u32)>, viewport: Size<Pixels>) -> Size<Pixels> {
+    let available_width = (f32::from(viewport.width) - 112.0).max(120.0);
+    let available_height = (f32::from(viewport.height) - 164.0).max(120.0);
+    let Some((width, height)) = dims.filter(|(width, height)| *width > 0 && *height > 0) else {
+        return gpui::size(
+            px(available_width.min(720.0)),
+            px(available_height.min(480.0)),
+        );
+    };
+    let (width, height) = (width as f32, height as f32);
+    let scale = (available_width / width)
+        .min(available_height / height)
+        .min(1.0);
+    gpui::size(px(width * scale), px(height * scale))
+}
+
+fn zoom_shadow(y: Pixels, blur: Pixels, alpha: f32) -> gpui::BoxShadow {
+    gpui::BoxShadow {
+        color: gpui::black().opacity(alpha),
+        offset: gpui::point(px(0.), y),
+        blur_radius: blur,
+        spread_radius: px(0.),
+        inset: false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn message_content(
+    message_index: usize,
+    seq: i64,
+    text: &str,
+    slots: &[ImageSlot],
+    base: Pixels,
+    paragraph_gap: gpui::Rems,
+    dark: bool,
+    border: Hsla,
+    panel: Hsla,
+    muted: Hsla,
+    workbench: Entity<Workbench>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Div {
+    let mut content = v_flex().min_w_0().gap(SPACE_SM);
+    let mut cursor = 0usize;
+    let mut image_index = 0usize;
+    let mut text_part = 0usize;
+
+    while image_index < slots.len() {
+        let mut offset = slots[image_index].text_offset().min(text.len());
+        while offset > cursor && !text.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        offset = offset.max(cursor);
+        let segment = text[cursor..offset].trim_matches('\n');
+        if !segment.trim().is_empty() {
+            content = content.child(markdown_body(
+                format!("dmsg-{seq}-part-{text_part}").into(),
+                segment.to_string(),
+                base,
+                paragraph_gap,
+                dark,
+                window,
+                cx,
+            ));
+            text_part += 1;
+        }
+
+        let group_start = image_index;
+        image_index += 1;
+        while image_index < slots.len()
+            && slots[image_index].text_offset().min(text.len())
+                == slots[group_start].text_offset().min(text.len())
+        {
+            image_index += 1;
+        }
+        content = content.child(image_strip(
+            message_index,
+            group_start,
+            &slots[group_start..image_index],
+            border,
+            panel,
+            muted,
+            workbench.clone(),
+        ));
+        cursor = offset;
+    }
+
+    let tail = text[cursor..].trim_matches('\n');
+    if !tail.trim().is_empty() {
+        content = content.child(markdown_body(
+            format!("dmsg-{seq}-part-{text_part}").into(),
+            tail.to_string(),
+            base,
+            paragraph_gap,
+            dark,
+            window,
+            cx,
+        ));
+    }
+    content
+}
+
+fn image_strip(
+    message_index: usize,
+    image_index_start: usize,
+    slots: &[ImageSlot],
+    border: Hsla,
+    panel: Hsla,
+    muted: Hsla,
+    workbench: Entity<Workbench>,
+) -> Div {
+    let mut row = h_flex().flex_wrap().gap(SPACE_SM);
+    for (local_index, slot) in slots.iter().enumerate() {
+        let image_index = image_index_start + local_index;
+        row = row.child(match slot {
+            ImageSlot::Ready { image, dims, .. } => {
+                let entity = workbench.clone();
+                let figure = gpui::img(image.clone());
+                let figure = if dims.is_some_and(|(width, height)| width < height) {
+                    figure.w(IMAGE_THUMB)
+                } else {
+                    figure.h(IMAGE_THUMB)
+                };
+                div()
+                    .id(SharedString::from(format!(
+                        "message-image:{message_index}:{image_index}"
+                    )))
+                    .size(IMAGE_THUMB)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .overflow_hidden()
+                    .rounded(RADIUS_IMAGE)
+                    .border_1()
+                    .border_color(border)
+                    .bg(panel)
+                    .cursor_pointer()
+                    .child(figure)
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            if let Some(detail) = &mut this.detail {
+                                detail.zoom = Some((message_index, image_index));
+                                detail.image_action_feedback = [None; 2];
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .into_any_element()
+            }
+            ImageSlot::Unsupported {
+                media_type, bytes, ..
+            } => {
+                let media_type_for_save = media_type.to_string();
+                let bytes_for_save = bytes.clone();
+                v_flex()
+                    .id(SharedString::from(format!(
+                        "unsupported-message-image:{message_index}:{image_index}"
+                    )))
+                    .size(IMAGE_THUMB)
+                    .items_center()
+                    .justify_center()
+                    .gap(SPACE_XS)
+                    .p(SPACE_SM)
+                    .rounded(RADIUS_IMAGE)
+                    .border_1()
+                    .border_color(border)
+                    .bg(panel)
+                    .text_size(FONT_LABEL)
+                    .text_color(muted)
+                    .cursor_pointer()
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new("Save original image")
+                            .build(window, cx)
+                    })
+                    .on_click(move |_, window, cx| {
+                        match save_image_to_downloads(&bytes_for_save, &media_type_for_save) {
+                            Some(path) => window.push_notification(
+                                Notification::success(format!("Saved to {}", path.display())),
+                                cx,
+                            ),
+                            None => window.push_notification(
+                                Notification::error("Couldn't save the image"),
+                                cx,
+                            ),
+                        }
+                    })
+                    .child("Preview unavailable")
+                    .child(div().max_w_full().truncate().child(media_type.clone()))
+                    .child(icon("icons/download.svg").with_size(px(14.)))
+                    .into_any_element()
+            }
+            ImageSlot::Omitted { .. } => v_flex()
+                .id(SharedString::from(format!(
+                    "omitted-message-image:{message_index}:{image_index}"
+                )))
+                .size(IMAGE_THUMB)
+                .items_center()
+                .justify_center()
+                .gap(SPACE_XS)
+                .p(SPACE_SM)
+                .rounded(RADIUS_IMAGE)
+                .border_1()
+                .border_color(border)
+                .bg(panel)
+                .text_size(FONT_LABEL)
+                .text_color(muted)
+                .child("Image omitted")
+                .child("Transcript limit reached")
+                .into_any_element(),
+        });
+    }
+    row
+}
+
 /// 对话区居中小胶囊(System 消息 / Context compacted)
 fn centered_pill(text: impl Into<SharedString>, cx: &App) -> Div {
     let theme = cx.theme();
@@ -6808,6 +7629,7 @@ impl Render for Workbench {
                         }
                     }),
             )
+            .child(self.render_image_zoom(window, cx))
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
     }

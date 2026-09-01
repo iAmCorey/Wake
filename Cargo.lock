@@ -7749,6 +7749,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui_platform",
+ "image",
  "semver",
  "serde",
  "serde_json",
@@ -7765,6 +7766,7 @@ name = "wake-core"
 version = "0.3.3"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "dirs 5.0.1",
  "notify",

@@ -162,6 +162,18 @@ pub fn expand_tilde(p: &str) -> String {
     }
 }
 
+/// 图片字节数的人读格式；详情预览只需要 KB/MB 两档。
+pub fn human_bytes(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= MB {
+        format!("{:.1} MB", bytes / MB)
+    } else {
+        format!("{:.0} KB", (bytes / KB).max(1.0))
+    }
+}
+
 /// 首行截断预览
 pub fn one_line(s: &str, max_chars: usize) -> String {
     let joined = s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -241,5 +253,12 @@ mod tests {
 
         let toned = "👍🏽";
         assert_eq!(clip_display(&format!("{toned}xy"), 3), format!("{toned}…"));
+    }
+
+    #[test]
+    fn human_bytes_uses_readable_image_units() {
+        assert_eq!(human_bytes(1), "1 KB");
+        assert_eq!(human_bytes(1536), "2 KB");
+        assert_eq!(human_bytes(2 * 1024 * 1024 + 512 * 1024), "2.5 MB");
     }
 }

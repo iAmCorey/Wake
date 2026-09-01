@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- New: inline images from every readable agent transcript format now appear with compact thumbnails, full-window zoom, copy, and collision-safe save-to-Downloads actions; unsupported image formats can still be saved in their original bytes
+- Performance and privacy: image bytes are decoded only when a transcript is opened, each image is capped at 12 MiB with a 64 MiB transcript budget, remote URLs and transcript-supplied local paths are never dereferenced, and background indexing keeps lightweight `[image]` placeholders instead of base64 payloads
+- Fix: global search now closes reliably when clicking outside its panel while remaining open when switching to another application
+- Credits: inline-image support was inspired by [PR #14](https://github.com/iAmCorey/Wake/pull/14). Thanks to [@Tespera](https://github.com/Tespera) for investigating the Claude Code and Codex formats; the final implementation generalized that work across all agent sources that expose readable image blocks
+
 ## [0.3.3] — 2026-09-01
 
 - New: Grok Build `execute-plan` and subagent sessions now nest under their root parent, with expandable child counts, root-level sidebar totals, source-project recovery for worktrees, flat Starred/search results, and cascading Trash deletion

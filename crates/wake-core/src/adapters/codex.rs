@@ -288,7 +288,8 @@ fn format_review_json(text: &str) -> Option<String> {
     format_review_output(&review)
 }
 
-fn parse_rollout(path: &Path) -> Result<CodexParse> {
+fn parse_rollout(path: &Path, decode_images: bool) -> Result<CodexParse> {
+    let _image_budget = transcript_image_decode_budget(decode_images);
     let file = fs::File::open(path)?;
     let reader = BufReader::with_capacity(1 << 20, file);
 
@@ -372,47 +373,48 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
                 match pt {
                     "message" => {
                         let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("");
-                        let mut parts: Vec<String> = Vec::new();
-                        match payload.get("content") {
-                            Some(Value::Array(blocks)) => {
-                                for b in blocks {
-                                    if matches!(
-                                        b.get("type").and_then(|v| v.as_str()),
-                                        Some("input_text") | Some("output_text") | Some("text")
-                                    ) {
-                                        if let Some(t) = b.get("text").and_then(|v| v.as_str()) {
-                                            parts.push(t.to_string());
-                                        }
-                                    }
+                        let content = payload.get("content").unwrap_or(&Value::Null);
+                        let blocks = content
+                            .as_array()
+                            .map(Vec::as_slice)
+                            .unwrap_or_else(|| std::slice::from_ref(content));
+                        let mut parsed_message = ParsedContent::default();
+                        for block in blocks {
+                            let mut parsed = content_parts(block, decode_images);
+                            let text = if role == "user" {
+                                clean_user_text(&parsed.text)
+                            } else {
+                                parsed.text.trim().to_string()
+                            };
+                            if text != parsed.text {
+                                for image in &mut parsed.images {
+                                    image.text_offset = image.text_offset.min(text.len());
                                 }
                             }
-                            Some(Value::String(s)) => parts.push(s.clone()),
-                            _ => {}
+                            parsed.text = text;
+                            parsed_message.append(parsed);
                         }
-                        let text = parts.join("\n\n").trim().to_string();
-                        if text.is_empty() {
+                        let ParsedContent { text, images } = parsed_message;
+                        if text.is_empty() && images.is_empty() {
                             continue;
                         }
-                        match role {
+                        let mut message = match role {
                             "user" => {
                                 if let Some(results) = review_results_from_user_action(&text) {
-                                    messages.push(mk_msg(
-                                        Role::Assistant,
-                                        MessageKind::Text,
-                                        &results,
-                                        ts,
-                                    ));
-                                    pending_review_message = Some(messages.len() - 1);
+                                    pending_review_message = Some(messages.len());
+                                    mk_msg(Role::Assistant, MessageKind::Text, &results, ts)
                                 } else {
-                                    messages.push(mk_msg(Role::User, user_kind(&text), &text, ts));
+                                    mk_msg(Role::User, user_kind(&text), &text, ts)
                                 }
                             }
                             "assistant" => {
                                 let text = format_review_json(&text).unwrap_or(text);
-                                messages.push(mk_msg(Role::Assistant, MessageKind::Text, &text, ts))
+                                mk_msg(Role::Assistant, MessageKind::Text, &text, ts)
                             }
-                            _ => messages.push(mk_msg(Role::System, MessageKind::Meta, &text, ts)),
-                        }
+                            _ => mk_msg(Role::System, MessageKind::Meta, &text, ts),
+                        };
+                        message.images = images;
+                        messages.push(message);
                     }
                     "reasoning" => {
                         // encrypted_content 丢弃,只取明文 summary
@@ -500,19 +502,12 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
                         if let Some(&(mi, ti)) = tool_index.get(call_id) {
-                            let out_text = match payload.get("output") {
-                                Some(Value::String(s)) => s.clone(),
-                                Some(o @ Value::Object(_)) => o
-                                    .get("content")
-                                    .and_then(|v| v.as_str())
-                                    .map(String::from)
-                                    .unwrap_or_else(|| {
-                                        serde_json::to_string(o).unwrap_or_default()
-                                    }),
-                                _ => String::new(),
-                            };
-                            messages[mi].tool_calls[ti].output =
-                                Some(clip(&out_text, MAX_TOOL_IO).0);
+                            let output = payload.get("output").unwrap_or(&Value::Null);
+                            let content = output.get("content").unwrap_or(output);
+                            let parsed = tool_result_parts(content, decode_images);
+                            let message = &mut messages[mi];
+                            message.tool_calls[ti].output = Some(clip(&parsed.text, MAX_TOOL_IO).0);
+                            append_images_to_message_end(message, parsed.images);
                         }
                     }
                     _ => {}
@@ -533,8 +528,9 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
                     }
                     "user_message" => {
                         if let Some(m) = payload.get("message").and_then(|v| v.as_str()) {
-                            if !m.trim().is_empty() {
-                                if let Some(results) = review_results_from_user_action(m) {
+                            let cleaned = clean_user_text(m);
+                            if !cleaned.trim().is_empty() {
+                                if let Some(results) = review_results_from_user_action(&cleaned) {
                                     event_fallback.push(mk_msg(
                                         Role::Assistant,
                                         MessageKind::Text,
@@ -544,8 +540,8 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
                                 } else {
                                     event_fallback.push(mk_msg(
                                         Role::User,
-                                        user_kind(m),
-                                        m.trim(),
+                                        user_kind(&cleaned),
+                                        cleaned.trim(),
                                         ts,
                                     ));
                                 }
@@ -610,7 +606,7 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
     // response_item 完全缺席的会话退回 event_msg 流
     let has_real = messages
         .iter()
-        .any(|m| m.kind == MessageKind::Text && !m.text.is_empty());
+        .any(|m| m.kind == MessageKind::Text && (!m.text.is_empty() || !m.images.is_empty()));
     let mut final_messages = if has_real {
         messages
     } else if !event_fallback.is_empty() {
@@ -633,6 +629,15 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
     })
 }
 
+/// Codex Desktop 会把文件清单包在真实提问外面，并在正文写入指向临时文件
+/// 的 `<image ...>` 标签；图片本体由独立内容块承载。
+fn clean_user_text(text: &str) -> String {
+    let unwrapped = unwrap_file_preamble(text);
+    strip_image_tags(unwrapped.as_deref().unwrap_or(text))
+        .trim()
+        .to_string()
+}
+
 fn mk_msg(role: Role, kind: MessageKind, text: &str, ts: i64) -> TranscriptMessage {
     let (clipped, truncated) = clip(text, MAX_MSG_TEXT);
     TranscriptMessage {
@@ -645,6 +650,7 @@ fn mk_msg(role: Role, kind: MessageKind, text: &str, ts: i64) -> TranscriptMessa
         thinking: None,
         timestamp: if ts > 0 { Some(ts) } else { None },
         model: None,
+        images: Vec::new(),
     }
 }
 
@@ -806,7 +812,7 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
-        let parsed = parse_rollout(Path::new(&r.file_path))?;
+        let parsed = parse_rollout(Path::new(&r.file_path), false)?;
         let meta = build_meta(r, &parsed, &self.archived_dir);
         let units = units_from_messages(&parsed.messages);
         Ok(ParsedSession {
@@ -817,7 +823,7 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript> {
-        let parsed = parse_rollout(Path::new(&r.file_path))?;
+        let parsed = parse_rollout(Path::new(&r.file_path), true)?;
         Ok(ParsedTranscript {
             meta: build_meta(r, &parsed, &self.archived_dir),
             mainline: parsed.messages,

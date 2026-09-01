@@ -107,37 +107,8 @@ fn read_state(wire_path: &Path) -> KimiState {
     s
 }
 
-/// content parts(turn.prompt 的 input / message.content)→ 纯文本。
-/// part 可以是裸字符串或 {type:text,text};媒体 part(blobref)跳过。
-fn parts_text(v: &Value) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    match v {
-        Value::String(s) => {
-            if !s.trim().is_empty() {
-                parts.push(s.trim().to_string());
-            }
-        }
-        Value::Array(arr) => {
-            for p in arr {
-                match p {
-                    Value::String(s) if !s.trim().is_empty() => parts.push(s.trim().to_string()),
-                    Value::Object(_) => {
-                        if let Some(t) = p.get("text").and_then(|x| x.as_str()) {
-                            if !t.trim().is_empty() {
-                                parts.push(t.trim().to_string());
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        _ => {}
-    }
-    parts.join("\n\n")
-}
-
-fn parse_kimi_wire(path: &Path) -> Result<(Vec<TranscriptMessage>, u32)> {
+fn parse_kimi_wire(path: &Path, decode_images: bool) -> Result<(Vec<TranscriptMessage>, u32)> {
+    let _image_budget = transcript_image_decode_budget(decode_images);
     let file = fs::File::open(path)?;
     let reader = BufReader::with_capacity(1 << 20, file);
     let mut messages: Vec<TranscriptMessage> = Vec::new();
@@ -157,9 +128,11 @@ fn parse_kimi_wire(path: &Path) -> Result<(Vec<TranscriptMessage>, u32)> {
         };
         match row.get("type").and_then(|v| v.as_str()) {
             Some("turn.prompt") | Some("turn.steer") => {
-                let text = parts_text(row.get("input").unwrap_or(&Value::Null));
-                if !text.is_empty() {
-                    messages.push(text_msg(Role::User, &text, 0));
+                let parsed = content_parts(row.get("input").unwrap_or(&Value::Null), decode_images);
+                if !parsed.text.is_empty() || !parsed.images.is_empty() {
+                    let mut message = text_msg(Role::User, &parsed.text, 0);
+                    message.images = parsed.images;
+                    messages.push(message);
                 }
             }
             Some("context.append_message") => {
@@ -172,9 +145,12 @@ fn parse_kimi_wire(path: &Path) -> Result<(Vec<TranscriptMessage>, u32)> {
                     // user 输入已由 turn.prompt 覆盖;tool/system 等上下文行跳过
                     _ => continue,
                 };
-                let text = parts_text(msg.get("content").unwrap_or(&Value::Null));
-                if !text.is_empty() {
-                    messages.push(text_msg(role, &text, 0));
+                let parsed =
+                    content_parts(msg.get("content").unwrap_or(&Value::Null), decode_images);
+                if !parsed.text.is_empty() || !parsed.images.is_empty() {
+                    let mut message = text_msg(role, &parsed.text, 0);
+                    message.images = parsed.images;
+                    messages.push(message);
                 }
             }
             // 已知的配置/生命周期/工具事件行(工具明细在 loop_event 里,v1 不展开)
@@ -291,7 +267,7 @@ impl AgentAdapter for KimiAdapter {
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
-        let (messages, unknown) = parse_kimi_wire(Path::new(&r.file_path))?;
+        let (messages, unknown) = parse_kimi_wire(Path::new(&r.file_path), false)?;
         let state = read_state(Path::new(&r.file_path));
         let meta = build_meta(r, &state, &self.cwd_for(&r.native_id), &messages);
         let units = units_from_messages(&messages);
@@ -303,7 +279,7 @@ impl AgentAdapter for KimiAdapter {
     }
 
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript> {
-        let (messages, unknown) = parse_kimi_wire(Path::new(&r.file_path))?;
+        let (messages, unknown) = parse_kimi_wire(Path::new(&r.file_path), true)?;
         let state = read_state(Path::new(&r.file_path));
         Ok(ParsedTranscript {
             meta: build_meta(r, &state, &self.cwd_for(&r.native_id), &messages),

@@ -351,12 +351,115 @@ fn claude_ref() -> SessionFileRef {
         "11111111-aaaa-bbbb-cccc-000000000001",
     )
 }
+fn claude_images_ref() -> SessionFileRef {
+    fs_ref(
+        AgentId::ClaudeCode,
+        &fixture("claude/projects/-Users-tester-Github-wakefx/44444444-aaaa-bbbb-cccc-000000000004.jsonl"),
+        "44444444-aaaa-bbbb-cccc-000000000004",
+    )
+}
+fn codex_images_ref() -> SessionFileRef {
+    fs_ref(
+        AgentId::Codex,
+        &fixture("codex/sessions/2026/08/08/rollout-2026-08-08T09-00-00-55555555-aaaa-bbbb-cccc-000000000005.jsonl"),
+        "55555555-aaaa-bbbb-cccc-000000000005",
+    )
+}
 fn codex_ref() -> SessionFileRef {
     fs_ref(
         AgentId::Codex,
         &fixture("codex/sessions/2026/08/02/rollout-2026-08-02T09-15-00-22222222-aaaa-bbbb-cccc-000000000002.jsonl"),
         "22222222-aaaa-bbbb-cccc-000000000002",
     )
+}
+
+#[test]
+fn claude_inline_images_only_decode_for_transcripts() {
+    setup();
+    let adapter = ClaudeAdapter::new();
+    let r = claude_images_ref();
+    let transcript = adapter.parse_transcript(&r).expect("claude images");
+    let users: Vec<_> = transcript
+        .mainline
+        .iter()
+        .filter(|message| message.role == Role::User)
+        .collect();
+
+    assert_eq!(users.len(), 4);
+    assert_eq!(users[0].text, "这个按钮的颜色对不上");
+    assert_eq!(users[0].images.len(), 1);
+    assert_eq!(users[0].images[0].text_offset, 0);
+    assert_eq!(users[0].images[0].media_type, "image/png");
+    assert!(users[0].images[0].bytes.starts_with(b"\x89PNG"));
+    assert!(users[1].text.is_empty());
+    assert_eq!(users[1].images.len(), 1, "纯图片消息不能被丢掉");
+    assert_eq!(users[2].images[0].media_type, "image/heic");
+    assert!(users[3].images.is_empty());
+    assert_eq!(users[3].text, "[image]");
+    assert_eq!(transcript.meta.title, "这个按钮的颜色对不上");
+
+    let session = adapter.parse_session(&r).expect("claude image index");
+    let user_units: Vec<_> = session
+        .units
+        .iter()
+        .filter(|unit| unit.role == Role::User)
+        .map(|unit| unit.text.as_str())
+        .collect();
+    assert_eq!(
+        user_units,
+        vec![
+            "[image]\n\n这个按钮的颜色对不上",
+            "[image]",
+            "[image]",
+            "[image]"
+        ]
+    );
+}
+
+#[test]
+fn codex_inline_images_decode_and_strip_desktop_wrappers() {
+    setup();
+    let adapter = CodexAdapter::new();
+    let r = codex_images_ref();
+    let transcript = adapter.parse_transcript(&r).expect("codex images");
+    let users: Vec<_> = transcript
+        .mainline
+        .iter()
+        .filter(|message| message.role == Role::User)
+        .collect();
+
+    assert_eq!(users.len(), 5);
+    assert_eq!(users[0].text, "这个按钮颜色不对");
+    assert_eq!(users[0].images.len(), 1);
+    assert_eq!(users[0].images[0].text_offset, users[0].text.len());
+    assert!(users[0].images[0].bytes.starts_with(b"\x89PNG"));
+    assert!(users[1].text.is_empty());
+    assert_eq!(users[1].images.len(), 1, "纯图片消息不能被丢掉");
+    assert!(users[2].images.is_empty());
+    assert_eq!(users[2].text, "[image]");
+    assert_eq!(users[3].text, "参考这张图，人物面部不要有任何变化");
+    assert_eq!(users[3].kind, MessageKind::Text);
+    assert!(users[4].text.is_empty());
+    assert_eq!(users[4].images.len(), 1);
+
+    let session = adapter.parse_session(&r).expect("codex image index");
+    let user_units: Vec<_> = session
+        .units
+        .iter()
+        .filter(|unit| unit.role == Role::User)
+        .map(|unit| unit.text.as_str())
+        .collect();
+    assert_eq!(
+        user_units,
+        vec![
+            "这个按钮颜色不对\n\n[image]",
+            "[image]",
+            "[image]",
+            "参考这张图，人物面部不要有任何变化\n\n[image]",
+            "[image]"
+        ]
+    );
+    assert_eq!(session.meta.title, "这个按钮颜色不对");
 }
 fn codex_subagent_ref() -> SessionFileRef {
     fs_ref(

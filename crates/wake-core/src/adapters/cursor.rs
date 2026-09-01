@@ -93,15 +93,15 @@ struct CursorParse {
 
 #[derive(Default)]
 struct PendingAssistant {
-    text: Vec<String>,
+    content: ParsedContent,
     tool_calls: Vec<ToolCallView>,
     timestamp: Option<i64>,
 }
 
 fn flush_assistant(pending: &mut Option<PendingAssistant>, messages: &mut Vec<TranscriptMessage>) {
     let Some(p) = pending.take() else { return };
-    let text = p.text.join("\n\n");
-    if text.is_empty() && p.tool_calls.is_empty() {
+    let ParsedContent { text, images } = p.content;
+    if text.is_empty() && p.tool_calls.is_empty() && images.is_empty() {
         return;
     }
     let (clipped, truncated) = clip(&text, MAX_MSG_TEXT);
@@ -115,10 +115,12 @@ fn flush_assistant(pending: &mut Option<PendingAssistant>, messages: &mut Vec<Tr
         thinking: None,
         timestamp: p.timestamp,
         model: None,
+        images,
     });
 }
 
-fn parse_cursor_jsonl(path: &Path) -> Result<CursorParse> {
+fn parse_cursor_jsonl(path: &Path, decode_images: bool) -> Result<CursorParse> {
+    let _image_budget = transcript_image_decode_budget(decode_images);
     let file = fs::File::open(path)?;
     let reader = BufReader::with_capacity(1 << 20, file);
 
@@ -160,29 +162,36 @@ fn parse_cursor_jsonl(path: &Path) -> Result<CursorParse> {
         match role {
             "user" => {
                 flush_assistant(&mut pending, &mut messages);
-                let mut parts: Vec<String> = Vec::new();
+                let mut parsed_message = ParsedContent::default();
                 let mut ts = 0i64;
                 for b in &blocks {
-                    if b.get("type").and_then(|v| v.as_str()) != Some("text") {
-                        continue;
-                    }
-                    let Some(raw) = b.get("text").and_then(|v| v.as_str()) else {
-                        continue;
-                    };
-                    if let Some(t) = extract_tag(raw, "timestamp") {
-                        let parsed = cursor_ts_ms(&t);
-                        if parsed > 0 {
-                            ts = parsed;
+                    match b.get("type").and_then(|v| v.as_str()) {
+                        Some("text") => {
+                            let Some(raw) = b.get("text").and_then(|v| v.as_str()) else {
+                                continue;
+                            };
+                            if let Some(t) = extract_tag(raw, "timestamp") {
+                                let parsed = cursor_ts_ms(&t);
+                                if parsed > 0 {
+                                    ts = parsed;
+                                }
+                            }
+                            // 真实输入在 <user_query> 壳内;没有壳的行原样保留
+                            let body =
+                                extract_tag(raw, "user_query").unwrap_or_else(|| raw.to_string());
+                            if !body.trim().is_empty() {
+                                parsed_message.push_text(&body);
+                            }
                         }
-                    }
-                    // 真实输入在 <user_query> 壳内;没有壳的行(注入上下文等)原样保留
-                    let body = extract_tag(raw, "user_query").unwrap_or_else(|| raw.to_string());
-                    if !body.trim().is_empty() {
-                        parts.push(body.trim().to_string());
+                        _ if is_image_part(b) => {
+                            let parsed = content_parts(b, decode_images);
+                            parsed_message.append(parsed);
+                        }
+                        _ => {}
                     }
                 }
-                let text = parts.join("\n\n");
-                if text.trim().is_empty() {
+                let ParsedContent { text, images } = parsed_message;
+                if text.trim().is_empty() && images.is_empty() {
                     continue;
                 }
                 if ts > 0 {
@@ -191,7 +200,9 @@ fn parse_cursor_jsonl(path: &Path) -> Result<CursorParse> {
                     }
                     updated_at = updated_at.max(ts);
                 }
-                messages.push(text_msg(Role::User, &text, ts));
+                let mut message = text_msg(Role::User, &text, ts);
+                message.images = images;
+                messages.push(message);
             }
             "assistant" => {
                 // Cursor 逐块落行且无消息 id,连续 assistant 行并成一条,turn_ended/user 处 flush
@@ -201,7 +212,7 @@ fn parse_cursor_jsonl(path: &Path) -> Result<CursorParse> {
                         Some("text") => {
                             if let Some(t) = b.get("text").and_then(|v| v.as_str()) {
                                 if !t.trim().is_empty() {
-                                    p.text.push(t.to_string());
+                                    p.content.push_text(t);
                                 }
                             }
                         }
@@ -216,6 +227,10 @@ fn parse_cursor_jsonl(path: &Path) -> Result<CursorParse> {
                                 None,
                                 false,
                             ));
+                        }
+                        _ if is_image_part(b) => {
+                            let parsed = content_parts(b, decode_images);
+                            p.content.append(parsed);
                         }
                         _ => {}
                     }
@@ -343,7 +358,7 @@ impl AgentAdapter for CursorAdapter {
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
-        let parsed = parse_cursor_jsonl(Path::new(&r.file_path))?;
+        let parsed = parse_cursor_jsonl(Path::new(&r.file_path), false)?;
         let meta = build_meta(r, &parsed);
         let units = units_from_messages(&parsed.messages);
         Ok(ParsedSession {
@@ -354,7 +369,7 @@ impl AgentAdapter for CursorAdapter {
     }
 
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript> {
-        let parsed = parse_cursor_jsonl(Path::new(&r.file_path))?;
+        let parsed = parse_cursor_jsonl(Path::new(&r.file_path), true)?;
         // subagents/ 子目录与 Claude 同构,但无 meta 边车、主线 Task 调用无 id,
         // 挂不上具体 tool_use——仅列出供导出携带
         let mut sidechains = Vec::new();
@@ -389,7 +404,7 @@ impl AgentAdapter for CursorAdapter {
         if !file.is_file() {
             return Ok(Vec::new());
         }
-        Ok(parse_cursor_jsonl(&file)?.messages)
+        Ok(parse_cursor_jsonl(&file, true)?.messages)
     }
 
     fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
