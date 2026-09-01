@@ -17,6 +17,7 @@
 - Update: Thinking attached to assistant replies is now a collapsible panel with a one-line summary and full expanded content, independently of tool-call expansion
 - Update: tool calls now use expandable cards with Unicode-width-aware summaries, complete available inputs, successful and failed outputs, and full-content copy actions beyond the 600-character preview
 - Update: Insights uses 28px overview values, 24px leaderboard rows, 32px section spacing, and one shared 2px radius for chart and heatmap cells
+- Credits: Several UI and interaction improvements were inspired by [PR #12](https://github.com/iAmCorey/Wake/pull/12). Thanks to [@Tespera](https://github.com/Tespera) for the thoughtful exploration and contribution; the final implementations were independently rebuilt on the current codebase
 
 ## [0.3.1] — 2026-08-30
 
