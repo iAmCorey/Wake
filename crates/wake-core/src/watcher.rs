@@ -149,7 +149,18 @@ pub fn start_watcher(
             }
 
             let mut parent_link_agents = HashSet::new();
-            for ev in batch.into_iter().flatten() {
+            let mut rescan = false;
+            for ev in batch {
+                let Ok(ev) = ev.inspect_err(|e| eprintln!("watcher: notify error: {e}")) else {
+                    continue;
+                };
+                // 后端丢过事件(FSEvents MustScanSubDirs / inotify Q_OVERFLOW):
+                // 这条不指向具体会话文件——macOS 挂的是出事的目录、Linux 干脆
+                // 无路径——按路径处理会被 file_ref 静默丢弃,改由整轮增量兜底
+                if ev.need_rescan() {
+                    rescan = true;
+                    continue;
+                }
                 for path in ev.paths {
                     let owner_ix = resolve_ix(&path);
                     if let Some(adapter) = owner_ix.and_then(|ix| adapters.get(ix)) {
@@ -190,6 +201,9 @@ pub fn start_watcher(
             if !parent_link_agents.is_empty() {
                 let agents: Vec<AgentId> = parent_link_agents.into_iter().collect();
                 refresh_parent_links(&adapters, &store, events.as_ref(), &agents);
+            }
+            if rescan {
+                events.on_rescan_needed();
             }
         }
     });

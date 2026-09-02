@@ -80,8 +80,6 @@ pub const PALETTE_CONTEXT: &str = "WakePalette";
 const PALETTE_HEIGHT: Pixels = px(492.);
 /// location 表单标签列宽(Agent/Folder 两行共用)
 const FORM_LABEL_W: Pixels = px(52.);
-/// Wake 主窗口的透明标题栏高度。28px 详情操作条上下各保留 8px。
-const WINDOW_TITLEBAR_HEIGHT: Pixels = px(44.);
 /// 左栏顶部由 44px 窗口控制区 + 44px 品牌行组成；中栏标题区共享总高度。
 const LIBRARY_IDENTITY_HEIGHT: Pixels = px(88.);
 /// 侧栏底部常态工具栏内容高；加上父容器 1px 顶部分隔线，总高 44px。
@@ -120,6 +118,8 @@ fn spawn_scan(
 enum BgEvent {
     Progress(ScanProgress),
     Changed,
+    /// 监听后端丢过事件,需要一轮增量兜底
+    RescanNeeded,
 }
 
 struct ChannelEvents(futures::channel::mpsc::UnboundedSender<BgEvent>);
@@ -130,6 +130,9 @@ impl ScanEvents for ChannelEvents {
     }
     fn on_sessions_changed(&self) {
         let _ = self.0.unbounded_send(BgEvent::Changed);
+    }
+    fn on_rescan_needed(&self) {
+        let _ = self.0.unbounded_send(BgEvent::RescanNeeded);
     }
 }
 
@@ -1643,6 +1646,103 @@ mod detail_selection_tests {
         }
     }
 
+    /// gpui-component fd3bc2b 的遮罩点击关闭是坏的,由 ui.rs 的 sentinel 补:经
+    /// open_closable_dialog 打开的弹窗面板内点不关、面板上方/下方点一下即关;裸
+    /// open_dialog 的(AlertDialog 一类没登记的)面板外点击不关
+    #[gpui::test]
+    fn dialog_closes_on_outside_click(cx: &mut TestAppContext) {
+        use crate::ui::{open_closable_dialog, overlay_layers};
+        use gpui_component::input::{Input, InputState};
+
+        struct Host;
+        impl Render for Host {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().children(overlay_layers(window, cx))
+            }
+        }
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            // 入场动画一帧到位,不用按真实时钟等它落位
+            cx.set_reduce_motion(true);
+        });
+        let (_root, cx) = cx.add_window_view(|window, cx| {
+            let host = cx.new(|_| Host);
+            Root::new(host, window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        let draw = |cx: &mut VisualTestContext| {
+            cx.update(|w, cx| {
+                let _ = w.draw(cx);
+            });
+            cx.run_until_parked();
+        };
+        let click = |cx: &mut VisualTestContext, position| {
+            cx.simulate_click(position, Modifiers::default());
+            draw(cx);
+        };
+        let size = cx.update(|w, _| w.viewport_size());
+        // 面板居中、宽 400、顶边在视口高度 1/10 处
+        let inside = point(size.width / 2., size.height / 10. + px(60.));
+        // 面板上方(标题栏高度以内)与下方各取一点:上方曾被照抄上游的标题栏豁免吞掉
+        let above = point(px(20.), px(20.));
+        let below = point(px(20.), size.height - px(20.));
+
+        // 真实表单里有个会拿焦点的输入框,照样放一个
+        let input = cx.update(|window, cx| cx.new(|cx| InputState::new(window, cx)));
+        cx.update(|window, cx| {
+            open_closable_dialog(window, cx, move |dialog, _, _| {
+                dialog
+                    .title("Probe")
+                    .w(px(400.))
+                    .child(div().h(px(120.)).child(Input::new(&input)))
+            });
+        });
+        draw(cx);
+        click(cx, inside);
+        click(cx, inside);
+        assert!(
+            cx.update(|w, cx| w.has_active_dialog(cx)),
+            "click inside the panel must not close the dialog"
+        );
+        click(cx, above);
+        assert!(
+            !cx.update(|w, cx| w.has_active_dialog(cx)),
+            "click above the panel must close the dialog"
+        );
+
+        cx.update(|window, cx| {
+            open_closable_dialog(window, cx, |dialog, _, _| {
+                dialog
+                    .title("Probe")
+                    .w(px(400.))
+                    .child(div().h(px(120.)).child("body"))
+            });
+        });
+        draw(cx);
+        click(cx, below);
+        assert!(
+            !cx.update(|w, cx| w.has_active_dialog(cx)),
+            "click below the panel must close the dialog"
+        );
+
+        // 裸 open_dialog(AlertDialog 一类没登记的):面板外点击不关
+        cx.update(|window, cx| {
+            window.open_dialog(cx, |dialog, _, _| {
+                dialog
+                    .title("Alert-like")
+                    .w(px(400.))
+                    .child(div().h(px(120.)).child("body"))
+            });
+        });
+        draw(cx);
+        click(cx, below);
+        assert!(
+            cx.update(|w, cx| w.has_active_dialog(cx)),
+            "an unregistered dialog must survive outside clicks"
+        );
+        cx.update(|window, cx| window.close_dialog(cx));
+    }
+
     #[gpui::test]
     #[allow(deprecated)]
     fn window_selection_spans_text_views_inside_gpui_list(cx: &mut TestAppContext) {
@@ -2531,7 +2631,8 @@ impl Workbench {
             }
             workbench.update(cx, |this, _| this.settings_window = None);
         }
-        let bounds = Bounds::centered(None, size(px(820.), px(600.)), cx);
+        let (bounds, display_id) =
+            crate::main_window::centered_over_main(size(px(820.), px(600.)), cx);
         let titlebar = if cfg!(target_os = "macos") {
             TitlebarOptions {
                 title: None,
@@ -2551,6 +2652,7 @@ impl Workbench {
                 titlebar: Some(titlebar),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(720.), px(520.))),
+                display_id,
                 app_id: Some("wake-settings".into()),
                 window_decorations: Some(WindowDecorations::Client),
                 ..Default::default()
@@ -2679,7 +2781,7 @@ impl Workbench {
         let entity = cx.entity();
         let title: SharedString = title.into();
         let ok_label: SharedString = ok_label.into();
-        window.open_dialog(cx, move |dialog, _window, cx| {
+        open_closable_dialog(window, cx, move |dialog, _window, cx| {
             let theme = cx.theme();
             let dark = theme.mode.is_dark();
             // 内容轴缩进 = small 按钮的水平内边距:字段行/标题/footer 以它为轴,
@@ -3255,6 +3357,12 @@ impl Workbench {
                 self.refresh(cx);
                 None
             }
+            BgEvent::RescanNeeded => {
+                // 撞上进行中的扫描就排队,由终态事件补扫(kick_incremental_scan
+                // 自带这条状态机);连续多条 rescan 也只会排一次
+                self.kick_incremental_scan(cx);
+                None
+            }
         }
     }
 
@@ -3317,7 +3425,7 @@ impl Workbench {
         let list = self.palette_list.clone();
         let input = self.palette_input.clone();
         let this = cx.entity();
-        window.open_dialog(cx, move |dialog, window, cx| {
+        open_closable_dialog(window, cx, move |dialog, window, cx| {
             let theme = cx.theme();
             let has_query = input.read(cx).text().len() > 0;
             // 输入框尺寸;清除钮的 suffix 补偿 margin 从它派生,改档自动跟随
@@ -3328,7 +3436,6 @@ impl Workbench {
                 // Dialog 默认内容 padding 24px 四边;水平 20,用户定稿(2026-08-18)
                 .px(SPACE_XL)
                 .close_button(false)
-                .overlay_closable(true)
                 .child(
                     v_flex()
                         // ↑↓ 在 Input 内不被消费,冒泡到这里走 main.rs 的
@@ -3351,40 +3458,6 @@ impl Workbench {
                         // 不用手工重算列表高度
                         .h(PALETTE_HEIGHT)
                         .gap(SPACE_MD)
-                        .child(
-                            // gpui-component 0.5.1 的 Dialog 把遮罩关闭挂在冒泡
-                            // 阶段，而遮罩自身的 occlude 在当前 GPUI 版本会让该
-                            // 路径失效。用面板实际布局边界做窗口级捕获，确保任何
-                            // 面板外左键都能关闭；面板内输入、结果点击不受影响。
-                            canvas(
-                                |_, _, _| {},
-                                |content_bounds, _, window, _| {
-                                    let dialog_bounds = Bounds {
-                                        origin: point(
-                                            content_bounds.origin.x - SPACE_XL,
-                                            content_bounds.origin.y - px(24.),
-                                        ),
-                                        size: size(
-                                            content_bounds.size.width + SPACE_XL * 2.,
-                                            content_bounds.size.height + px(48.),
-                                        ),
-                                    };
-                                    window.on_mouse_event(
-                                        move |event: &MouseDownEvent, phase, window, cx| {
-                                            if phase.capture()
-                                                && event.button == MouseButton::Left
-                                                && !dialog_bounds.contains(&event.position)
-                                            {
-                                                cx.stop_propagation();
-                                                window.close_dialog(cx);
-                                            }
-                                        },
-                                    );
-                                },
-                            )
-                            .absolute()
-                            .inset_0(),
-                        )
                         .child(
                             div()
                                 .flex_shrink_0()
@@ -4970,7 +5043,7 @@ impl Workbench {
                     })
                     .on_click(close_button)
                     .child(
-                        icon("icons/x.svg")
+                        icon("icons/close.svg")
                             .with_size(px(15.))
                             .text_color(gpui::white().opacity(0.86)),
                     ),
@@ -5049,23 +5122,22 @@ impl Workbench {
                     } else {
                         bubble.px(px(14.)).py(SPACE_SM)
                     };
-                    if has_text || !shots.is_empty() {
-                        bubble = bubble.child(message_content(
-                            ix,
-                            m.seq,
-                            &m.text,
-                            &shots,
-                            FONT_MSG_USER,
-                            gpui::rems(0.5),
-                            dark,
-                            image_border,
-                            image_panel,
-                            image_muted,
-                            cx.entity(),
-                            window,
-                            cx,
-                        ));
-                    }
+                    // 气泡靠内容撑宽,各段直接挂在气泡上、中间不加任何包装层
+                    //(原因见 message_content 的文档注释)
+                    bubble = bubble.children(message_content(
+                        ix,
+                        m.seq,
+                        &m.text,
+                        &shots,
+                        FONT_MSG_USER,
+                        gpui::rems(0.5),
+                        dark,
+                        image_border,
+                        image_panel,
+                        image_muted,
+                        cx.entity(),
+                        cx,
+                    ));
                     h_flex()
                         .w_full()
                         .justify_end()
@@ -5089,26 +5161,30 @@ impl Workbench {
                             cx,
                         ));
                     }
-                    if !m.text.is_empty() || !shots.is_empty() {
+                    let parts = message_content(
+                        ix,
+                        m.seq,
+                        &m.text,
+                        &shots,
+                        FONT_MSG_BODY,
+                        gpui::rems(0.6),
+                        dark,
+                        image_border,
+                        image_panel,
+                        image_muted,
+                        cx.entity(),
+                        cx,
+                    );
+                    if !parts.is_empty() {
+                        // 这一层只是正文的字号/行高作用域(thinking、工具簇各有自己的字阶,
+                        // 不能提到 col 上);col 是 w_full 定宽列,不会走 max-content 探测,
+                        // 与用户气泡"不加包装层"的约束不冲突
                         col = col.child(
-                            div()
+                            v_flex()
+                                .gap(SPACE_SM)
                                 .text_size(FONT_MSG_BODY)
                                 .line_height(relative(1.9))
-                                .child(message_content(
-                                    ix,
-                                    m.seq,
-                                    &m.text,
-                                    &shots,
-                                    FONT_MSG_BODY,
-                                    gpui::rems(0.6),
-                                    dark,
-                                    image_border,
-                                    image_panel,
-                                    image_muted,
-                                    cx.entity(),
-                                    window,
-                                    cx,
-                                )),
+                                .children(parts),
                         );
                     }
                     if !m.tool_calls.is_empty() {
@@ -6796,6 +6872,17 @@ fn zoom_shadow(y: Pixels, blur: Pixels, alpha: f32) -> gpui::BoxShadow {
     }
 }
 
+/// 把消息正文按图片插入点切成「markdown 段 / 图片条」序列,交给调用方的容器
+///(用户气泡 / 助手列)直接 `.children(..)` 承载,中间**不要加包装层**。
+///
+/// 已核实的机制:gpui 的 text 元素缓存上一次测量尺寸,之后凡是 wrap_width 为 None
+/// 的探测(MinContent/MaxContent)一律返回缓存值,不管那次是在多窄的定宽下量的
+///(gpui `elements/text.rs` 的缓存条件;上游只给 truncate 补了防中毒,wrap 没有)。
+/// 实测的触发点:靠内容撑宽的用户气泡(`max_w` 无 `w_full`)下再套一层
+/// `v_flex().min_w_0()` / `div().min_w_0()` 放 TextView,taffy 会先用 0 宽量文字,
+/// "一字一行"的尺寸进了缓存,气泡 max-content 宽度随之变 0,只剩 28px 内边距
+///(v0.3.5 回归,中英文都中招);各段直接挂在气泡上则中英文、图片、多段、代码块全正常。
+/// 上游若把该缓存改成按 wrap_width 分键,此约束即可解除。
 #[allow(clippy::too_many_arguments)]
 fn message_content(
     message_index: usize,
@@ -6809,32 +6896,36 @@ fn message_content(
     panel: Hsla,
     muted: Hsla,
     workbench: Entity<Workbench>,
-    window: &mut Window,
     cx: &mut App,
-) -> Div {
-    let mut content = v_flex().min_w_0().gap(SPACE_SM);
+) -> Vec<AnyElement> {
+    let mut content = Vec::new();
     let mut cursor = 0usize;
     let mut image_index = 0usize;
-    let mut text_part = 0usize;
 
-    while image_index < slots.len() {
-        let mut offset = slots[image_index].text_offset().min(text.len());
-        while offset > cursor && !text.is_char_boundary(offset) {
-            offset -= 1;
-        }
-        offset = offset.max(cursor);
+    // 每轮吃掉「下一组图片之前的文字」+ 该组图片;图片用尽后最后一轮吃掉尾段文字
+    loop {
+        let offset = slots
+            .get(image_index)
+            .map_or(text.len(), |slot| slot.text_offset().min(text.len()));
+        let offset = text.floor_char_boundary(offset).max(cursor);
         let segment = text[cursor..offset].trim_matches('\n');
         if !segment.trim().is_empty() {
-            content = content.child(markdown_body(
-                format!("dmsg-{seq}-part-{text_part}").into(),
-                segment.to_string(),
-                base,
-                paragraph_gap,
-                dark,
-                window,
-                cx,
-            ));
-            text_part += 1;
+            // 序号只要在本条消息内唯一且跨帧稳定即可,段数就够
+            let part = content.len();
+            content.push(
+                markdown_body(
+                    format!("dmsg-{seq}-part-{part}").into(),
+                    segment,
+                    base,
+                    paragraph_gap,
+                    dark,
+                    cx,
+                )
+                .into_any_element(),
+            );
+        }
+        if image_index >= slots.len() {
+            break;
         }
 
         let group_start = image_index;
@@ -6845,29 +6936,19 @@ fn message_content(
         {
             image_index += 1;
         }
-        content = content.child(image_strip(
-            message_index,
-            group_start,
-            &slots[group_start..image_index],
-            border,
-            panel,
-            muted,
-            workbench.clone(),
-        ));
+        content.push(
+            image_strip(
+                message_index,
+                group_start,
+                &slots[group_start..image_index],
+                border,
+                panel,
+                muted,
+                workbench.clone(),
+            )
+            .into_any_element(),
+        );
         cursor = offset;
-    }
-
-    let tail = text[cursor..].trim_matches('\n');
-    if !tail.trim().is_empty() {
-        content = content.child(markdown_body(
-            format!("dmsg-{seq}-part-{text_part}").into(),
-            tail.to_string(),
-            base,
-            paragraph_gap,
-            dark,
-            window,
-            cx,
-        ));
     }
     content
 }
@@ -7005,11 +7086,10 @@ fn centered_pill(text: impl Into<SharedString>, cx: &App) -> Div {
 /// Wake 只覆写标题层级、代码块表面、语法配色和代码操作区。
 fn markdown_body(
     id: SharedString,
-    text: String,
+    text: &str,
     base: Pixels,
     paragraph_gap: gpui::Rems,
     dark: bool,
-    _window: &mut Window,
     cx: &mut App,
 ) -> TextView {
     let theme = cx.theme();
@@ -7711,7 +7791,6 @@ impl Render for Workbench {
                     }),
             )
             .child(self.render_image_zoom(window, cx))
-            .children(Root::render_dialog_layer(window, cx))
-            .children(Root::render_notification_layer(window, cx))
+            .children(overlay_layers(window, cx))
     }
 }

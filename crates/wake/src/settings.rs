@@ -4,15 +4,16 @@ use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::switch::Switch;
 use gpui_component::{
-    h_flex, v_flex, ActiveTheme as _, Disableable as _, Icon, Root, Selectable as _, Sizable as _,
+    h_flex, v_flex, ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _,
     StyledExt as _, TitleBar, WindowExt as _,
 };
 
 use wake_core::models::AgentId;
 
 use crate::ui::{
-    BUTTON_SM_H, FONT_BODY, FONT_CAPTION, FONT_DISPLAY, FONT_HEADING, FONT_LABEL, FONT_TITLE,
-    RADIUS_BUTTON, SHOW_IN_FM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXL,
+    overlay_layers, BUTTON_SM_H, FONT_BODY, FONT_CAPTION, FONT_DISPLAY, FONT_HEADING, FONT_LABEL,
+    FONT_TITLE, RADIUS_BUTTON, SHOW_IN_FM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS,
+    SPACE_XXL,
 };
 use crate::update::{self, UpdateStatus};
 use crate::workbench::{DataSourceRow, OpenAbout, OpenSettings, OpenUpdates, Workbench};
@@ -1030,7 +1031,6 @@ impl Render for SettingsView {
             .bg(background)
             .text_color(foreground)
             .child(h_flex().size_full().child(sidebar).child(content))
-            .children(Root::render_dialog_layer(window, cx))
-            .children(Root::render_notification_layer(window, cx))
+            .children(overlay_layers(window, cx))
     }
 }

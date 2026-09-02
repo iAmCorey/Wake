@@ -29,10 +29,7 @@ impl AppearancePreference {
 }
 
 fn appearance_path() -> std::path::PathBuf {
-    let base = dirs::config_dir()
-        .or_else(dirs::data_dir)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    base.join("wake").join("appearance")
+    crate::prefs::path("appearance")
 }
 
 pub fn appearance_preference() -> AppearancePreference {
@@ -56,11 +53,7 @@ pub fn set_appearance(
     window: Option<&mut Window>,
     cx: &mut App,
 ) -> std::io::Result<()> {
-    let path = appearance_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, preference.as_str())?;
+    crate::prefs::write(&appearance_path(), preference.as_str().as_bytes())?;
     apply_appearance(preference, window, cx);
     Ok(())
 }

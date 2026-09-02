@@ -2,7 +2,13 @@
 //! 规则:所有 UI 字号必须引用本模块常量,禁止裸 px 数字与 rem 工具类
 //! (text_sm 等按 rem=14px 折算会产生 12.25px 这类幽灵值)。
 //! 颜色只用三级:foreground(主文字)/muted_foreground(辅助)/primary(强调)。
-use gpui::{px, Hsla, Pixels, Styled};
+use std::collections::HashSet;
+
+use gpui::{
+    div, px, AnyElement, App, Global, Hsla, InteractiveElement as _, IntoElement, MouseButton,
+    Pixels, Styled, Window, WindowId,
+};
+use gpui_component::{dialog::Dialog, Root, WindowExt as _};
 
 /// 产品展示名（About）——medium
 pub const FONT_DISPLAY: Pixels = px(28.);
@@ -172,3 +178,70 @@ pub trait TextColored: Styled + Sized {
 }
 
 impl<T: Styled + Sized> TextColored for T {}
+
+/// Wake 主窗口的透明标题栏高度。28px 详情操作条上下各保留 8px。
+pub const WINDOW_TITLEBAR_HEIGHT: Pixels = px(44.);
+
+// ---- 弹窗「点面板外关闭」补丁 ----
+//
+// gpui-component fd3bc2b 的 Dialog 把遮罩点击监听器挂在一个零高度的包装 div 上,永远
+// hover 不到,`overlay_closable` 形同虚设(上游 df1d07b2「Restore the overlay behind an
+// open dialog」已修;升级到含修复的版本后删掉本段,两个入口退化成 `window.open_dialog`
+// 与 Root 的两层 overlay)。
+//
+// 原理:在窗口根节点、`Root::render_dialog_layer` 之后再挂一层全窗透明 sentinel。dialog
+// 的宿主是 deferred、最后才画:遮罩是普通 hitbox 不挡鼠标,popup 是 occlude——于是鼠标
+// 落在 popup 之外时 sentinel 才 hovered,它的 mouse_down 就是「点在面板外」。该不该关由
+// 弹窗表态:经 `open_closable_dialog` 打开的弹窗每帧在 builder 里登记本窗口,
+// `overlay_layers` 渲染完 dialog 层(builder 就在里面跑)立刻消费这个登记来决定挂不挂
+// sentinel——AlertDialog、已关闭的弹窗没有登记,面板外点击不关。不像上游那样豁免标题栏
+// 高度:弹窗开着时整窗被它的 occlude 层挡住、标题栏本来就拖不动,而弹窗顶边只在窗口高度
+// 1/10 处,豁免带会把「框外上方」整段吞掉(2026-09-02 用户实测)。
+
+/// 本帧登记过「可点面板外关闭」弹窗的窗口,`overlay_layers` 消费即清
+#[derive(Default)]
+struct ClosableDialogs(HashSet<WindowId>);
+impl Global for ClosableDialogs {}
+
+/// 打开可点面板外关闭的普通弹窗(确认类用 gpui-component 的 `open_alert_dialog`);
+/// Wake 里不要再裸调 `window.open_dialog`
+pub fn open_closable_dialog<F>(window: &mut Window, cx: &mut App, build: F)
+where
+    F: Fn(Dialog, &mut Window, &mut App) -> Dialog + 'static,
+{
+    window.open_dialog(cx, move |dialog, window, cx| {
+        let id = window.window_handle().window_id();
+        cx.default_global::<ClosableDialogs>().0.insert(id);
+        build(dialog, window, cx)
+    });
+}
+
+/// 窗口根节点内容之后的三层 overlay:dialog、notification、点面板外关闭的 sentinel,
+/// 顺序即契约(sentinel 必须在 dialog 层之后,才能盖在它的 occlude 层上面)
+pub fn overlay_layers(window: &mut Window, cx: &mut App) -> Vec<AnyElement> {
+    let dialogs = Root::render_dialog_layer(window, cx).map(IntoElement::into_any_element);
+    let notifications =
+        Root::render_notification_layer(window, cx).map(IntoElement::into_any_element);
+    let id = window.window_handle().window_id();
+    let sentinel = cx
+        .default_global::<ClosableDialogs>()
+        .0
+        .remove(&id)
+        .then(|| {
+            div()
+                .absolute()
+                .inset_0()
+                .on_any_mouse_down(|event, window, cx| {
+                    if event.button != MouseButton::Left {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    window.close_dialog(cx);
+                })
+                .into_any_element()
+        });
+    [dialogs, notifications, sentinel]
+        .into_iter()
+        .flatten()
+        .collect()
+}

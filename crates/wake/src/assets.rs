@@ -87,7 +87,7 @@ icons!(
     "terminal",
     "message-square",
     "layers",
-    "x",
+    "close",
     "git-branch",
     "refresh-cw",
     "inbox",

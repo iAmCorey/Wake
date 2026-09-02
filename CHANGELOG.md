@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- New: standard macOS Edit and Window menus, so Cut, Copy and Paste work inside system dialogs and Hide, Minimize, Zoom and Full Screen shortcuts do what they should
+- New: Window → Main Window brings the main window back when only Settings is left open
+- Fix: Close Window in the File menu and ⌘W reliably close the window
+- Fix: About, Settings and Check for Updates stay usable in the menu bar after the main window is closed
+- Fix: new sessions no longer go missing until the next refresh when macOS drops file change notifications
+- Fix: the Settings window now opens on the same screen as the Wake window instead of always on the primary display
+- New: Wake remembers which screen and position its window was on and opens there next time, including after a restart or a Dock reopen
+- Fix: your own messages in the conversation view no longer collapse into a one-character-wide column
+- Fix: the close button in the Add location and Edit location dialogs is visible again
+- Fix: clicking outside the Add location dialog or the search palette closes it again
+
 ## [0.3.5] — 2026-09-02
 
 - New: Open in now offers Claude Desktop for Claude Code sessions and Codex Desktop for Codex sessions, jumping straight to that session in the desktop app

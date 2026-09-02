@@ -16,6 +16,10 @@ pub struct ScanProgress {
 pub trait ScanEvents: Send + Sync {
     fn on_progress(&self, p: &ScanProgress);
     fn on_sessions_changed(&self);
+    /// 文件监听后端报告事件丢失(FSEvents 的 MustScanSubDirs / inotify 队列
+    /// 溢出):丢失期间的改动没人知道,需要一轮增量扫描兜底。默认忽略——
+    /// scan CLI 与测试不跑 watcher;GUI 接到后经现有扫描状态机排队
+    fn on_rescan_needed(&self) {}
 }
 
 pub struct NullEvents;
@@ -47,6 +51,14 @@ impl Drop for ScanFinale<'_> {
     }
 }
 
+/// 进程内同一时刻只跑一条扫描。GUI 里 Dock 重开主窗会新建 Workbench 并立刻
+/// 起一轮启动扫描,而上一个 Workbench 的扫描线程是脱管的(watcher 在 Drop 里
+/// join 了,扫描没有)——不排队就是两条扫描并发改写同一个库。门放在 run_scan
+/// 入口而不是某个调用方:任何起扫描的入口都自动被管住。锁是进程级而非 Store
+/// 级,要挡的正是两个 Store 实例开同一个库文件;扫描 panic 会毒化锁,
+/// into_inner 照常放行。排在后面的照常出终态事件,UI 只是多等一会儿
+static SCAN_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 全量/增量扫描。quickMeta 先行秒出列表,然后按 mtime 降序逐文件解析。
 /// 阻塞执行——调用方放后台线程。进度与终态一律经 `events` 上报,终态由
 /// `ScanFinale` 保证送达;返回的 `Result` 只用于调用方自己记日志。
@@ -56,6 +68,9 @@ pub fn run_scan(
     events: &dyn ScanEvents,
     full: bool,
 ) -> Result<()> {
+    let _gate = SCAN_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut fin = ScanFinale {
         events,
         progress: ScanProgress {
