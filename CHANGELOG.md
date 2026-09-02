@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.3.6] — 2026-09-02
+
 - New: standard macOS Edit and Window menus, so Cut, Copy and Paste work inside system dialogs and Hide, Minimize, Zoom and Full Screen shortcuts do what they should
 - New: Window → Main Window brings the main window back when only Settings is left open
 - Fix: Close Window in the File menu and ⌘W reliably close the window
