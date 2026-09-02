@@ -12,7 +12,7 @@ Rust + gpui 0.2 + gpui-component 0.5(用户既定,workspace: crates/wake-core �
 
 ## Users
 
-Corey 本人(独立开发者,主力工具 Claude Code 与 Codex,中文为主)。已开源(2026-08-18 v0.1.0 首发,当前 v0.3.4 2026-09-01,github.com/iAmCorey/Wake,MIT):面向同时使用多个 coding agent 的开发者。
+Corey 本人(独立开发者,主力工具 Claude Code 与 Codex,中文为主)。已开源(2026-08-18 v0.1.0 首发,当前 v0.3.6 2026-09-02,github.com/iAmCorey/Wake,MIT):面向同时使用多个 coding agent 的开发者。
 
 ## Product Purpose
 
@@ -28,7 +28,7 @@ Corey 本人(独立开发者,主力工具 Claude Code 与 Codex,中文为主)。
 
 ## Capabilities and Constraints
 
-已实现:十四家 adapter、FTS5 trigram 搜索(<3 码点 LIKE 降级)、**搜索跳转定位**(2026-08-18:⌘K 命中直达详情页对应消息并高亮,seq 契约保证)、详情页逐消息渲染(气泡/工具折叠簇/thinking/tree-sitter 高亮;2026-08-17 由整篇 markdown 方案升级)、恢复/收藏/置顶/导出/删除(废纸篓+墓碑)、文件监听增量、Insights 统计页(0.3.0:活跃热力图与 streak、时段/星期/月份分布、Agents·Projects·Models 三榜单按 sessions/tokens/prompts 切换;口径=主线用户消息,规格见 DESIGN.md)、Updates 页与 macOS Wake 菜单手动检查 GitHub 最新正式版并打开 Release 页更新(不后台联网、不自动替换应用包)、测试套件(adapter 契约、DB 往返、scanner 回归 + CI 三平台 + pre-commit,合成 fixture)、三端桌面(macOS 主平台;Linux/Windows experimental,终端恢复/废纸篓·回收站/剪贴板按平台原生实现,发版 CI 自动出六产物)。
+已实现:十四家 adapter、FTS5 trigram 搜索(<3 码点 LIKE 降级)、**搜索跳转定位**(2026-08-18:⌘K 命中直达详情页对应消息并高亮,seq 契约保证)、详情页逐消息渲染(气泡/工具折叠簇/thinking/tree-sitter 高亮;2026-08-17 由整篇 markdown 方案升级)、恢复/收藏/置顶/导出/删除(废纸篓+墓碑)、文件监听增量、Insights 统计页(0.3.0:活跃热力图与 streak、时段/星期/月份分布、Agents·Projects·Models 三榜单按 sessions/tokens/prompts 切换;口径=主线用户消息,规格见 DESIGN.md)、Updates 页与 macOS Wake 菜单手动检查 GitHub 最新正式版并打开 Release 页更新(不后台联网、不自动替换应用包)、测试套件(adapter 契约、DB 往返、scanner 回归 + CI 三平台 + pre-commit,合成 fixture)、三端桌面(macOS 主平台;Linux/Windows experimental,终端恢复/废纸篓·回收站/剪贴板按平台原生实现,发版 CI 自动出六产物)、窗口记忆(0.3.6:记住所在屏幕/屏内位置/最大化/全屏,重启与 Dock 重开都回到原处,Settings 开在主窗所在屏)、完整 macOS 菜单栏(0.3.6:标准 Edit/Window 菜单、⌘W、Window → Main Window,主窗关闭后 About/Settings/Updates 仍可用)、导出 Markdown 与保存图片走系统「另存为」并记住上次目录(0.3.6,issue #25)。
 约束:对 agent 数据目录只读;绝不写 Codex 的 SQLite;不读凭证;GPUI 无 SF Symbols(图标用 lucide SVG 自备)。
 已支持十四家 agent:Claude Code、Codex、Qoder CLI(`~/.qoder/projects` JSONL,active-leaf 分支恢复、tool result 回挂、`QODER_CONFIG_DIR`)、Copilot CLI、Cursor(CLI transcripts)、OpenCode(含 OpenCode 2 next,stable 的 `opencode.db` 与 next 的 `opencode-next.db` 同时扫描;逐会话兼容 `message+part`、真实 `session+session_message` 及早期 `session_v2` schema;preview 会话标 opencode2 徽章)、Kiro、Gemini CLI(2026-08-17 P1 五家落地)+ Pi、Oh My Pi、Grok Build、Kimi Code、Antigravity CLI(2026-08-19 对齐 kooky 内置 roster;Antigravity 正文加密仅元数据卡片)+ DeepSeek Harness(dsh,2026-08-20,zstd 事件日志透明解压;格式由源码推断,当天用户跑出真实会话完成首验)。做不了的:Cursor IDE chats 正文加密,Windsurf/Trae 加密,Amp/Factory(Droid)/Warp 云端无本地数据,Reasonix 本机零会话格式未实测。
 

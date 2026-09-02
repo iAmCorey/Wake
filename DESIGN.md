@@ -184,7 +184,7 @@ macOS 不设置横跨三栏的自定义 header。主窗口透明标题栏高 44p
 
 - 用户使用靠右的低饱和引用块。
 - 助手正文平铺，不在每条回复前重复 Agent 名称。
-- 消息图片以 104px、10px 圆角的缩略图随正文排列；点击后使用全窗口暗色遮罩按原始宽高比预览，绝不放大超过源尺寸。预览胶囊集中显示格式、尺寸、文件大小以及复制/保存动作；无法直接预览的格式保留原始字节，并提供下载入口。
+- 消息图片以 104px、10px 圆角的缩略图随正文排列；点击后使用全窗口暗色遮罩按原始宽高比预览，绝不放大超过源尺寸。预览胶囊集中显示格式、尺寸、文件大小以及复制/保存动作；无法直接预览的格式保留原始字节，并提供 Save image（系统「另存为」，与导出共用上次目录）入口。
 - 仅有 thinking、没有正文或工具的中间事件不进入阅读视图；正式回复所带的 thinking 显示为折叠面板，收起是一行摘要，展开后显示完整原文。Thinking 与工具调用分别保存展开状态，禁止互相连带。
 - Codex review 的 `ExitedReviewMode.review_output` 转为可读 Markdown，展示结论、说明、finding、代码位置与置信度；注入式 `<user_action>` 只作缺少结构化事件时的文本兜底，不显示 XML 外壳，也不与结构化结果重复。
 - 工具调用合并为低强调折叠卡：单条收起时显示工具名与参数摘要，多条显示数量与名称序列，失败数常驻。摘要格数从当前阅读区像素宽反算，再用 `unicode-width` 截断。展开后显示可用的完整 Input，以及成功和失败 Output；失败结果使用 danger 色。Input/Output 面板最多展示前 600 个字符，但始终提供复制完整原文的操作，不引入嵌套滚动区。
@@ -240,7 +240,7 @@ emoji 不再承担界面或正文结构图标职责。
 - 先改标准结构和控件，再添加自定义材质面。
 - 颜色只改 `theme.rs`；图标必须登记到 `assets.rs`，路径包含后缀(`.svg` / `.png`,漏后缀 = 静默空白)。
 - 所有交互元素先设置 `.id()` 再绑定点击或滚动行为。
-- `Root::render_dialog_layer` 与 `Root::render_notification_layer` 必须保留。
+- 每个窗口根节点在内容之后必须挂 `ui::overlay_layers(window, cx)`(封装 `Root::render_dialog_layer`、`Root::render_notification_layer` 与"点面板外关闭"的 sentinel,顺序即契约);普通弹窗经 `ui::open_closable_dialog` 打开,确认类用 `open_alert_dialog`。
 - 对原始 Agent 数据目录继续只读；任何视觉改造不得破坏刷新、搜索跳转、恢复或删除语义。
 - 术语统一:用户可见文案一律说 **Refresh** 与 **Session**,不出现 scan / rescan / rebuild / index(这些只保留在数据层内部命名中)。
 

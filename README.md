@@ -17,9 +17,9 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and a dozen othe
 
 - **Unified browsing** — all sessions grouped by agent / project, with Grok Build subagents nested under their parent and live file watching for incremental updates
 - **Full-text search** (⌘K / Ctrl+K) — SQLite FTS5 trigram index; handles CJK text and code substrings (like `useEffect(`) equally well; jumps straight to the matched message in the transcript
-- **Transcript view** — per-message rendering with user/assistant bubbles, collapsible tool-call clusters, thinking summaries, tree-sitter code highlighting (30+ languages)
+- **Transcript view** — per-message rendering with user/assistant bubbles, inline images (copy or save them), collapsible tool-call clusters, thinking summaries, tree-sitter code highlighting (30+ languages)
 - **One-click resume** — reopens the session in your terminal (Terminal/iTerm on macOS; native terminal hosts on Linux and Windows) at the original project directory (`claude --resume`, `codex resume`, …)
-- **Manage** — star/pin (stored in Wake's own DB, original files untouched), export to Markdown, delete (system Trash + tombstone so deleted sessions stay deleted)
+- **Manage** — star/pin (stored in Wake's own DB, original files untouched), export to Markdown or save an inline image through the system Save dialog (Wake remembers the last folder), delete (system Trash + tombstone so deleted sessions stay deleted)
 - **Insights** — a stats page for your whole library: GitHub-style activity heatmap with streaks, hour / weekday / month breakdowns, and Agents / Projects / Models leaderboards switchable between sessions, tokens, and prompts
 
 ![Full-text search across every agent's sessions](imgs/screenshot-2.webp)
@@ -53,7 +53,7 @@ Cursor IDE chats, Windsurf, and Trae encrypt their local data; Amp, Factory (Dro
 - Agent data directories are opened **read-only**; Wake never writes to another tool's files or databases
 - Credential files (`auth.json` and friends) are never read
 - No background network requests — the only network action is a user-initiated update check against Wake's public GitHub Release metadata; session data is never sent
-- Wake's own index lives at `~/Library/Application Support/wake/wake.db` (Linux: `~/.local/share/wake`, Windows: `%LOCALAPPDATA%\wake`) and can be rebuilt from scratch at any time (stars/pins live in a separate table and survive rebuilds)
+- Wake's own index lives at `~/Library/Application Support/wake/wake.db` (Linux: `~/.local/share/wake`, Windows: `%LOCALAPPDATA%\wake`) and can be rebuilt from scratch at any time (stars/pins live in a separate table and survive rebuilds). Two small preference files (`appearance`, `window.json`) sit beside it on macOS, under `~/.config/wake` on Linux and `%APPDATA%\wake` on Windows; Open In and export-folder choices live in the index database's `prefs` table
 
 ## Performance
 
