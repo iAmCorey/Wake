@@ -28,12 +28,8 @@ impl AppearancePreference {
     }
 }
 
-fn appearance_path() -> std::path::PathBuf {
-    crate::prefs::path("appearance")
-}
-
 pub fn appearance_preference() -> AppearancePreference {
-    std::fs::read_to_string(appearance_path())
+    crate::prefs::read("appearance")
         .map(|value| AppearancePreference::parse(&value))
         .unwrap_or(AppearancePreference::System)
 }
@@ -53,7 +49,7 @@ pub fn set_appearance(
     window: Option<&mut Window>,
     cx: &mut App,
 ) -> std::io::Result<()> {
-    crate::prefs::write(&appearance_path(), preference.as_str().as_bytes())?;
+    crate::prefs::write("appearance", preference.as_str().as_bytes())?;
     apply_appearance(preference, window, cx);
     Ok(())
 }

@@ -3955,7 +3955,7 @@ impl Workbench {
 
     // ---------- 操作 ----------
 
-    /// 后台任务完成 → 推通知的通用桥(do_resume/do_export 共用)
+    /// 后台任务完成 → 推通知的通用桥(do_resume 在用)
     fn notify_when_done<T: Send + 'static>(
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -4077,33 +4077,28 @@ impl Workbench {
         }
     }
 
+    /// 导出:系统"另存为"选路径(issue #25,此前直接写进 Downloads),后台解析写文件;
+    /// 取消无事发生
     fn do_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(detail) = &self.detail else { return };
         let meta = detail.meta.clone();
         let adapters = self.adapters.clone();
-        let task = cx.background_spawn(async move {
-            let adapter = adapter_for(&adapters, meta.agent, &meta.file_path)?;
-            // from_meta 对虚拟路径(SQLite 型)自动回退,导出不再依赖真实文件存在
-            let r = SessionFileRef::from_meta(&meta);
-            let t = adapter.parse_transcript(&r).ok()?;
-            let sidechains: Vec<(SidechainInfo, Vec<TranscriptMessage>)> = t
-                .sidechains
-                .iter()
-                .map(|sc| {
-                    let msgs = adapter.load_sidechain(&r, &sc.id).unwrap_or_default();
-                    (sc.clone(), msgs)
-                })
-                .collect();
-            let md = exporter::to_markdown(&t.meta, &t.mainline, &sidechains);
-            let name = exporter::default_file_name(&meta, "md");
-            let path = dirs::download_dir()?.join(name);
-            std::fs::write(&path, md).ok()?;
-            Some(path)
-        });
-        Self::notify_when_done(window, cx, task, |path| match path {
-            Some(p) => Notification::success(format!("Exported to {}", p.display())),
-            None => Notification::error("Export failed"),
-        });
+        let name = exporter::default_file_name(&meta, "md");
+        save_as(
+            window,
+            cx,
+            self.store.clone(),
+            name,
+            "Exported",
+            "Export failed",
+            move |path| {
+                let adapter = adapter_for(&adapters, meta.agent, &meta.file_path)
+                    .ok_or_else(|| anyhow::anyhow!("no adapter for this session"))?;
+                std::fs::write(path, exporter::render_markdown(adapter, &meta)?)?;
+                Ok(())
+            },
+        )
+        .detach();
     }
 
     /// 执行删除:文件进废纸篓 + 自库 tombstone。trash_paths 可能长阻塞
@@ -4881,18 +4876,31 @@ impl Workbench {
         });
         let save_action = cx.listener(move |this, _, window, cx| {
             cx.stop_propagation();
-            match save_image_to_downloads(&save_image.bytes, save_image.format.mime_type()) {
-                Some(path) => {
-                    this.show_image_action_success(target, ImageAction::Save, cx);
-                    window.push_notification(
-                        Notification::success(format!("Saved to {}", path.display())),
-                        cx,
-                    );
+            let image = save_image.clone();
+            // 文件名用 gpui 解码时算好的内容 id,同一张图两次保存得到同一个名字
+            let name = format!(
+                "wake-image-{:016x}.{}",
+                image.id,
+                image_extension(image.format.mime_type())
+            );
+            let saved = save_as(
+                window,
+                cx,
+                this.store.clone(),
+                name,
+                "Saved",
+                "Couldn't save the image",
+                move |path| Ok(std::fs::write(path, &image.bytes)?),
+            );
+            cx.spawn_in(window, async move |this, cx| {
+                if saved.await.is_some() {
+                    this.update_in(cx, |this, _, cx| {
+                        this.show_image_action_success(target, ImageAction::Save, cx)
+                    })
+                    .ok();
                 }
-                None => {
-                    window.push_notification(Notification::error("Couldn't save the image"), cx)
-                }
-            }
+            })
+            .detach();
         });
 
         div()
@@ -5002,7 +5010,7 @@ impl Workbench {
                                         gpui_component::tooltip::Tooltip::new(if save_succeeded {
                                             "Saved"
                                         } else {
-                                            "Save to Downloads"
+                                            "Save image"
                                         })
                                         .build(window, cx)
                                     })
@@ -6807,43 +6815,60 @@ fn image_extension(media_type: &str) -> &'static str {
     }
 }
 
-fn save_image_to_downloads(bytes: &[u8], media_type: &str) -> Option<PathBuf> {
-    use std::hash::{Hash as _, Hasher as _};
-    use std::io::Write as _;
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    let stem = format!("wake-image-{:016x}", hasher.finish());
-    let extension = image_extension(media_type);
-    let downloads = dirs::download_dir()?;
-    for suffix in 0..1000 {
-        let name = if suffix == 0 {
-            format!("{stem}.{extension}")
-        } else {
-            format!("{stem}-{suffix}.{extension}")
+/// 「另存为」一站式:系统对话框(起点是上次导出/保存的目录)→ 后台 `write` → 记住目录
+/// → 通知。取消返回 None;写失败弹错并返回 None;成功返回落盘路径。对话框本身开不了
+/// (Linux 缺 xdg-desktop-portal 时 gpui 报 Err)退回旧行为:直接写到起始目录、照常通知,
+/// 不让按钮变成静默 no-op
+fn save_as(
+    window: &mut Window,
+    cx: &mut App,
+    store: Arc<Store>,
+    suggested_name: String,
+    done: &'static str,
+    failed: &'static str,
+    write: impl FnOnce(&std::path::Path) -> anyhow::Result<()> + Send + 'static,
+) -> Task<Option<PathBuf>> {
+    let start = export_dir(&store);
+    let rx = cx.prompt_for_new_path(&start, Some(&suggested_name));
+    window.spawn(cx, async move |cx| {
+        let path = match rx.await {
+            Ok(Ok(Some(path))) => path,
+            Ok(Err(_)) => start.join(&suggested_name),
+            _ => return None,
         };
-        let path = downloads.join(name);
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                if file.write_all(bytes).is_ok() {
-                    return Some(path);
+        let written = cx
+            .background_spawn({
+                let path = path.clone();
+                async move { write(&path) }
+            })
+            .await;
+        cx.update(|window, cx| {
+            let note = match &written {
+                Ok(()) => {
+                    if let Some(dir) = path.parent() {
+                        let _ = store.pref_set("export_dir", &dir.to_string_lossy());
+                    }
+                    Notification::success(format!("{done} to {}", path.display()))
                 }
-                let _ = std::fs::remove_file(&path);
-                return None;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if std::fs::read(&path).ok().as_deref() == Some(bytes) {
-                    return Some(path);
-                }
-            }
-            Err(_) => return None,
-        }
-    }
-    None
+                Err(e) => Notification::error(format!("{failed}: {e}")),
+            };
+            window.push_notification(note, cx);
+        })
+        .ok();
+        written.ok().map(|()| path)
+    })
+}
+
+/// 「另存为」的起始目录:上次导出/保存的目录(Store 的 prefs KV,与 Open In 记忆同表;
+/// 目录还在)> Downloads > home
+fn export_dir(store: &Store) -> PathBuf {
+    store
+        .pref_get("export_dir")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_dir())
+        .or_else(dirs::download_dir)
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn zoom_fit(dims: Option<(u32, u32)>, viewport: Size<Pixels>) -> Size<Pixels> {
@@ -7005,6 +7030,7 @@ fn image_strip(
             } => {
                 let media_type_for_save = media_type.to_string();
                 let bytes_for_save = bytes.clone();
+                let entity = workbench.clone();
                 v_flex()
                     .id(SharedString::from(format!(
                         "unsupported-message-image:{message_index}:{image_index}"
@@ -7026,16 +7052,23 @@ fn image_strip(
                             .build(window, cx)
                     })
                     .on_click(move |_, window, cx| {
-                        match save_image_to_downloads(&bytes_for_save, &media_type_for_save) {
-                            Some(path) => window.push_notification(
-                                Notification::success(format!("Saved to {}", path.display())),
-                                cx,
-                            ),
-                            None => window.push_notification(
-                                Notification::error("Couldn't save the image"),
-                                cx,
-                            ),
-                        }
+                        let bytes = bytes_for_save.clone();
+                        let name = format!(
+                            "wake-image-{:016x}.{}",
+                            gpui::hash(&*bytes),
+                            image_extension(&media_type_for_save)
+                        );
+                        let store = entity.read(cx).store.clone();
+                        save_as(
+                            window,
+                            cx,
+                            store,
+                            name,
+                            "Saved",
+                            "Couldn't save the image",
+                            move |path| Ok(std::fs::write(path, &*bytes)?),
+                        )
+                        .detach();
                     })
                     .child("Preview unavailable")
                     .child(div().max_w_full().truncate().child(media_type.clone()))

@@ -185,13 +185,12 @@ pub fn flush(cx: &mut App) {
 }
 
 fn load() -> Option<SavedWindow> {
-    let text = std::fs::read_to_string(prefs::path("window.json")).ok()?;
-    serde_json::from_str(&text).ok()
+    serde_json::from_str(&prefs::read("window.json")?).ok()
 }
 
 fn save(saved: &SavedWindow) -> std::io::Result<()> {
     let bytes = serde_json::to_vec_pretty(saved).map_err(std::io::Error::other)?;
-    prefs::write(&prefs::path("window.json"), &bytes)
+    prefs::write("window.json", &bytes)
 }
 
 /// 把窗口夹进屏幕范围:尺寸先按屏幕封顶,再把原点限制在屏内

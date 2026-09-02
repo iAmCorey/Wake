@@ -12,6 +12,7 @@
 - Fix: your own messages in the conversation view no longer collapse into a one-character-wide column
 - Fix: the close button in the Add location and Edit location dialogs is visible again
 - Fix: clicking outside the Add location dialog or the search palette closes it again
+- New: Export as Markdown and Save image ask where to save the file and start from the folder you used last time
 
 ## [0.3.5] — 2026-09-02
 

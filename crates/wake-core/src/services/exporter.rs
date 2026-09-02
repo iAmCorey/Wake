@@ -1,3 +1,4 @@
+use crate::adapters::AgentAdapter;
 use crate::models::*;
 use chrono::{Local, TimeZone};
 
@@ -184,4 +185,20 @@ pub fn default_file_name(meta: &SessionMeta, ext: &str) -> String {
         if title.is_empty() { "session" } else { &title },
         date
     )
+}
+
+/// 一站式导出:按 meta 解析主线与全部子会话,渲染成 Markdown。错误原样上抛,UI 拼进通知
+pub fn render_markdown(adapter: &dyn AgentAdapter, meta: &SessionMeta) -> anyhow::Result<String> {
+    // from_meta 对虚拟路径(SQLite 型)自动回退,导出不依赖真实文件存在
+    let r = SessionFileRef::from_meta(meta);
+    let t = adapter.parse_transcript(&r)?;
+    let sidechains: Vec<(SidechainInfo, Vec<TranscriptMessage>)> = t
+        .sidechains
+        .iter()
+        .map(|sc| {
+            let msgs = adapter.load_sidechain(&r, &sc.id).unwrap_or_default();
+            (sc.clone(), msgs)
+        })
+        .collect();
+    Ok(to_markdown(&t.meta, &t.mainline, &sidechains))
 }
