@@ -1662,6 +1662,7 @@ fn seq_contract_holds_for_all_agents() {
 
 fn mk_meta(agent: AgentId, key: &str, id: &str, title: &str, source: Option<&str>) -> SessionMeta {
     SessionMeta {
+        host: String::new(),
         key: key.to_string(),
         id: id.to_string(),
         agent,
@@ -2169,4 +2170,264 @@ fn adapter_ix_for_routes_to_owning_instance() {
         Some(1),
         "无根命中回退该 agent 首个实例"
     );
+}
+
+// ---------------------------------------------------------------- 远程装饰器
+
+/// 远程实例 = 各家 with_custom_root(缓存内挂载点) 包 RemoteAdapter。
+/// 断言两件事:①挂载点整形在**目录不存在时**也不越界——十四家的数据根
+/// 必须全部落在缓存树内,落回真实 home 就会把本地会话错标成远程;
+/// ②key/host 在解析出口统一改写,native id 保持纯净(resume 用)。
+#[test]
+fn remote_adapters_stay_inside_cache_and_rewrite_keys() {
+    let env = setup();
+
+    // ① 空缓存目录(尚未同步)——整形判据全走"不存在"分支。
+    // 模板由调用方传入(roster 唯一构造点的契约,生产侧同式)
+    let templates = wake_core::adapters::create_adapters();
+    let empty = tempfile::tempdir().unwrap();
+    let adapters =
+        wake_core::adapters::remote::create_remote_adapters(&templates, "devbox", empty.path());
+    assert_eq!(adapters.len(), 14, "每家一个远程实例");
+    let cache_prefix = empty.path().to_string_lossy().to_string();
+    for adapter in &adapters {
+        assert_eq!(adapter.host(), "devbox");
+        for root in adapter.data_roots() {
+            let root = root.to_string_lossy();
+            assert!(
+                root.starts_with(&cache_prefix),
+                "{:?} 的远程数据根越界: {root}",
+                adapter.agent()
+            );
+        }
+        // 缺根必须降级为空枚举,不能 Err 截断整轮扫描(契约同默认实例)
+        assert!(adapter
+            .list_session_files()
+            .expect("degrade to empty")
+            .is_empty());
+    }
+
+    // ② 假 HOME 本身就是"远程 home 镜像"的形状——直接当缓存用,
+    // SQLite 型/侧档型(copilot/opencode/antigravity/kimi/dsh)都有数据
+    let home = env._home.path();
+    let adapters = wake_core::adapters::remote::create_remote_adapters(&templates, "devbox", home);
+    let by_agent = |a: AgentId| {
+        adapters
+            .iter()
+            .find(|x| x.agent() == a)
+            .expect("remote instance")
+    };
+
+    let copilot = by_agent(AgentId::Copilot);
+    let refs = copilot.list_session_files().expect("copilot remote list");
+    assert_eq!(refs.len(), 2);
+    let r = refs.iter().find(|r| r.native_id == "cop-0001").unwrap();
+    let parsed = copilot.parse_session(r).expect("copilot remote parse");
+    assert_eq!(parsed.meta.key, "copilot:devbox:cop-0001");
+    assert_eq!(parsed.meta.host, "devbox");
+    assert_eq!(parsed.meta.id, "cop-0001", "native id 不得带 host 段");
+
+    // dsh 的 file_ref 要读首行(zstd 首帧)——装饰器转发后行为不变,
+    // 解析出口再打 host 标
+    let dsh = by_agent(AgentId::Dsh);
+    let r = dsh
+        .file_ref(&env.dsh_log)
+        .expect("dsh remote file_ref reads header");
+    let parsed = dsh.parse_session(&r).expect("dsh remote parse");
+    assert_eq!(parsed.meta.key, "dsh:devbox:dsh-e2e4-0001");
+    assert_eq!(parsed.meta.host, "devbox");
+
+    // transcript 出口同样改写(详情页/导出消费)
+    let t = dsh.parse_transcript(&r).expect("dsh remote transcript");
+    assert_eq!(t.meta.key, "dsh:devbox:dsh-e2e4-0001");
+
+    // opencode 双库经装饰器仍然齐全
+    let oc = by_agent(AgentId::Opencode);
+    let refs = oc.list_session_files().expect("opencode remote list");
+    assert!(refs.iter().any(|r| r.native_id == "oc-0001"));
+    assert!(refs.iter().any(|r| r.native_id == "ocnext-0001"));
+
+    // quick_meta 出口(整 map)也要改写——write_meta_only 是第三条写库路径,
+    // 漏改写会让远程行先以本地 key 落库、随后被全量解析改名成双行
+    if let Some(map) = oc.quick_meta(&refs) {
+        for meta in map.values() {
+            assert_eq!(meta.host, "devbox");
+            assert!(
+                meta.key.starts_with("opencode:devbox:"),
+                "quick 出口未改写: {}",
+                meta.key
+            );
+        }
+    }
+}
+
+/// merge_quick_meta 在两个已改写的 meta 间搬运字段:codex 的 key 覆写
+/// (state thread-id)经装饰器转发后仍保持远程格式。
+#[test]
+fn remote_codex_merge_keeps_host_key() {
+    setup();
+    let cache = tempfile::tempdir().unwrap();
+    let templates = wake_core::adapters::create_adapters();
+    let adapters =
+        wake_core::adapters::remote::create_remote_adapters(&templates, "devbox", cache.path());
+    let codex = adapters
+        .iter()
+        .find(|a| a.agent() == AgentId::Codex)
+        .unwrap();
+
+    // 复用 quickMeta 节的 mk_meta,只补远程差异字段
+    let mk = |key: &str, id: &str, title: &str| {
+        let mut meta = mk_meta(AgentId::Codex, key, id, title, None);
+        meta.host = "devbox".to_string();
+        meta
+    };
+    // parse 侧 key 是文件 native id,quick 侧是 state thread-id(可以不同);
+    // 两者都已在各自出口带上 host 段
+    let parsed = mk("codex:devbox:file-uuid", "file-uuid", "derived title");
+    let quick = mk("codex:devbox:thread-1", "thread-1", "user renamed");
+    let merged = codex.merge_quick_meta(parsed, &quick);
+    assert_eq!(
+        merged.key, "codex:devbox:thread-1",
+        "state key 优先且保持远程格式"
+    );
+    assert_eq!(merged.id, "thread-1");
+    assert_eq!(merged.title, "user renamed");
+    assert_eq!(merged.host, "devbox");
+}
+
+/// state DB 的 rollout_path 是**写库那台机器**上的绝对路径(rsync 原样
+/// 镜像过来)——远程缓存下必须按 sessions 尾段重映射到实例目录再匹配,
+/// 否则远程 Codex 的手工标题与 thread-key 全部静默丢失(2026-09-02 review)
+#[test]
+fn remote_codex_state_matches_despite_foreign_rollout_path() {
+    setup();
+    let cache = tempfile::tempdir().unwrap();
+    let codex_home = cache.path().join(".codex");
+    let day = codex_home.join("sessions/2026/09/01");
+    fs::create_dir_all(&day).unwrap();
+    let uuid = "0199535a-40b3-7ac2-921b-d5de1a3a8e15";
+    let file = format!("rollout-2026-09-01T10-00-00-{uuid}.jsonl");
+    fs::write(
+        day.join(&file),
+        b"{\"timestamp\":\"t\",\"type\":\"x\",\"payload\":{}}\n",
+    )
+    .unwrap();
+
+    let conn = rusqlite::Connection::open(codex_home.join("state_5.sqlite")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE threads (id TEXT, rollout_path TEXT, cwd TEXT, title TEXT, name TEXT,
+         tokens_used INTEGER, archived INTEGER, git_branch TEXT, model TEXT, source TEXT,
+         created_at_ms INTEGER, updated_at_ms INTEGER);",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO threads VALUES (?1, ?2, '/work/proj', 'raw', 'Renamed by user',
+         5, 0, NULL, NULL, NULL, 1, 2)",
+        rusqlite::params![
+            uuid,
+            format!("/home/alice/.codex/sessions/2026/09/01/{file}")
+        ],
+    )
+    .unwrap();
+    drop(conn);
+
+    let templates = wake_core::adapters::create_adapters();
+    let adapters =
+        wake_core::adapters::remote::create_remote_adapters(&templates, "devbox", cache.path());
+    let codex = adapters
+        .iter()
+        .find(|a| a.agent() == AgentId::Codex)
+        .unwrap();
+    let refs = codex.list_session_files().unwrap();
+    assert_eq!(refs.len(), 1);
+    let quick = codex.quick_meta(&refs).expect("state db readable");
+    let meta = quick
+        .get(&refs[0].file_path)
+        .expect("state row must match via remapped rollout_path");
+    assert_eq!(meta.title, "Renamed by user", "手工标题不得因路径失配丢失");
+    assert_eq!(meta.key, format!("codex:devbox:{uuid}"));
+    assert_eq!(meta.host, "devbox");
+}
+
+/// roster 组装的真实路径(GUI 与 scan CLI 都走 create_adapter_roster_for):
+/// 启用的 host 每家追加一个远程实例到 active 尾部,禁用即整组回落;
+/// 远程实例不进 locations 面板快照。
+#[test]
+fn roster_appends_remote_instances_for_enabled_hosts() {
+    setup();
+    let dir = tempfile::tempdir().unwrap();
+    let store = wake_core::db::Store::open(&dir.path().join("roster.db")).unwrap();
+
+    let baseline = wake_core::adapters::create_adapter_roster_for(&store);
+    let local_n = baseline.active.len();
+    let locations_n = baseline.locations.len();
+
+    store.add_remote_host("devbox").unwrap();
+    let roster = wake_core::adapters::create_adapter_roster_for(&store);
+    assert_eq!(roster.active.len(), local_n + 14, "每家一个远程实例");
+    assert_eq!(
+        roster.locations.len(),
+        locations_n,
+        "远程实例不进 Session locations 面板"
+    );
+    let remote_count = roster
+        .active
+        .iter()
+        .filter(|a| a.host() == "devbox")
+        .count();
+    assert_eq!(remote_count, 14);
+    // 顺序契约:默认实例在前,"按 agent 找第一个"的兜底不受远程影响
+    assert!(roster.active[..local_n].iter().all(|a| a.host().is_empty()));
+
+    store.set_remote_host_enabled("devbox", false).unwrap();
+    let roster = wake_core::adapters::create_adapter_roster_for(&store);
+    assert_eq!(roster.active.len(), local_n, "禁用的 host 整组移出 roster");
+}
+
+/// REMOTE_LAYOUTS 的 mount 契约:整形在"缓存尚未同步"(目录不存在)与
+/// "缓存已落盘"两种状态下必须给出**同一组数据根**——远程实例是构造时刻
+/// 快照,roster 不随同步重建;若某家 mount 选在会随目录出现而改判的层级,
+/// 首次同步前后就会各指一棵树,先构造的实例读不到后落盘的数据。
+#[test]
+fn remote_mount_shaping_is_stable_across_sync_states() {
+    setup();
+    let templates = wake_core::adapters::create_adapters();
+
+    let empty = tempfile::tempdir().unwrap();
+    let synced = tempfile::tempdir().unwrap();
+    // 按白名单把"已同步"缓存的目录结构造出来(目录源建树,文件源 touch)
+    for layout in wake_core::remote::REMOTE_LAYOUTS {
+        for path in layout.sync_paths {
+            let dest = synced.path().join(path);
+            if std::path::Path::new(path).extension().is_some() {
+                fs::create_dir_all(dest.parent().unwrap()).unwrap();
+                fs::write(dest, b"").unwrap();
+            } else {
+                fs::create_dir_all(dest).unwrap();
+            }
+        }
+    }
+
+    let before = wake_core::adapters::remote::create_remote_adapters(&templates, "h", empty.path());
+    let after = wake_core::adapters::remote::create_remote_adapters(&templates, "h", synced.path());
+    for (a, b) in before.iter().zip(&after) {
+        assert_eq!(a.agent(), b.agent());
+        let rel = |adapter: &Box<dyn AgentAdapter>, root: &std::path::Path| -> Vec<PathBuf> {
+            adapter
+                .data_roots()
+                .iter()
+                .map(|p| {
+                    p.strip_prefix(root)
+                        .expect("root inside cache")
+                        .to_path_buf()
+                })
+                .collect()
+        };
+        assert_eq!(
+            rel(a, empty.path()),
+            rel(b, synced.path()),
+            "{:?} 的 mount 整形随缓存落盘而漂移",
+            a.agent()
+        );
+    }
 }

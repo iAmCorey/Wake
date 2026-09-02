@@ -3,8 +3,8 @@
 //! 策略(dir/file 分发、路径过滤、线程化)在 mod.rs,这里只做动作本身。
 
 use super::{
-    cli_not_found_error, percent_encode, pipe_to, posix_quote, resolve_cli, resume_args,
-    session_bin, spawn_and_reap, ResumeOutcome,
+    cli_not_found_error, percent_encode, pipe_to, resolve_cli, resume_args, session_bin, sh_quote,
+    spawn_and_reap, ResumeOutcome,
 };
 use crate::models::{AgentId, SessionMeta};
 use std::collections::HashMap;
@@ -382,23 +382,19 @@ fn launch_kooky_cli(meta: &SessionMeta) -> ResumeOutcome {
     let Some(exe) = resolve_cli(bin) else {
         return fail(String::new(), cli_not_found_error(meta.agent, bin));
     };
-    let cmd = std::iter::once(exe.as_str())
-        .chain(args.iter().map(|s| s.as_str()))
-        .map(posix_quote)
-        .collect::<Vec<_>>()
-        .join(" ");
+    let cmd = super::sh_command_line(exe.as_str(), &args, None);
     let shown = format!(
         "kooky-cli open --cwd {} -e {}",
-        posix_quote(&meta.project_path),
-        posix_quote(&cmd)
+        sh_quote(&meta.project_path),
+        sh_quote(&cmd)
     );
     // 手动兜底的是能直接粘进任何终端跑的那条(kooky 的 --cwd 得自己 cd 回来)
     let cwd_ok = !meta.project_path.is_empty() && Path::new(&meta.project_path).is_dir();
-    let manual = if cwd_ok {
-        format!("cd {} && {cmd}", posix_quote(&meta.project_path))
-    } else {
-        cmd.clone()
-    };
+    let manual = super::sh_command_line(
+        exe.as_str(),
+        &args,
+        cwd_ok.then_some(meta.project_path.as_str()),
+    );
     let bail = |reason: String| {
         fail(
             shown.clone(),
@@ -671,6 +667,7 @@ mod tests {
         let meta = crate::models::SessionMeta {
             key: "claude-code:not-a-uuid".into(),
             id: "not-a-uuid".into(),
+            host: String::new(),
             agent: crate::models::AgentId::ClaudeCode,
             title: String::new(),
             project_path: String::new(),

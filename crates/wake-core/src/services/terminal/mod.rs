@@ -4,7 +4,7 @@
 //! 导出同形接口(TerminalApp 变体集合各异,UI 只遍历不点名)。
 //!
 //! POSIX 双端(macOS/Linux)的共享层在 posix.rs(login shell 探测、
-//! posix_quote 拼装);Windows 的这些前提全不成立(无 login shell、引号
+//! sh_quote 拼装);Windows 的这些前提全不成立(无 login shell、引号
 //! 不是 POSIX 规则、命令方言按终端宿主分 cmd/PowerShell 两派),故
 //! probe_clis / compose_command / launch_shell 三个接缝按平台各取一份,
 //! 策略流程本身不分叉。
@@ -33,9 +33,6 @@ mod posix;
 use posix::{compose_command, probe_clis};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) use posix::{percent_encode, pipe_to};
-// posix_quote 只有 macos.rs 消费(kooky CLI 的命令拼装),Linux 上中转会空挂
-#[cfg(target_os = "macos")]
-pub(crate) use posix::posix_quote;
 
 #[cfg(target_os = "windows")]
 mod windows;
@@ -166,6 +163,115 @@ fn resume_args(agent: AgentId, id: &str) -> Option<(Vec<String>, bool)> {
         // 决定),会话在 UI 里即点即续。官方发布 tui bundle 后切回定点 resume
         AgentId::Dsh => Some((vec!["@deepseek-ai/dsh".into(), "web".into()], true)),
         _ => None,
+    }
+}
+
+/// POSIX 单引号 quote 的唯一实现,不设平台 cfg:本地侧 posix.rs/macos.rs
+/// 拼终端命令用它,远程侧 ssh_resume_command 拼**发给远端 shell** 的命令也
+/// 用它(远端恒 POSIX,与本地平台无关,Windows 构建同样编译)。安全字符集
+/// 含 `@` 只为 `user@host` 免引号展示——加引号同样合法,纯观感。
+pub(crate) fn sh_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-./:=@".contains(c))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// `cd <cwd> && <bin> <args…>` 全 quote 的一条 POSIX 命令行——本地终端启动
+/// (posix::compose_command)、kooky CLI 管道、远程 ssh 内层命令共用的唯一
+/// 拼装点。与 sh_quote 同理不设 cfg。
+pub(crate) fn sh_command_line(bin: &str, args: &[String], cwd: Option<&str>) -> String {
+    let core = std::iter::once(bin)
+        .chain(args.iter().map(|s| s.as_str()))
+        .map(sh_quote)
+        .collect::<Vec<_>>()
+        .join(" ");
+    match cwd {
+        Some(dir) => format!("cd {} && {core}", sh_quote(dir)),
+        None => core,
+    }
+}
+
+/// 远程会话的 resume 命令(阶段 1 只复制到剪贴板,不代起终端):
+/// `ssh -t <host> 'cd <远程cwd> && <agent CLI> <resume args>'`。
+/// CLI 用**裸名**交远端 PATH 解析——本地 resolve_cli 的绝对路径对远端无意义,
+/// 远端没装该 CLI 时由远端 shell 报 command not found(本地无从探测)。
+/// 内层永远是 POSIX 方言;外层整条给用户贴进本地终端(POSIX/PowerShell 的
+/// 单引号语义都兼容,cmd.exe 不支持)。
+pub fn ssh_resume_command(meta: &SessionMeta) -> Option<String> {
+    if meta.host.is_empty() {
+        return None;
+    }
+    let (args, _requires_cwd) = resume_args(meta.agent, &meta.id)?;
+    let bin = session_bin(meta)?;
+    // cwd 是远程路径,本地 is_dir 判据无意义:非空就 cd,空则落 ssh 默认 home
+    let cwd = (!meta.project_path.is_empty()).then_some(meta.project_path.as_str());
+    let inner = sh_command_line(bin, &args, cwd);
+    Some(format!(
+        "ssh -t {} {}",
+        sh_quote(&meta.host),
+        sh_quote(&inner)
+    ))
+}
+
+/// 一个会话的可用恢复目标。"这个会话能怎么恢复"的知识只在这一层:本地是
+/// 按 agent 过滤的终端/深链 app,远程(阶段 1)只有复制 ssh 命令一项——
+/// 阶段 2 加一键 ssh 直开时在 resume_targets 里多返回一项,UI 零改动。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeTarget {
+    App(TerminalApp),
+    /// 把 `ssh -t <host> '…resume…'` 整条放进剪贴板(远端 CLI 是否存在
+    /// 本地无从探测,贴到终端后由远端 shell 裁决)
+    CopySshCommand,
+}
+
+pub fn resume_targets(meta: &SessionMeta) -> Vec<ResumeTarget> {
+    if meta.host.is_empty() {
+        terminals_for(meta.agent)
+            .into_iter()
+            .map(ResumeTarget::App)
+            .collect()
+    } else {
+        vec![ResumeTarget::CopySshCommand]
+    }
+}
+
+pub fn resume_target(meta: &SessionMeta, target: ResumeTarget) -> ResumeOutcome {
+    match target {
+        ResumeTarget::App(term) => resume_session_in(meta, term),
+        ResumeTarget::CopySshCommand => copy_ssh_outcome(meta),
+    }
+}
+
+fn copy_ssh_outcome(meta: &SessionMeta) -> ResumeOutcome {
+    let Some(command) = ssh_resume_command(meta) else {
+        // 十四家全有 resume_args,此臂当前不可达;护栏语义同 resume_session_in
+        return ResumeOutcome {
+            ok: false,
+            command: String::new(),
+            error: Some(format!(
+                "Resume isn't supported for {} yet",
+                meta.agent.display_name()
+            )),
+        };
+    };
+    if platform::copy_to_clipboard(&command) {
+        ResumeOutcome {
+            ok: true,
+            command,
+            error: None,
+        }
+    } else {
+        ResumeOutcome {
+            ok: false,
+            command: command.clone(),
+            error: Some(format!(
+                "Couldn't write to clipboard. Run manually: {command}"
+            )),
+        }
     }
 }
 
@@ -360,5 +466,61 @@ mod tests {
             cli_not_found_error(AgentId::Opencode, "opencode2"),
             "Agent CLI `opencode2` for OpenCode was not found on PATH — is it installed and available to Wake?"
         );
+    }
+
+    fn remote_meta(agent: AgentId, id: &str, cwd: &str) -> crate::models::SessionMeta {
+        crate::models::SessionMeta {
+            key: format!("{}:devbox:{id}", agent.as_str()),
+            id: id.into(),
+            host: "devbox".into(),
+            agent,
+            title: String::new(),
+            project_path: cwd.into(),
+            project_name: String::new(),
+            file_path: String::new(),
+            created_at: 0,
+            updated_at: 0,
+            message_count: 0,
+            size_bytes: 0,
+            git_branch: None,
+            model: None,
+            tokens_used: None,
+            archived: false,
+            source: None,
+            favorite: false,
+            pinned: false,
+        }
+    }
+
+    #[test]
+    fn ssh_resume_command_quotes_nested_layers() {
+        let meta = remote_meta(AgentId::Codex, "abc-123", "/home/dev/my project");
+        let cmd = super::ssh_resume_command(&meta).unwrap();
+        // 内层 cd 的单引号在外层被 '\'' 转义,整条可直接贴 POSIX shell
+        assert_eq!(
+            cmd,
+            r"ssh -t devbox 'cd '\''/home/dev/my project'\'' && codex resume abc-123'"
+        );
+    }
+
+    #[test]
+    fn ssh_resume_command_variants() {
+        // 无 cwd:落 ssh 默认 home,不产出空 cd
+        let meta = remote_meta(AgentId::ClaudeCode, "u-1", "");
+        assert_eq!(
+            super::ssh_resume_command(&meta).unwrap(),
+            "ssh -t devbox 'claude --resume u-1'"
+        );
+        // opencode2 会话换二进制,与本地 resume 同一分流
+        let mut meta = remote_meta(AgentId::Opencode, "s1", "/w");
+        meta.source = Some("opencode2".into());
+        assert_eq!(
+            super::ssh_resume_command(&meta).unwrap(),
+            "ssh -t devbox 'cd /w && opencode2 --session s1'"
+        );
+        // 本地会话不产出 ssh 命令
+        let mut meta = remote_meta(AgentId::Codex, "abc", "/w");
+        meta.host = String::new();
+        assert!(super::ssh_resume_command(&meta).is_none());
     }
 }

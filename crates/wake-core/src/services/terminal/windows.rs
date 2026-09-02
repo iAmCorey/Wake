@@ -1,7 +1,7 @@
 //! Windows 平台原语:终端宿主(Windows Terminal / PowerShell / cmd /
 //! Alacritty / WezTerm)、回收站(trash crate → IFileOperation)、资源管理器
 //! 进入/选中、Win32 剪贴板与 MessageBox。接口与 macos.rs / linux.rs 同形,
-//! 策略在 mod.rs;mod.rs 的三个 POSIX 前提(login shell、posix_quote、单一
+//! 策略在 mod.rs;mod.rs 的三个 POSIX 前提(login shell、sh_quote 方言、单一
 //! shell 方言)在本端由 probe_clis / compose_command / launch_shell 接管。
 //!
 //! 方言分两派:cmd 宿主用 cmd 方言内联注入(raw_arg 直达,无 argv 引号层);

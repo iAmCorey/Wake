@@ -61,3 +61,17 @@ pub fn strip_virtual_path(path: &str) -> &str {
         path.rsplit_once('#').map(|(db, _)| db).unwrap_or(path)
     }
 }
+
+/// 行缓存的失效戳:主库与 `-wal` 的 mtime 取新者。WAL 库的新写入往往只落
+/// `-wal`(写端尚未 checkpoint;远程 rsync 镜像更是永远没人 checkpoint 主库),
+/// 只看主库 mtime 会让缓存抱着旧快照不放、新会话直到重启才出现。
+pub fn db_cache_stamp(db: &Path) -> i64 {
+    let stamp = |p: &Path| {
+        std::fs::metadata(p)
+            .map(|m| super::parse_utils::mtime_ms(&m))
+            .unwrap_or(0)
+    };
+    let mut wal = db.as_os_str().to_owned();
+    wal.push("-wal");
+    stamp(db).max(stamp(Path::new(&wal)))
+}

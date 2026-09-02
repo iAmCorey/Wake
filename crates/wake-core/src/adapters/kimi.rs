@@ -180,6 +180,7 @@ fn build_meta(
         .unwrap_or_else(|| UNTITLED.to_string());
     SessionMeta {
         key: format!("kimi:{}", r.native_id),
+        host: String::new(),
         id: r.native_id.clone(),
         agent: AgentId::Kimi,
         title,

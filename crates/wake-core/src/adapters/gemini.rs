@@ -157,6 +157,7 @@ fn build_meta(r: &SessionFileRef, p: &GeminiParse, cwd: &str) -> SessionMeta {
     let title = title_from_messages(&p.messages).unwrap_or_else(|| UNTITLED.to_string());
     SessionMeta {
         key: format!("gemini:{native}"),
+        host: String::new(),
         id: native,
         agent: AgentId::Gemini,
         title,

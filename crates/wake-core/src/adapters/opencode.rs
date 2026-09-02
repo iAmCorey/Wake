@@ -219,9 +219,7 @@ impl OpencodeAdapter {
     }
 
     fn rows(db: &OcDb) -> Option<Vec<OcRow>> {
-        let mtime = std::fs::metadata(&db.path)
-            .map(|m| mtime_ms(&m))
-            .unwrap_or(0);
+        let mtime = super::sqlite_ro::db_cache_stamp(&db.path);
         db.rows_cache.get_or_try_build(mtime, || {
             let ro = Self::open(&db.path)?;
             query_rows(&ro.conn, None).ok()
@@ -246,6 +244,7 @@ impl OpencodeAdapter {
             .and_then(|m| m.get("id").and_then(|v| v.as_str()).map(String::from));
         SessionMeta {
             key: format!("opencode:{}", row.id),
+            host: String::new(),
             id: row.id.clone(),
             agent: AgentId::Opencode,
             title: if title.is_empty() {

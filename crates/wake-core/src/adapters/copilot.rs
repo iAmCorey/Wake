@@ -30,9 +30,7 @@ impl CopilotAdapter {
     }
 
     fn db_mtime(&self) -> i64 {
-        std::fs::metadata(&self.db)
-            .map(|m| mtime_ms(&m))
-            .unwrap_or(0)
+        super::sqlite_ro::db_cache_stamp(&self.db)
     }
 
     fn rows(&self) -> Option<Vec<CopilotRow>> {
@@ -80,6 +78,7 @@ impl CopilotAdapter {
         let title = clean_title_candidate(&row.summary);
         SessionMeta {
             key: format!("copilot:{}", row.id),
+            host: String::new(),
             id: row.id.clone(),
             agent: AgentId::Copilot,
             title: if title.is_empty() {

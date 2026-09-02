@@ -465,6 +465,7 @@ fn seed(agent: AgentId, root: &str, path: &str, native_id: &str, mtime: i64) -> 
             size: 1,
         },
         meta: SessionMeta {
+            host: String::new(),
             key: format!("{}:{native_id}", agent.as_str()),
             id: native_id.into(),
             agent,
@@ -498,6 +499,7 @@ fn tombstoned_session_does_not_resurrect_on_rescan() {
     let dir = tempfile::tempdir().unwrap();
     let store = temp_store(dir.path());
     let meta = SessionMeta {
+        host: String::new(),
         key: "codex:ghost".into(),
         id: "ghost".into(),
         agent: AgentId::Codex,
@@ -864,4 +866,64 @@ fn survivor_promotion_matches_content_keys() {
         store.get_session("gemini:LOGICAL").unwrap().is_some(),
         "内容 key 的幸存副本未被上位"
     );
+}
+
+/// 跨 host 去重分域(不变量 8⑦ 的远程扩展):同 native_id 的会话在本地与
+/// 远程各有一份(rsync 过项目后各自续跑是真实场景),按 mtime 的全局去重
+/// 会吞掉一台的——去重域必须含实例 host,两行(本地 key / host key)并存。
+#[test]
+fn local_and_remote_copies_of_same_native_id_both_survive() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+
+    // 同一份 Claude fixture 摆进"本地自定义根"与"远程缓存"两棵树
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/claude/projects/-Users-tester-Github-wakefx/11111111-aaaa-bbbb-cccc-000000000001.jsonl");
+    let native = "11111111-aaaa-bbbb-cccc-000000000001";
+    let local_root = dir.path().join("local-claude");
+    let remote_cache = dir.path().join("remotes/devbox");
+    for tree in [&local_root, &remote_cache] {
+        let proj = if tree == &local_root {
+            tree.join("projects/-Users-tester-Github-wakefx")
+        } else {
+            tree.join(".claude/projects/-Users-tester-Github-wakefx")
+        };
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::copy(&fixture, proj.join(format!("{native}.jsonl"))).unwrap();
+    }
+
+    let base = wake_core::adapters::create_adapters();
+    let claude_template = base
+        .iter()
+        .find(|a| a.agent() == AgentId::ClaudeCode)
+        .unwrap();
+    let local = claude_template.with_custom_root(local_root);
+    let adapters: Vec<Box<dyn AgentAdapter>> = vec![local]
+        .into_iter()
+        .chain(wake_core::adapters::remote::create_remote_adapters(
+            &base,
+            "devbox",
+            &remote_cache,
+        ))
+        .collect();
+
+    let events = Recorder::new();
+    run_scan(&adapters, &store, &events, true).expect("scan ok");
+
+    let local_key = format!("claude-code:{native}");
+    let remote_key = format!("claude-code:devbox:{native}");
+    let local_row = store.get_session(&local_key).unwrap();
+    let remote_row = store.get_session(&remote_key).unwrap();
+    assert!(local_row.is_some(), "本地副本被跨 host 去重吞掉");
+    assert!(remote_row.is_some(), "远程副本被跨 host 去重吞掉");
+    let remote_row = remote_row.unwrap();
+    assert_eq!(remote_row.host, "devbox");
+    assert_eq!(remote_row.id, native, "native id 保持纯净");
+    assert!(local_row.unwrap().host.is_empty());
+
+    // 再跑一轮(模拟下一次刷新):两行都不摇摆、不互删
+    let events = Recorder::new();
+    run_scan(&adapters, &store, &events, false).expect("rescan ok");
+    assert!(store.get_session(&local_key).unwrap().is_some());
+    assert!(store.get_session(&remote_key).unwrap().is_some());
 }

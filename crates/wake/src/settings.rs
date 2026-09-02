@@ -1,6 +1,7 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::switch::Switch;
 use gpui_component::{
@@ -46,6 +47,7 @@ fn format_storage_size(bytes: u64) -> String {
 pub(crate) enum SettingsPage {
     General,
     Locations,
+    Remotes,
     Data,
     Updates,
     About,
@@ -53,7 +55,8 @@ pub(crate) enum SettingsPage {
 
 /// Settings 内常规文字按钮共用一套尺寸和材质；避免页面各自混用
 /// outline / primary / 默认 ButtonGroup 后形成多套视觉语言。
-fn settings_button(button: Button, cx: &App) -> Button {
+/// pub(crate):详情页的单段 Open In 按钮(workbench)用同一配方。
+pub(crate) fn settings_button(button: Button, cx: &App) -> Button {
     let theme = cx.theme();
     button
         .custom(
@@ -92,7 +95,10 @@ pub(crate) struct SettingsView {
     workbench: Entity<Workbench>,
     appearance: AppearancePreference,
     show_unavailable: bool,
+    /// Remote hosts 页的 Add host 输入框(页面内嵌,回车/按钮提交)
+    host_input: Entity<InputState>,
     _workbench_observer: Option<Subscription>,
+    _host_input_subscription: Subscription,
 }
 
 impl SettingsView {
@@ -108,13 +114,36 @@ impl SettingsView {
         cx.on_next_frame(window, move |this, _, cx| {
             this._workbench_observer = Some(cx.observe(&observed, |_, _, cx| cx.notify()));
         });
+        let host_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("SSH alias from ~/.ssh/config, or user@host")
+        });
+        let host_input_subscription =
+            cx.subscribe_in(&host_input, window, |this, _, event, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.submit_add_host(window, cx);
+                }
+            });
         Self {
             focus_handle: cx.focus_handle(),
             workbench,
             appearance: theme::appearance_preference(),
             show_unavailable: false,
+            host_input,
             _workbench_observer: None,
+            _host_input_subscription: host_input_subscription,
         }
+    }
+
+    fn submit_add_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.host_input.read(cx).value().trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        self.workbench.update(cx, |workbench, cx| {
+            workbench.add_remote_host(&name, window, cx)
+        });
+        self.host_input
+            .update(cx, |state, cx| state.set_value("", window, cx));
     }
 
     fn render_nav_item(
@@ -193,6 +222,13 @@ impl SettingsView {
                         "Locations",
                         "icons/hard-drive.svg",
                         SettingsPage::Locations,
+                        cx,
+                    ))
+                    .child(self.render_nav_item(
+                        "settings-remotes-nav",
+                        "Remote hosts",
+                        "icons/server.svg",
+                        SettingsPage::Remotes,
                         cx,
                     ))
                     .child(self.render_nav_item(
@@ -991,6 +1027,207 @@ impl SettingsView {
                     }),
             )
     }
+
+    /// Settings → Remote hosts:SSH 会话聚合(阶段 1:只读镜像)。
+    /// 行结构仿 Locations:名称 + 状态行 + Switch + Remove。
+    fn render_remotes(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let rows = self.workbench.read(cx).remote_hosts_snapshot();
+        let syncing = self.workbench.read(cx).remote_sync_in_progress();
+        let sync_workbench = self.workbench.clone();
+        let has_hosts = !rows.is_empty();
+
+        let row_elements: Vec<AnyElement> = rows
+            .into_iter()
+            .enumerate()
+            .map(|(ix, row)| {
+                let toggle_workbench = self.workbench.clone();
+                let remove_workbench = self.workbench.clone();
+                let toggle_name = row.name.clone();
+                let remove_name = row.name.clone();
+                let row_fg = if row.enabled {
+                    theme.foreground
+                } else {
+                    theme.muted_foreground
+                };
+                h_flex()
+                    .id(SharedString::from(format!("remote-host-{ix}")))
+                    .w_full()
+                    .px(SPACE_MD)
+                    .py(SPACE_SM)
+                    .gap(SPACE_MD)
+                    .items_center()
+                    .rounded(theme.radius)
+                    .border_1()
+                    .border_color(theme.border)
+                    .child(
+                        icon("icons/server.svg")
+                            .with_size(px(15.))
+                            .flex_shrink_0()
+                            .text_color(row_fg),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(FONT_BODY)
+                                    .font_medium()
+                                    .text_color(row_fg)
+                                    .child(row.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(FONT_CAPTION)
+                                    .text_color(if row.failed {
+                                        theme.danger
+                                    } else {
+                                        theme.muted_foreground
+                                    })
+                                    .child(row.status.clone()),
+                            ),
+                    )
+                    .child(
+                        Switch::new(SharedString::from(format!("remote-host-toggle-{ix}")))
+                            .checked(row.enabled)
+                            .on_click(move |checked, window, cx| {
+                                let enabled = *checked;
+                                toggle_workbench.update(cx, |this, cx| {
+                                    this.set_remote_host_enabled(
+                                        toggle_name.as_ref(),
+                                        enabled,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("remote-host-remove-{ix}")))
+                            .ghost()
+                            .small()
+                            .rounded(RADIUS_BUTTON)
+                            .icon(icon("icons/trash-2.svg").with_size(px(14.)))
+                            .on_click(move |_, window, cx| {
+                                remove_workbench.update(cx, |this, cx| {
+                                    this.confirm_remove_remote_host(
+                                        remove_name.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .bg(theme.background)
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .px(SPACE_XXL)
+                    .pt(SETTINGS_PAGE_TOP)
+                    .pb(SPACE_XL)
+                    .gap(SPACE_LG)
+                    .items_start()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(5.))
+                            .child(
+                                div()
+                                    .text_size(FONT_TITLE)
+                                    .font_semibold()
+                                    .text_color(theme.foreground)
+                                    .child("Remote hosts"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(FONT_CAPTION)
+                                    .text_color(theme.muted_foreground)
+                                    .child(
+                                        "Mirror agent sessions from other machines over SSH. \
+                                         Read-only: nothing on the remote is ever written.",
+                                    ),
+                            ),
+                    )
+                    .when(has_hosts, |this| {
+                        this.child(
+                            settings_button(
+                                Button::new("settings-sync-remotes")
+                                    .icon(icon("icons/refresh-cw.svg").with_size(px(13.)))
+                                    .label(if syncing { "Syncing…" } else { "Sync now" }),
+                                cx,
+                            )
+                            .disabled(syncing)
+                            .on_click(move |_, _, cx| {
+                                sync_workbench
+                                    .update(cx, |this, cx| this.sync_all_remote_hosts(cx));
+                            }),
+                        )
+                    }),
+            )
+            .child(
+                v_flex()
+                    .id("settings-remote-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(SPACE_XXL)
+                    .pb(px(40.))
+                    .gap(SPACE_LG)
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap(SPACE_SM)
+                            .child(div().flex_1().min_w_0().child(Input::new(&self.host_input)))
+                            .child(
+                                settings_button(
+                                    Button::new("settings-add-remote-host")
+                                        .icon(icon("icons/plus.svg").with_size(px(13.)))
+                                        .label("Add host"),
+                                    cx,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.submit_add_host(window, cx);
+                                    },
+                                )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(FONT_CAPTION)
+                            .text_color(theme.muted_foreground)
+                            .child(
+                                "Needs non-interactive SSH (key in your agent) and rsync on both \
+                                 ends — connect once from a terminal first to trust the host key. \
+                                 Sessions sync on launch, refresh, and Sync now.",
+                            ),
+                    )
+                    .children(row_elements)
+                    .when(!has_hosts, |this| {
+                        this.child(
+                            div()
+                                .pt(SPACE_LG)
+                                .text_size(FONT_LABEL)
+                                .text_color(theme.muted_foreground)
+                                .child("No remote hosts yet."),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
 }
 
 impl Focusable for SettingsView {
@@ -1008,6 +1245,7 @@ impl Render for SettingsView {
         let content = match selected_page {
             SettingsPage::General => self.render_general(cx),
             SettingsPage::Locations => self.render_locations(cx).into_any_element(),
+            SettingsPage::Remotes => self.render_remotes(window, cx),
             SettingsPage::Data => self.render_data(cx),
             SettingsPage::Updates => self.render_updates(cx),
             SettingsPage::About => self.render_about(cx),

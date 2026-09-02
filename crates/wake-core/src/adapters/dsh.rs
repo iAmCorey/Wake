@@ -399,6 +399,7 @@ fn build_meta(r: &SessionFileRef, p: &DshParse) -> SessionMeta {
         .unwrap_or_else(|| UNTITLED.to_string());
     SessionMeta {
         key: format!("dsh:{native}"),
+        host: String::new(),
         id: native,
         agent: AgentId::Dsh,
         title,

@@ -267,6 +267,7 @@ fn build_meta(r: &SessionFileRef, p: &CursorParse) -> SessionMeta {
     let title = title_from_messages(&p.messages).unwrap_or_else(|| UNTITLED.to_string());
     SessionMeta {
         key: format!("cursor:{}", r.native_id),
+        host: String::new(),
         id: r.native_id.clone(),
         agent: AgentId::Cursor,
         title,

@@ -171,10 +171,17 @@ impl AgentId {
 /// 会话元数据 —— 列表页/索引库统一模型
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
-    /// 全局唯一键: `{agent}:{native_id}`
+    /// 全局唯一键: 本地 `{agent}:{native_id}`,远程 `{agent}:{host}:{native_id}`。
+    /// agent 恒为首段(scanner 的易主检测按 `split(':').next()` 取 agent);
+    /// host 段只由 adapters::remote 的装饰器在解析出口插入,adapter 本体
+    /// 永远生产本地格式
     pub key: String,
-    /// 原生会话 id(resume 用)
+    /// 原生会话 id(resume 用;不含 host 段)
     pub id: String,
+    /// 远程 host 名(Settings 里配置的 SSH 目标);空 = 本地会话。
+    /// 只由 RemoteAdapter 装饰器填充,各家 adapter 构造时一律留空
+    #[serde(default)]
+    pub host: String,
     pub agent: AgentId,
     pub title: String,
     pub project_path: String,
@@ -439,3 +446,70 @@ pub const MAX_TITLE: usize = 80;
 
 /// 无标题会话的占位标题(quickMeta 守卫与 adapters 共用,防半/全角漂移)
 pub const UNTITLED: &str = "Untitled";
+
+/// 会话 key 的唯一构造点:本地 `{agent}:{native_id}`,远程
+/// `{agent}:{host}:{native_id}`。scanner 的墓碑查询、watcher 的幸存者反查、
+/// 远程装饰器的 key 改写都走这里——"远程 key 长什么样"只此一处知识。
+/// (十四家 adapter 的本地两段构造保留各自 `format!`,它们从不涉及 host。)
+pub fn session_key(agent: AgentId, host: &str, native_id: &str) -> String {
+    if host.is_empty() {
+        format!("{}:{native_id}", agent.as_str())
+    } else {
+        format!("{}:{host}:{native_id}", agent.as_str())
+    }
+}
+
+/// session_key 的逆:key 属于该 (agent, host) 实例时返回 native_id,否则
+/// None。watcher 的幸存者反查用它按实例过滤,零分配。
+pub fn strip_key_prefix<'a>(key: &'a str, agent: AgentId, host: &str) -> Option<&'a str> {
+    let rest = key.strip_prefix(agent.as_str())?.strip_prefix(':')?;
+    if host.is_empty() {
+        // 本地两段 key;含 ':' 的余段是别的 host 的三段 key,不归本实例。
+        // (native_id 自身带 ':' 的 agent 当前不存在,UUID/时间戳系文件名)
+        (!rest.contains(':')).then_some(rest)
+    } else {
+        rest.strip_prefix(host)?.strip_prefix(':')
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_key_roundtrip() {
+        let local = session_key(AgentId::ClaudeCode, "", "u1");
+        assert_eq!(local, "claude-code:u1");
+        assert_eq!(
+            strip_key_prefix(&local, AgentId::ClaudeCode, ""),
+            Some("u1")
+        );
+
+        let remote = session_key(AgentId::ClaudeCode, "devbox", "u1");
+        assert_eq!(remote, "claude-code:devbox:u1");
+        assert_eq!(
+            strip_key_prefix(&remote, AgentId::ClaudeCode, "devbox"),
+            Some("u1")
+        );
+    }
+
+    #[test]
+    fn strip_key_prefix_rejects_wrong_instance() {
+        // 本地实例不认远程 key(余段带 host 冒号)
+        assert_eq!(
+            strip_key_prefix("claude-code:devbox:u1", AgentId::ClaudeCode, ""),
+            None
+        );
+        // 远程实例不认本地 key,也不认别家 host——含 host 是另一 host 前缀的
+        assert_eq!(
+            strip_key_prefix("claude-code:u1", AgentId::ClaudeCode, "devbox"),
+            None
+        );
+        assert_eq!(
+            strip_key_prefix("claude-code:devbox2:u1", AgentId::ClaudeCode, "devbox"),
+            None
+        );
+        // agent 段不匹配
+        assert_eq!(strip_key_prefix("codex:u1", AgentId::ClaudeCode, ""), None);
+    }
+}

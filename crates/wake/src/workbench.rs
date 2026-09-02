@@ -102,6 +102,8 @@ fn icon(path: &'static str) -> Icon {
 
 /// 起一条后台扫描线程。启动时的自动扫描(full=false)与用户主动重扫(full=true)
 /// 共用;返回的 Result 由 run_scan 的终态事件代为上报,这里只需丢弃。
+/// 远程同步不在这条线程上——它走 Workbench::spawn_remote_sync 的独立线程,
+/// 本地扫描不等网络(不可达 host 的 ConnectTimeout 不该拖住启动索引)。
 fn spawn_scan(
     adapters: SharedAdapters,
     store: Arc<Store>,
@@ -113,6 +115,27 @@ fn spawn_scan(
     });
 }
 
+/// 起远程同步线程(names 空则不起)。进行中状态由调用方记 `syncing_hosts`
+/// (存事实不存文案,展示句在 render 现算——不变量 6 的教训);线程收工经
+/// bg_tx 发 RemoteSyncDone,成败都在 remote_hosts 表里。
+fn spawn_remote_sync_thread(
+    store: &Arc<Store>,
+    bg_tx: futures::channel::mpsc::UnboundedSender<BgEvent>,
+    names: Vec<String>,
+) {
+    if names.is_empty() {
+        return;
+    }
+    let store = store.clone();
+    std::thread::spawn(move || {
+        wake_core::remote::sync_hosts(&store, &names);
+        // 同步期间被 Remove 的 host:rsync 取消不了,收工后按配置表把孤儿
+        // 缓存目录清掉(含它刚写回的),Remove 的"缓存已删"承诺自此闭合
+        wake_core::remote::purge_orphan_caches(&store);
+        let _ = bg_tx.unbounded_send(BgEvent::RemoteSyncDone);
+    });
+}
+
 // ---------------- 后台事件桥 ----------------
 
 enum BgEvent {
@@ -120,6 +143,8 @@ enum BgEvent {
     Changed,
     /// 监听后端丢过事件,需要一轮增量兜底
     RescanNeeded,
+    /// 远程 rsync 线程收工(成败都发;状态在 remote_hosts 表里)
+    RemoteSyncDone,
 }
 
 struct ChannelEvents(futures::channel::mpsc::UnboundedSender<BgEvent>);
@@ -723,6 +748,13 @@ impl ListDelegate for SessionsDelegate {
                                     theme.muted,
                                     theme.muted_foreground,
                                 ))
+                                .when(!s.host.is_empty(), |this| {
+                                    // 远程会话的 host 徽章:@ 前缀一眼与项目名区分
+                                    this.child(outline_badge(
+                                        format!("@{}", s.host),
+                                        theme.muted_foreground,
+                                    ))
+                                })
                                 .when(show_chevron, |this| {
                                     this.child(
                                         div()
@@ -916,6 +948,7 @@ mod session_group_tests {
         SessionMeta {
             key: key.to_string(),
             id: key.to_string(),
+            host: String::new(),
             agent: AgentId::Codex,
             title: key.to_string(),
             project_path: "/tmp/wake-test".to_string(),
@@ -1923,6 +1956,15 @@ pub struct Workbench {
     /// 新根不收录、被移根不出清,要等手动 ⌘R(2026-08-24 Codex review)。
     /// 终态事件到达后由 on_bg_event 消费,用新 roster 补一轮增量
     pending_rescan: bool,
+    /// rsync 线程正在同步的 host(空 = 空闲);与 scan 正交。侧栏文案与
+    /// Sync now 的 busy 态都从这个**事实**派生,render 现算文案——不变量 6
+    /// 的教训:别把展示句存成状态
+    syncing_hosts: Vec<String>,
+    /// 同步进行中又被请求的 host(如 rsync 未收工就 add host):收工后只补
+    /// 这几台(不升级成全量),不并发两组 rsync 打同一缓存树
+    pending_sync: Vec<String>,
+    /// 远程同步线程直发事件用(ChannelEvents 只覆盖 ScanEvents 两个方法)
+    bg_tx: futures::channel::mpsc::UnboundedSender<BgEvent>,
     /// Settings 是单例窗口；句柄不保活，关闭后下次点击会检测失败并重建。
     settings_window: Option<AnyWindowHandle>,
     settings_page: SettingsPage,
@@ -2123,6 +2165,16 @@ pub(crate) struct DataSettingsSnapshot {
     pub(crate) session_count: i64,
 }
 
+/// Settings → Remote hosts 的一行(库表 remote_hosts + 会话计数拼装)
+#[derive(Clone)]
+pub(crate) struct RemoteHostRow {
+    pub(crate) name: SharedString,
+    pub(crate) enabled: bool,
+    /// "12 sessions · synced 5 min ago" / "Never synced" / 错误摘要
+    pub(crate) status: SharedString,
+    pub(crate) failed: bool,
+}
+
 /// location 表单的语义目标。预设行的“编辑”落库为**压制默认 + 记自定义**；
 /// 真正的 Remove 只对自定义 location 出现，预设行由开关启停。
 #[derive(Clone)]
@@ -2183,10 +2235,13 @@ impl Workbench {
             InputState::new(window, cx).placeholder("Search everything \u{2014} prose or code")
         });
 
-        // 后台:全量扫描线程 + 文件监听
+        // 后台:全量扫描线程 + 文件监听 + 远程同步(彼此独立并行)
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<BgEvent>();
+        let bg_tx = tx.clone();
         let events: Arc<dyn ScanEvents> = Arc::new(ChannelEvents(tx));
         spawn_scan(adapters.clone(), store.clone(), events.clone(), false);
+        let syncing_hosts = store.enabled_remote_host_names();
+        spawn_remote_sync_thread(&store, bg_tx.clone(), syncing_hosts.clone());
         let watcher = start_watcher(adapters.clone(), store.clone(), events.clone());
         let scan_events = events.clone();
 
@@ -2240,6 +2295,9 @@ impl Workbench {
             },
             refreshing: false,
             pending_rescan: false,
+            syncing_hosts,
+            pending_sync: Vec::new(),
+            bg_tx,
             settings_window: None,
             settings_page: SettingsPage::General,
             update_status: UpdateStatus::Idle,
@@ -2468,6 +2526,7 @@ impl Workbench {
             self.scan_events.clone(),
             true,
         );
+        self.sync_all_remote_hosts(cx);
     }
 
     /// Settings/Locations 页的数据快照。路径与 active roster 来自同一次
@@ -2510,10 +2569,7 @@ impl Workbench {
                     display: tilde_path(&raw).into(),
                     raw: raw.clone().into(),
                     tally: if exists {
-                        match count {
-                            1 => "1 session".into(),
-                            n => format!("{n} sessions").into(),
-                        }
+                        session_tally(count).into()
                     } else {
                         "Folder not found".into()
                     },
@@ -2688,16 +2744,22 @@ impl Workbench {
     /// 新旧两份实例不共存(不变量 8 的运行时补充:"单实例"指任一时刻只有一份
     /// 在服务,换代必须整体换、所有消费方跟随新 Arc)
     fn rebuild_roster(&mut self, cx: &mut Context<Self>) {
-        // 先撤旧 watcher 并等它退出(SessionWatcher::Drop 内 join):旧线程持
-        // 旧 roster,不等收尾,已移除根的会话可能在补扫后被写回复活
         self.watcher = None;
         (self.adapters, self.data_locations) = Self::build_roster(&self.store);
+        self.remount_watcher();
+        cx.notify();
+    }
+
+    /// watcher 生命周期的唯一操作点(rebuild_roster 与 RemoteSyncDone 共用):
+    /// 先 drop 并等旧线程退出(SessionWatcher::Drop 内 join)——旧线程持旧
+    /// roster 在写库,不等收尾,已移除根的会话可能在补扫后被写回复活
+    fn remount_watcher(&mut self) {
+        self.watcher = None;
         self.watcher = start_watcher(
             self.adapters.clone(),
             self.store.clone(),
             self.scan_events.clone(),
         );
-        cx.notify();
     }
 
     /// location 表单(添加/编辑共用一套 UI,2026-08-24 定稿):agent 下拉 +
@@ -3210,7 +3272,7 @@ impl Workbench {
             FormTarget::Add => "Location added",
             FormTarget::Edit { .. } => "Location updated",
         };
-        self.apply_location_change(Ok(()), "", Notification::success(note), window, cx);
+        self.apply_roster_change(Ok(()), "", Notification::success(note), window, cx);
         false
     }
 
@@ -3226,7 +3288,7 @@ impl Workbench {
         let res = self
             .store
             .remove_custom_root(agent.as_str(), stored.as_ref());
-        self.apply_location_change(
+        self.apply_roster_change(
             res,
             "Remove failed",
             Notification::info("Location removed"),
@@ -3243,7 +3305,7 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         let res = self.store.clear_location_overrides();
-        self.apply_location_change(
+        self.apply_roster_change(
             res,
             "Restore failed",
             Notification::info("Locations restored to defaults"),
@@ -3287,7 +3349,9 @@ impl Workbench {
 
     /// location 变更的统一收尾(删/恢复/表单提交成功共用)。Settings 页
     /// 观察 Workbench 的 notify 并重读快照，不需要关闭/重开管理面板。
-    fn apply_location_change(
+    /// 配置写库后的统一收尾:失败弹错,成功走"roster 换代 + 补扫 + 提示"
+    /// ——location 增删改、开关与远程 host 开关同一条时序,别各自手写
+    fn apply_roster_change(
         &mut self,
         res: anyhow::Result<()>,
         err_prefix: &'static str,
@@ -3305,6 +3369,182 @@ impl Workbench {
                 window.push_notification(ok_note, cx);
             }
         }
+    }
+
+    // ---------- 远程 host(Settings → Remote hosts) ----------
+
+    /// Settings 的 Sync now 按钮 busy 态(rsync 线程运行中)
+    pub(crate) fn remote_sync_in_progress(&self) -> bool {
+        !self.syncing_hosts.is_empty()
+    }
+
+    pub(crate) fn remote_hosts_snapshot(&self) -> Vec<RemoteHostRow> {
+        let counts = self.store.host_counts().unwrap_or_default();
+        self.store
+            .list_remote_hosts()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|host| {
+                let tally = session_tally(counts.get(&host.name).copied().unwrap_or(0));
+                let (status, failed) = match (&host.last_sync_error, host.last_sync_at) {
+                    (Some(err), _) => (format!("Sync failed: {err}"), true),
+                    (None, Some(ts)) => (format!("{tally} · synced {}", smart_time(ts)), false),
+                    (None, None) => (format!("{tally} · never synced"), false),
+                };
+                RemoteHostRow {
+                    name: host.name.into(),
+                    enabled: host.enabled,
+                    status: status.into(),
+                    failed,
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn add_remote_host(
+        &mut self,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !wake_core::remote::valid_host_name(name) {
+            window.push_notification(
+                Notification::error(
+                    "Host must be an SSH alias or user@host (letters, digits, . _ - @)",
+                ),
+                cx,
+            );
+            return;
+        }
+        match self.store.add_remote_host(name) {
+            Err(e) => window.push_notification(
+                Notification::error(format!("Couldn't add remote host: {e}")),
+                cx,
+            ),
+            Ok(()) => {
+                self.rebuild_roster(cx);
+                // 只拉新加的这台(别把既有 host 的整棵树再协商一遍):
+                // BatchMode 的 rsync 失败会记进 last_sync_error,面板下一帧
+                // 就能给出"密钥不在 agent 里"这类反馈
+                self.spawn_remote_sync(vec![name.to_string()], cx);
+                window.push_notification(
+                    Notification::info(format!("Syncing sessions from {name}…")),
+                    cx,
+                );
+            }
+        }
+    }
+
+    pub(crate) fn set_remote_host_enabled(
+        &mut self,
+        name: &str,
+        enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // 与 location 停用同语义:禁用 → roster 移除实例 → 补扫把该 host
+        // 的行按"磁盘已删"出清;缓存保留,重新启用即收编回来
+        let res = self.store.set_remote_host_enabled(name, enabled);
+        let note = Notification::info(if enabled {
+            "Remote host enabled"
+        } else {
+            "Remote host disabled"
+        });
+        self.apply_roster_change(res, "Couldn't update remote host", note, window, cx);
+    }
+
+    /// Remove 按确认流程走:索引行与本地缓存一并清掉,远端文件不动。
+    pub(crate) fn confirm_remove_remote_host(
+        &mut self,
+        name: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entity = cx.entity();
+        window.open_alert_dialog(cx, move |dialog, _window, cx| {
+            let name = name.clone();
+            let entity = entity.clone();
+            let theme = cx.theme();
+            dialog
+                .title(
+                    div()
+                        .text_size(FONT_HEADING)
+                        .font_semibold()
+                        .child(format!("Remove {name}?")),
+                )
+                .width(px(440.))
+                .confirm()
+                .button_props(
+                    gpui_component::dialog::DialogButtonProps::default()
+                        .ok_text("Remove")
+                        .ok_variant(gpui_component::button::ButtonVariant::Danger),
+                )
+                .child(
+                    div()
+                        .text_size(FONT_BODY)
+                        .text_color(theme.foreground)
+                        .child(
+                            "Its sessions leave the index and the local cache is deleted. \
+                             Nothing on the remote host is touched.",
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.remove_remote_host(name.as_ref(), window, cx);
+                    });
+                    true
+                })
+        });
+    }
+
+    fn remove_remote_host(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(e) = self.store.remove_remote_host(name) {
+            window.push_notification(
+                Notification::error(format!("Couldn't remove remote host: {e}")),
+                cx,
+            );
+            return;
+        }
+        // 排队中的同步请求剔除该 host,别在删除后又把 transcripts 拉回来;
+        // 正在跑的 rsync 取消不了(阻塞在 Command::output),它写回的目录由
+        // RemoteSyncDone 的孤儿缓存清理兜底(那里按配置表裁决,幂等)
+        self.pending_sync.retain(|n| n != name);
+        // 先换代(旧 watcher drop 后不再监听该缓存),再删缓存目录,最后补扫
+        // 出清库内行——删目录放独立线程,大缓存树的删除不该冻住 UI
+        self.rebuild_roster(cx);
+        if let Some(db_dir) = self.store.db_dir() {
+            let cache = wake_core::remote::host_cache_dir(&db_dir, name);
+            std::thread::spawn(move || {
+                let _ = std::fs::remove_dir_all(cache);
+            });
+        }
+        self.kick_incremental_scan(cx);
+        window.push_notification(Notification::info("Remote host removed"), cx);
+    }
+
+    /// 起远程同步(add host / Sync now / ⌘R 共用)。rsync 在独立线程,
+    /// 与扫描并行;进行中再来请求则把这几台排队,收工后只补它们。
+    /// 完成经 RemoteSyncDone 事件收编缓存,扫描侧完全不感知。
+    pub(crate) fn spawn_remote_sync(&mut self, names: Vec<String>, cx: &mut Context<Self>) {
+        if names.is_empty() {
+            return;
+        }
+        if !self.syncing_hosts.is_empty() {
+            for n in names {
+                if !self.pending_sync.contains(&n) {
+                    self.pending_sync.push(n);
+                }
+            }
+            return;
+        }
+        spawn_remote_sync_thread(&self.store, self.bg_tx.clone(), names.clone());
+        self.syncing_hosts = names;
+        cx.notify();
+    }
+
+    pub(crate) fn sync_all_remote_hosts(&mut self, cx: &mut Context<Self>) {
+        let names = self.store.enabled_remote_host_names();
+        self.spawn_remote_sync(names, cx);
     }
 
     /// roster 换代后补一轮增量:新根收录、被移根出清。撞上进行中的扫描
@@ -3361,6 +3601,31 @@ impl Workbench {
                 // 撞上进行中的扫描就排队,由终态事件补扫(kick_incremental_scan
                 // 自带这条状态机);连续多条 rescan 也只会排一次
                 self.kick_incremental_scan(cx);
+                None
+            }
+            BgEvent::RemoteSyncDone => {
+                self.syncing_hosts.clear();
+                // 同步期间被排队的 host(如 add host)接着跑;与下面的收编
+                // 并行,互不等待
+                let queued = std::mem::take(&mut self.pending_sync);
+                self.spawn_remote_sync(queued, cx);
+                // 首次同步会创建 watcher 挂载时还不存在的缓存目录——磁盘上
+                // 出现了监听集(watcher 报的真实挂载根)之外的新根才重挂;
+                // 稳态下 rsync 落盘由现有监听收编,不白付 drop+join(watcher
+                // 正忙时是一整个去抖批次)的等待
+                let watched = self.watcher.as_ref().map(|w| w.watched_roots());
+                let grown = self
+                    .adapters
+                    .iter()
+                    .flat_map(|a| a.watch_paths())
+                    .any(|p| p.is_dir() && watched.is_none_or(|w| !w.contains(&p)));
+                if grown {
+                    self.remount_watcher();
+                }
+                // 补扫不能省:SQLite 型侧档(copilot/opencode/antigravity)
+                // watcher 只认 .jsonl,远程缓存里这些库的更新只有扫描能收
+                self.kick_incremental_scan(cx);
+                cx.notify();
                 None
             }
         }
@@ -4027,28 +4292,39 @@ impl Workbench {
         }
     }
 
-    /// per-agent 记忆任何点击都写(只影响本 agent,收敛到用户实际用的);
+    /// per-agent 记忆任何 App 点击都写(只影响本 agent,收敛到用户实际用的);
     /// 全局 last_terminal 只在 explicit(下拉显式选择)时写——左段点的可能
-    /// 是回退值,写进全局会让一个 dsh 会话把 Kooky 偏好冲成 Terminal
+    /// 是回退值,写进全局会让一个 dsh 会话把 Kooky 偏好冲成 Terminal。
+    /// 非 App 目标(Copy SSH command)不进记忆:远程/本地列表不相交,记了
+    /// 也没有可回放的场景。
     fn do_resume(
         &mut self,
-        term: terminal::TerminalApp,
+        target: terminal::ResumeTarget,
         explicit: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(detail) = &self.detail else { return };
-        self.preferred_terminal.insert(detail.meta.agent, term);
-        if explicit {
-            self.last_terminal = Some(term);
+        if let terminal::ResumeTarget::App(term) = target {
+            self.preferred_terminal.insert(detail.meta.agent, term);
+            if explicit {
+                self.last_terminal = Some(term);
+            }
+            self.save_open_in_prefs();
+            cx.notify(); // split 按钮左段立即切到本次选择
         }
-        self.save_open_in_prefs();
-        cx.notify(); // split 按钮左段立即切到本次选择
         let meta = detail.meta.clone();
-        let task = cx.background_spawn(async move { terminal::resume_session_in(&meta, term) });
-        Self::notify_when_done(window, cx, task, |outcome| {
+        let task = cx.background_spawn(async move { terminal::resume_target(&meta, target) });
+        Self::notify_when_done(window, cx, task, move |outcome| {
             if outcome.ok {
-                Notification::success(format!("Opened in terminal: {}", outcome.command))
+                Notification::success(match target {
+                    terminal::ResumeTarget::App(_) => {
+                        format!("Opened in terminal: {}", outcome.command)
+                    }
+                    terminal::ResumeTarget::CopySshCommand => {
+                        format!("SSH command copied: {}", outcome.command)
+                    }
+                })
             } else {
                 Notification::error(outcome.error.unwrap_or_else(|| "Resume failed".into()))
             }
@@ -4155,6 +4431,15 @@ impl Workbench {
 
     fn confirm_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(detail) = &self.detail else { return };
+        // 远程会话只读(菜单项已隐藏,这里兜住快捷键等其余入口):本地只有
+        // 缓存副本,trash 它下次同步就复活;动远端文件是阶段 3 的产品决定
+        if !detail.meta.host.is_empty() {
+            window.push_notification(
+                Notification::info("Remote sessions are read-only — files stay on the remote host"),
+                cx,
+            );
+            return;
+        }
         let meta = detail.meta.clone();
         let mut sessions = vec![meta.clone()];
         sessions.extend(self.store.all_descendants(&meta.key).unwrap_or_default());
@@ -4280,6 +4565,14 @@ impl Workbench {
                 0 => "Refreshing…".to_string(),
                 total => format!("Refreshing {}/{}", self.scan.done, total),
             })
+        } else if let [only] = self.syncing_hosts.as_slice() {
+            // rsync 与扫描并行;扫描先收工时这里接着展示同步状态
+            Some(format!("Syncing {only}…"))
+        } else if !self.syncing_hosts.is_empty() {
+            Some(format!(
+                "Syncing {} remote hosts…",
+                self.syncing_hosts.len()
+            ))
         } else {
             self.scan
                 .error
@@ -5606,6 +5899,9 @@ impl Workbench {
         let export_entity = cx.entity();
         let reveal_entity = export_entity.clone();
         let delete_entity = export_entity.clone();
+        // 远程会话只读:Delete 项整个不出现(阶段 1 不做远程删除——本地能
+        // trash 的只有缓存副本,下次 rsync 就复活,语义是骗人的)
+        let menu_is_remote = !meta.host.is_empty();
         let more_menu = Button::new("more-actions")
             .ghost()
             .rounded(RADIUS_BUTTON)
@@ -5645,22 +5941,23 @@ impl Workbench {
                                 }
                             }),
                     )
-                    .separator()
-                    .item(
-                        PopupMenuItem::element(|_, cx| {
-                            div().text_color(cx.theme().danger).child(MOVE_TO_TRASH)
-                        })
-                        .icon(
-                            icon("icons/trash-2.svg")
-                                .with_size(px(15.))
-                                .text_color(cx.theme().danger),
+                    .when(!menu_is_remote, |menu| {
+                        menu.separator().item(
+                            PopupMenuItem::element(|_, cx| {
+                                div().text_color(cx.theme().danger).child(MOVE_TO_TRASH)
+                            })
+                            .icon(
+                                icon("icons/trash-2.svg")
+                                    .with_size(px(15.))
+                                    .text_color(cx.theme().danger),
+                            )
+                            .on_click(move |_, window, cx| {
+                                delete_entity.update(cx, |this, cx| {
+                                    this.confirm_delete(window, cx);
+                                });
+                            }),
                         )
-                        .on_click(move |_, window, cx| {
-                            delete_entity.update(cx, |this, cx| {
-                                this.confirm_delete(window, cx);
-                            });
-                        }),
-                    )
+                    })
             })
             .anchor(Anchor::TopRight);
 
@@ -5761,7 +6058,37 @@ impl Workbench {
                                 h_flex()
                                     .flex_shrink_0()
                                     .gap(SPACE_XS)
-                                    .child({
+                                    .child(if let [single] =
+                                        terminal::resume_targets(&meta).as_slice()
+                                    {
+                                        // 单目标(阶段 1 的远程会话只有 Copy SSH command):
+                                        // 单段控件用现成 Button,无 chevron 无记忆(split
+                                        // 按钮手搓只因它要双段共壳)
+                                        let target = *single;
+                                        let (label, tip) = match target {
+                                            terminal::ResumeTarget::App(t) => (
+                                                format!("Open in {}", t.display_name()),
+                                                "Open this session".to_string(),
+                                            ),
+                                            terminal::ResumeTarget::CopySshCommand => (
+                                                "Copy SSH command".to_string(),
+                                                "Copy the SSH command that resumes this session on its host"
+                                                    .to_string(),
+                                            ),
+                                        };
+                                        crate::settings::settings_button(
+                                            Button::new("open-in-single"),
+                                            cx,
+                                        )
+                                            .h(px(28.))
+                                            .icon(icon("icons/terminal.svg").with_size(px(13.)))
+                                            .label(label)
+                                            .tooltip(tip)
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.do_resume(target, false, window, cx);
+                                            }))
+                                            .into_any_element()
+                                    } else {
                                         // Open In split 按钮(Codex/kooky 风):左段 = 上次
                                         // 目标的应用图标,点击直开;右段 chevron 展开列表。
                                         // 目标列表按 agent 过滤(Kooky 深链不认 dsh);
@@ -5815,7 +6142,12 @@ impl Workbench {
                                                     })
                                                     .on_click(cx.listener(move |this, _, window, cx| {
                                                         if let Some(term) = current {
-                                                            this.do_resume(term, false, window, cx);
+                                                            this.do_resume(
+                                                                terminal::ResumeTarget::App(term),
+                                                                false,
+                                                                window,
+                                                                cx,
+                                                            );
                                                         } else {
                                                             // 空列表在 macOS 不可能(Terminal.app 恒在),
                                                             // Windows/Linux 上 PATH 被启动器改写时会发生
@@ -5871,7 +6203,12 @@ impl Workbench {
                                                                 })
                                                                 .on_click(move |_, window, cx| {
                                                                     entity.update(cx, |this, cx| {
-                                                                        this.do_resume(term, true, window, cx);
+                                                                        this.do_resume(
+                                                                            terminal::ResumeTarget::App(term),
+                                                                            true,
+                                                                            window,
+                                                                            cx,
+                                                                        );
                                                                     });
                                                                 }),
                                                             );
@@ -5880,6 +6217,7 @@ impl Workbench {
                                                     })
                                                     .anchor(Anchor::TopRight),
                                             )
+                                            .into_any_element()
                                     })
                                     .child(tool_btn(
                                         "fav",
@@ -5971,6 +6309,12 @@ impl Workbench {
                                             this.child(outline_badge(source, color))
                                         },
                                     )
+                                    .when(!meta.host.is_empty(), |this| {
+                                        this.child(outline_badge(
+                                            format!("@{}", meta.host),
+                                            theme.muted_foreground,
+                                        ))
+                                    })
                                     .when(has_detail_facts, |this| {
                                         this.child(
                                             div()
@@ -7569,6 +7913,15 @@ fn custom_owner<'a>(
         .iter()
         .find(|(a, p)| *a == agent && path_owns(p.as_ref(), root))
         .map(|(_, p)| p)
+}
+
+/// "1 session / N sessions" 单复数文案(Locations 与 Remote hosts 两个
+/// 设置页共用,别让两处各自漂移)
+fn session_tally(n: i64) -> String {
+    match n {
+        1 => "1 session".to_string(),
+        n => format!("{n} sessions"),
+    }
 }
 
 fn badge(name: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> impl IntoElement {

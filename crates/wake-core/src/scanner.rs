@@ -135,10 +135,11 @@ fn run_scan_inner(
             .into_iter()
             // 墓碑双轨:物理路径之外还按逻辑会话(key)屏蔽——多 location 下
             // 删除只 trash 了胜者文件,别的 location 里的副本不得复活它
-            //(2026-08-24 Codex review P1)
+            //(2026-08-24 Codex review P1)。key 按实例 host 构造(远程三段)
+            // ——阶段 1 远程禁删故无远程墓碑,但格式先写对,放开时不欠债
             .filter(|r| {
                 !store.is_tombstoned(&r.file_path)
-                    && !store.is_key_tombstoned(&format!("{}:{}", r.agent.as_str(), r.native_id))
+                    && !store.is_key_tombstoned(&session_key(r.agent, adapter.host(), &r.native_id))
             })
             // 无任何根认领的引用(越界枚举或合成测试)保守放行给枚举者;
             // 过滤只裁决"确有更深的根拥有它"的情形
@@ -149,13 +150,16 @@ fn run_scan_inner(
     // 同家同 ID 去重:同一会话在默认根与自定义根各有一份副本时,两个文件会
     // 每轮轮流改写同一行(key 相同,file_path 摇摆)。候选按 (mtime 新者,
     // 平局路径字典序小者) 排序,首位入队,其余留作**解析失败的回退顺位**
-    // ——胜者副本截断/损坏时,不能让整个会话从索引消失(Codex review P2)
-    let mut candidates: std::collections::HashMap<(AgentId, String), Vec<(usize, SessionFileRef)>> =
+    // ——胜者副本截断/损坏时,不能让整个会话从索引消失(Codex review P2)。
+    // 去重域即 session_key(agent, 实例 host, native_id)——直接以它为键,
+    // "去重域与最终 key 的分段一致"就结构性成立:两台机器各自续跑过的
+    // 同 UUID 会话是两条独立会话,跨 host 按 mtime 互吞会让一台的凭空消失
+    let mut candidates: std::collections::HashMap<String, Vec<(usize, SessionFileRef)>> =
         std::collections::HashMap::new();
     for (ix, refs) in per_adapter.iter().enumerate() {
         for r in refs {
             candidates
-                .entry((r.agent, r.native_id.clone()))
+                .entry(session_key(r.agent, adapters[ix].host(), &r.native_id))
                 .or_default()
                 .push((ix, r.clone()));
         }
@@ -167,10 +171,10 @@ fn run_scan_inner(
                 .then_with(|| a.file_path.cmp(&b.file_path))
         });
     }
-    for refs in &mut per_adapter {
+    for (ix, refs) in per_adapter.iter_mut().enumerate() {
         refs.retain(|r| {
             candidates
-                .get(&(r.agent, r.native_id.clone()))
+                .get(&session_key(r.agent, adapters[ix].host(), &r.native_id))
                 .is_none_or(|v| v[0].1.file_path == r.file_path)
         });
     }
@@ -237,7 +241,7 @@ fn run_scan_inner(
                     .as_ref()
                     .and_then(|m| m.get(&r.file_path).cloned());
                 let fallbacks = candidates
-                    .get(&(r.agent, r.native_id.clone()))
+                    .get(&session_key(r.agent, adapter.host(), &r.native_id))
                     .filter(|v| v.len() > 1)
                     .map(|v| v[1..].to_vec())
                     .unwrap_or_default();
@@ -529,18 +533,20 @@ pub fn scan_files(
     }
     // 按**实例**分组,不是按 agent:自定义 location 让同 agent 有多实例,
     // 文件必须交给拥有其根的那个(gemini/kimi 的 cwd 反查、codex 的 state DB
-    // 都是实例相对侧档);quick_meta 是整库查询,每组只查一次,不能逐文件调
+    // 都是实例相对侧档);quick_meta 是整库查询,每组只查一次,不能逐文件调。
+    // 先路由再查 key 墓碑——墓碑 key 按归属实例的 host 构造(与全量扫描同式)
     let mut by_adapter: std::collections::HashMap<usize, Vec<SessionFileRef>> =
         std::collections::HashMap::new();
     for r in refs {
-        if store.is_tombstoned(&r.file_path)
-            || store.is_key_tombstoned(&format!("{}:{}", r.agent.as_str(), r.native_id))
-        {
+        if store.is_tombstoned(&r.file_path) {
             continue;
         }
         let Some(ix) = crate::adapters::adapter_ix_for(adapters, r.agent, &r.file_path) else {
             continue;
         };
+        if store.is_key_tombstoned(&session_key(r.agent, adapters[ix].host(), &r.native_id)) {
+            continue;
+        }
         by_adapter.entry(ix).or_default().push(r);
     }
 

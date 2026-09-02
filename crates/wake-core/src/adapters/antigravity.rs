@@ -30,9 +30,7 @@ impl AntigravityAdapter {
     }
 
     fn rows(&self) -> Option<Vec<AgRow>> {
-        let mtime = std::fs::metadata(&self.db)
-            .map(|m| mtime_ms(&m))
-            .unwrap_or(0);
+        let mtime = super::sqlite_ro::db_cache_stamp(&self.db);
         self.rows_cache.get_or_try_build(mtime, || {
             let ro = open_sqlite_ro(&self.db, "antigravity")?;
             let mut stmt = ro
@@ -74,6 +72,7 @@ impl AntigravityAdapter {
         };
         SessionMeta {
             key: format!("antigravity:{}", row.id),
+            host: String::new(),
             id: row.id.clone(),
             agent: AgentId::Antigravity,
             title,

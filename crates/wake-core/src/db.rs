@@ -11,6 +11,16 @@ pub type LocationOverrides = (
     Vec<(AgentId, std::path::PathBuf)>,
 );
 
+/// remote_hosts 表的一行(Settings → Remote hosts / roster 组装共用)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteHost {
+    pub name: String,
+    pub enabled: bool,
+    /// epoch ms;None = 从未成功同步过
+    pub last_sync_at: Option<i64>,
+    pub last_sync_error: Option<String>,
+}
+
 const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT);
 
@@ -33,7 +43,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   file_size      INTEGER DEFAULT 0,
   file_mtime     INTEGER DEFAULT 0,
   unknown_lines  INTEGER DEFAULT 0,
-  parent_key     TEXT NOT NULL DEFAULT ''
+  parent_key     TEXT NOT NULL DEFAULT '',
+  host           TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_agent   ON sessions(agent_id, updated_at DESC);
@@ -101,6 +112,14 @@ CREATE TABLE IF NOT EXISTS disabled_locations (
   disabled_at INTEGER,
   PRIMARY KEY (agent, path)
 );
+
+CREATE TABLE IF NOT EXISTS remote_hosts (
+  name            TEXT PRIMARY KEY,
+  enabled         INTEGER DEFAULT 1,
+  added_at        INTEGER,
+  last_sync_at    INTEGER,
+  last_sync_error TEXT
+);
 "#;
 
 fn open_conn(path: &Path) -> Result<Connection> {
@@ -139,6 +158,20 @@ fn open_conn(path: &Path) -> Result<Connection> {
     }
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_key)",
+        [],
+    )?;
+    // host 迁移(2026-09-01 远程会话加列;空串 = 本地)。老库首扫时既有行
+    // 全部落 '',与远程装饰器生产的非空 host 天然分域,无需回填
+    if !table_has_column(&conn, "sessions", "host")? {
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN host TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    // 部分索引须在 host 列就位后建(放 DDL 里对未迁移老库会 no such column):
+    // host_counts 的 GROUP BY 从全表扫降为远小于全表的索引扫
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_host ON sessions(host) WHERE host != ''",
         [],
     )?;
     Ok(conn)
@@ -626,6 +659,103 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    // ---------- 远程 host(Settings → Remote hosts,SSH 会话聚合) ----------
+
+    /// 与 location 配置同层级的用户数据:重扫不动,索引重建才丢。
+    /// name 即 ssh 目标(`~/.ssh/config` 的 Host 别名或 user@host),
+    /// 字符集校验在 add_remote_host 那道门
+    pub fn list_remote_hosts(&self) -> Result<Vec<RemoteHost>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT name, enabled, last_sync_at, last_sync_error
+             FROM remote_hosts ORDER BY added_at, name",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(RemoteHost {
+                name: r.get(0)?,
+                enabled: r.get::<_, i64>(1)? != 0,
+                last_sync_at: r.get(2)?,
+                last_sync_error: r.get(3)?,
+            })
+        })?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// roster 组装(create_adapter_roster_for)与 UI 起同步共用——远程实例
+    /// 集合与同步目标集合必须同源,别各自 filter 一遍。
+    pub fn enabled_remote_host_names(&self) -> Vec<String> {
+        self.list_remote_hosts()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|h| h.enabled)
+            .map(|h| h.name)
+            .collect()
+    }
+
+    pub fn add_remote_host(&self, name: &str) -> Result<()> {
+        // 校验在写库这道门(而非各入口自记):host 名进 session key 作中段、
+        // 直接当 ssh/rsync 参数,任何未来入口(CLI/导入)都不得绕过
+        if !crate::remote::valid_host_name(name) {
+            return Err(anyhow::anyhow!("invalid host name: {name:?}"));
+        }
+        let conn = self.write.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO remote_hosts(name, enabled, added_at) VALUES (?1, 1, ?2)",
+            params![name, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// 移除 host 配置本身。缓存目录与已入库会话由调用方另行清理
+    /// (Workbench 删缓存目录后补扫,run_scan 的删除检测出清库内行)
+    pub fn remove_remote_host(&self, name: &str) -> Result<()> {
+        let conn = self.write.lock().unwrap();
+        conn.execute("DELETE FROM remote_hosts WHERE name = ?1", params![name])?;
+        Ok(())
+    }
+
+    pub fn set_remote_host_enabled(&self, name: &str, enabled: bool) -> Result<()> {
+        let conn = self.write.lock().unwrap();
+        conn.execute(
+            "UPDATE remote_hosts SET enabled = ?2 WHERE name = ?1",
+            params![name, enabled as i64],
+        )?;
+        Ok(())
+    }
+
+    /// 同步收尾统一写状态:成功清 error,失败保留上次成功时间
+    pub fn record_remote_sync(&self, name: &str, error: Option<&str>) -> Result<()> {
+        let conn = self.write.lock().unwrap();
+        match error {
+            None => conn.execute(
+                "UPDATE remote_hosts SET last_sync_at = ?2, last_sync_error = NULL WHERE name = ?1",
+                params![name, now_ms()],
+            )?,
+            Some(e) => conn.execute(
+                "UPDATE remote_hosts SET last_sync_error = ?2 WHERE name = ?1",
+                params![name, e],
+            )?,
+        };
+        Ok(())
+    }
+
+    /// 每个远程 host 的库内会话数(Remote hosts 面板;不滤 archived,
+    /// 与 locations 面板的 counts_by_path_prefix 同口径)
+    pub fn host_counts(&self) -> Result<HashMap<String, i64>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn
+            .prepare_cached("SELECT host, COUNT(*) FROM sessions WHERE host != '' GROUP BY host")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// 索引库文件所在目录(远程缓存 `remotes/<host>` 挂在它下面)。
+    /// 打开哪个库就用哪个库旁边的缓存——GUI 与 scan CLI 的 --tmp 隔离库
+    /// 由此天然分开,互不读写对方的缓存树
+    pub fn db_dir(&self) -> Option<std::path::PathBuf> {
+        self.path.parent().map(|p| p.to_path_buf())
     }
 
     /// 恢复初始:清空全部 location 偏离（自定义、被移除预设与停用状态）。
@@ -1315,7 +1445,7 @@ impl Store {
 const SESSION_COLS: &str =
     "s.key, s.agent_id, s.native_id, s.title, s.project_path, s.project_name,
     s.git_branch, s.created_at, s.updated_at, s.message_count, s.tokens_used, s.model, s.source,
-    s.archived, s.file_path, s.file_size, COALESCE(u.favorite,0), COALESCE(u.pinned,0)";
+    s.archived, s.file_path, s.file_size, COALESCE(u.favorite,0), COALESCE(u.pinned,0), s.host";
 
 const ROOT_WHEN_HIDING_ARCHIVED: &str = "(s.parent_key = '' OR NOT EXISTS (
        SELECT 1 FROM sessions p WHERE p.key = s.parent_key AND p.archived = 0
@@ -1342,7 +1472,7 @@ const ROOT_SESSION_COLS_ACTIVE: &str =
      s.message_count + COALESCE((SELECT SUM(c.message_count) FROM sessions c
        WHERE c.parent_key = s.key AND c.archived = 0), 0),
      s.tokens_used, s.model, s.source, s.archived, s.file_path, s.file_size,
-     COALESCE(u.favorite,0), COALESCE(u.pinned,0)";
+     COALESCE(u.favorite,0), COALESCE(u.pinned,0), s.host";
 const ROOT_SESSION_COLS_ALL: &str =
     "s.key, s.agent_id, s.native_id, s.title, s.project_path, s.project_name,
      s.git_branch, s.created_at,
@@ -1351,7 +1481,7 @@ const ROOT_SESSION_COLS_ALL: &str =
      s.message_count + COALESCE((SELECT SUM(c.message_count) FROM sessions c
        WHERE c.parent_key = s.key), 0),
      s.tokens_used, s.model, s.source, s.archived, s.file_path, s.file_size,
-     COALESCE(u.favorite,0), COALESCE(u.pinned,0)";
+     COALESCE(u.favorite,0), COALESCE(u.pinned,0), s.host";
 
 fn child_filter_sql(
     filter: &SessionFilter,
@@ -1423,6 +1553,7 @@ fn row_to_meta(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         size_bytes: r.get(15)?,
         favorite: r.get::<_, i64>(16)? == 1,
         pinned: r.get::<_, i64>(17)? == 1,
+        host: r.get(18)?,
     })
 }
 
@@ -1476,8 +1607,8 @@ fn upsert_session(tx: &rusqlite::Transaction<'_>, m: &SessionMeta, file_mtime: i
     tx.execute(
         "INSERT INTO sessions(key, agent_id, native_id, title, project_path, project_name,
            git_branch, created_at, updated_at, message_count, tokens_used, model, source,
-           archived, file_path, file_size, file_mtime, unknown_lines)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,0)
+           archived, file_path, file_size, file_mtime, unknown_lines, host)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,0,?18)
          ON CONFLICT(key) DO UPDATE SET
            title=excluded.title, project_path=excluded.project_path,
            project_name=excluded.project_name, git_branch=excluded.git_branch,
@@ -1485,7 +1616,7 @@ fn upsert_session(tx: &rusqlite::Transaction<'_>, m: &SessionMeta, file_mtime: i
            message_count=excluded.message_count, tokens_used=excluded.tokens_used,
            model=excluded.model, source=excluded.source, archived=excluded.archived,
            file_path=excluded.file_path, file_size=excluded.file_size,
-           file_mtime=excluded.file_mtime",
+           file_mtime=excluded.file_mtime, host=excluded.host",
         params![
             m.key,
             m.agent.as_str(),
@@ -1504,6 +1635,7 @@ fn upsert_session(tx: &rusqlite::Transaction<'_>, m: &SessionMeta, file_mtime: i
             m.file_path,
             m.size_bytes,
             file_mtime,
+            m.host,
         ],
     )?;
     Ok(())

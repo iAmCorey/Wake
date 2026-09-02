@@ -225,6 +225,7 @@ fn build_meta(agent: AgentId, r: &SessionFileRef, p: &PiParse) -> SessionMeta {
     let title = title_from_messages(&p.messages).unwrap_or_else(|| UNTITLED.to_string());
     SessionMeta {
         key: format!("{}:{native}", agent.as_str()),
+        host: String::new(),
         id: native,
         agent,
         title,

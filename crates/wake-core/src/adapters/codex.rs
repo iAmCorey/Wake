@@ -35,6 +35,26 @@ impl CodexAdapter {
             scan_archived: true,
         }
     }
+
+    /// state DB 的 threads.rollout_path 是**写库那台机器**上的绝对路径——
+    /// 远程缓存与自定义根下和本实例枚举出的 file_path 对不上,按
+    /// sessions/archived_sessions 尾段重定位到本实例目录(默认根下恒等)。
+    /// 认不出形状(如 Windows 反斜杠路径)原样返回,退回全路径精确匹配。
+    fn remap_rollout_path(&self, raw: &str) -> String {
+        for (marker, base) in [
+            ("/archived_sessions/", &self.archived_dir),
+            ("/sessions/", &self.sessions_dir),
+        ] {
+            if let Some(pos) = raw.rfind(marker) {
+                let mut p = base.clone();
+                for seg in raw[pos + marker.len()..].split('/') {
+                    p.push(seg);
+                }
+                return p.to_string_lossy().into_owned();
+            }
+        }
+        raw.to_string()
+    }
 }
 
 /// rollout 存储本体(用户选中的是数据目录而非 codex home):自身不含
@@ -670,6 +690,7 @@ fn build_meta(r: &SessionFileRef, p: &CodexParse, archived_dir: &Path) -> Sessio
     let project_name = project_name_of(&p.cwd);
     SessionMeta {
         key: format!("codex:{}", r.native_id),
+        host: String::new(),
         id: r.native_id.clone(),
         agent: AgentId::Codex,
         title,
@@ -731,8 +752,10 @@ impl AgentAdapter for CodexAdapter {
 
     fn quick_meta(&self, refs: &[SessionFileRef]) -> Option<HashMap<String, SessionMeta>> {
         let rows = read_threads(&self.state_db)?;
-        let by_path: HashMap<&str, &ThreadRow> =
-            rows.iter().map(|r| (r.rollout_path.as_str(), r)).collect();
+        let by_path: HashMap<String, &ThreadRow> = rows
+            .iter()
+            .map(|r| (self.remap_rollout_path(&r.rollout_path), r))
+            .collect();
         let mut out = HashMap::new();
         for r in refs {
             let Some(row) = by_path.get(r.file_path.as_str()) else {
@@ -761,6 +784,7 @@ impl AgentAdapter for CodexAdapter {
                 r.file_path.clone(),
                 SessionMeta {
                     key: format!("codex:{}", row.id),
+                    host: String::new(),
                     id: row.id.clone(),
                     agent: AgentId::Codex,
                     title,

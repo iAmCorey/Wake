@@ -128,6 +128,7 @@ fn build_meta(r: &SessionFileRef, side: &Sidecar, messages: &[TranscriptMessage]
         .unwrap_or(0);
     SessionMeta {
         key: format!("kiro:{}", r.native_id),
+        host: String::new(),
         id: r.native_id.clone(),
         agent: AgentId::Kiro,
         title,

@@ -12,6 +12,8 @@ pub mod opencode;
 pub mod pi;
 pub mod qoder;
 
+pub mod remote;
+
 pub(crate) mod grok_group;
 pub(crate) mod parse_utils;
 pub(crate) mod sqlite_ro;
@@ -24,6 +26,12 @@ use std::path::Path;
 /// 保证 FTS 的 seq 与详情页消息序号一致(搜索跳转依赖)。
 pub trait AgentAdapter: Send + Sync {
     fn agent(&self) -> AgentId;
+    /// 实例服务的远程 host;空 = 本地。只有 remote::RemoteAdapter 覆写。
+    /// scanner 的同家同 ID 去重按 (host, agent, native_id) 分域——两台机器
+    /// 各自续跑过的同 UUID 会话是两条会话,不能按 mtime 互吞
+    fn host(&self) -> &str {
+        ""
+    }
     /// 本机是否有这家的数据。由 data_roots 派生,**不要覆写**——它必须与
     /// 面板逐路径的 exists() 同一判据,手写版本(is_dir/is_file)与之打架
     /// 正是 2026-08-24 数轮 review 反复修的源头之一
@@ -204,15 +212,18 @@ pub fn create_adapters_with(
     custom_roots: &[(AgentId, std::path::PathBuf)],
     removed_defaults: &[AgentId],
 ) -> Vec<Box<dyn AgentAdapter>> {
-    create_adapters_with_root_overrides(custom_roots, removed_defaults, &[])
+    create_adapters_with_root_overrides(create_adapters(), custom_roots, removed_defaults, &[])
 }
 
+/// `base` 由调用方传入而非内部再造:create_adapter_roster_for 要把同一批
+/// 模板先借给远程实例构造——整个 roster 组装保持**单次** create_adapters(),
+/// 不变量 8 的"唯一构造时刻"不开例外
 fn create_adapters_with_root_overrides(
+    base: Vec<Box<dyn AgentAdapter>>,
     custom_roots: &[(AgentId, std::path::PathBuf)],
     removed_defaults: &[AgentId],
     removed_default_roots: &[(AgentId, std::path::PathBuf)],
 ) -> Vec<Box<dyn AgentAdapter>> {
-    let base = create_adapters();
     let customs: Vec<Box<dyn AgentAdapter>> = custom_roots
         .iter()
         .filter_map(|(agent, root)| {
@@ -265,9 +276,23 @@ pub struct AdapterRoster {
 /// 按索引库配置同时构造“全部 location 快照”和“仅启用的扫描 roster”。停用
 /// 记录按 (agent, 真实数据根) 精确匹配，因此同一 Agent 的多个 location 可独立
 /// 控制；单根 adapter 全关后直接移出 active，多根 adapter 走局部裁剪。
+///
+/// 启用的远程 host 以装饰器实例(adapters::remote)追加在 active **尾部**:
+/// 顺序契约不变("按 agent 找第一个"的兜底仍落默认实例);远程实例不进
+/// `locations`——Session locations 面板只管本地路径,远程在 Remote hosts 页。
 pub fn create_adapter_roster_for(store: &crate::db::Store) -> AdapterRoster {
     let (customs, removed, removed_roots) = store.location_overrides();
-    let configured = create_adapters_with_root_overrides(&customs, &removed, &removed_roots);
+    let base = create_adapters();
+    // 远程实例先借同一批模板构造(未经 location 覆盖的原始形态),base 随后
+    // move 进 overrides——全函数只有一次 create_adapters()
+    let mut remote_instances: Vec<Box<dyn AgentAdapter>> = Vec::new();
+    if let Some(db_dir) = store.db_dir() {
+        for host in store.enabled_remote_host_names() {
+            let host_cache = crate::remote::host_cache_dir(&db_dir, &host);
+            remote_instances.extend(remote::create_remote_adapters(&base, &host, &host_cache));
+        }
+    }
+    let configured = create_adapters_with_root_overrides(base, &customs, &removed, &removed_roots);
     let disabled: std::collections::HashSet<(AgentId, std::path::PathBuf)> =
         store.disabled_locations().into_iter().collect();
 
@@ -301,6 +326,11 @@ pub fn create_adapter_roster_for(store: &crate::db::Store) -> AdapterRoster {
             }
         }
     }
+
+    // 远程实例无条件追加(缓存树可能还没同步下来——各家挂载点选的是"目录
+    // 不存在也整形正确"的那层,缺根由 list_session_files 降级为空),同步
+    // 落盘后 watcher/补扫自然收编
+    active.extend(remote_instances);
 
     AdapterRoster { active, locations }
 }

@@ -17,6 +17,15 @@ use std::time::Duration;
 pub struct SessionWatcher {
     watcher: Option<notify::RecommendedWatcher>,
     thread: Option<std::thread::JoinHandle<()>>,
+    watched: std::collections::BTreeSet<PathBuf>,
+}
+
+impl SessionWatcher {
+    /// 实际 watch 成功的根(缺目录等失败被静默跳过的不在内)——"挂了哪些"
+    /// 的唯一真话。远程同步收工后据此判断缓存树是否长出了监听外的新根。
+    pub fn watched_roots(&self) -> &std::collections::BTreeSet<PathBuf> {
+        &self.watched
+    }
 }
 
 impl Drop for SessionWatcher {
@@ -44,6 +53,7 @@ pub fn resolve_watch_agent<T: Copy>(roots: &[(PathBuf, T)], path: &Path) -> Opti
 
 /// 胜者副本被删后的幸存者上位:按被删 key 反查同家实例枚举里的同 native_id
 /// 引用,交常规增量收编(该 key 已无既有行,scan_files 的副本裁决自然放行)。
+/// 期望 key 经 session_key 按实例 host 构造——远程三段 key 也走名字快路径。
 /// codex 经 state DB 改写过的 key(thread-id ≠ 文件 native_id)反查不到,由
 /// 下一次全量扫描兜底;删除事件罕见,逐家枚举(纯 stat)代价可忽略
 pub fn promote_survivors(
@@ -58,23 +68,22 @@ pub fn promote_survivors(
         if !seen.insert(key.as_str()) {
             continue;
         }
-        let Some((agent_str, native_id)) = key.split_once(':') else {
-            continue;
-        };
-        let Some(agent) = AgentId::from_str(agent_str) else {
+        let Some(agent) = key.split(':').next().and_then(AgentId::from_str) else {
             continue;
         };
         let mut agent_refs: Vec<SessionFileRef> = Vec::new();
+        let mut by_name: Vec<SessionFileRef> = Vec::new();
         for a in adapters.iter().filter(|a| a.agent() == agent) {
+            // host 段对不上的实例整个跳过(本地实例对远程 key、A 机对 B 机):
+            // 名字与解析比对都不可能命中——实例出口的 key 恒带自己的 host
+            let Some(native_id) = strip_key_prefix(key, agent, a.host()) else {
+                continue;
+            };
             if let Ok(refs) = a.list_session_files() {
+                by_name.extend(refs.iter().filter(|r| r.native_id == native_id).cloned());
                 agent_refs.extend(refs);
             }
         }
-        let by_name: Vec<SessionFileRef> = agent_refs
-            .iter()
-            .filter(|r| r.native_id == native_id)
-            .cloned()
-            .collect();
         if !by_name.is_empty() {
             survivors.extend(by_name);
             continue;
@@ -122,8 +131,12 @@ pub fn start_watcher(
 
     let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
     let mut watcher = notify::recommended_watcher(tx).ok()?;
+    let mut watched = std::collections::BTreeSet::new();
     for (root, _) in &roots {
-        let _ = watcher.watch(root, RecursiveMode::Recursive);
+        // 失败(常见:目录还不存在,如未同步的远程缓存)跳过不算挂上
+        if watcher.watch(root, RecursiveMode::Recursive).is_ok() {
+            watched.insert(root.clone());
+        }
     }
 
     let thread = std::thread::spawn(move || {
@@ -211,5 +224,6 @@ pub fn start_watcher(
     Some(SessionWatcher {
         watcher: Some(watcher),
         thread: Some(thread),
+        watched,
     })
 }

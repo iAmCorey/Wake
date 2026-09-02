@@ -672,6 +672,7 @@ fn build_meta(r: &SessionFileRef, parsed: &QoderParse) -> SessionMeta {
     .unwrap_or_else(|| UNTITLED.to_string());
     SessionMeta {
         key: format!("qoder:{}", r.native_id),
+        host: String::new(),
         id: r.native_id.clone(),
         agent: AgentId::Qoder,
         title,

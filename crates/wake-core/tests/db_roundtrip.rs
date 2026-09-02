@@ -12,6 +12,7 @@ fn temp_store() -> (tempfile::TempDir, Store) {
 
 fn meta(key: &str, title: &str) -> SessionMeta {
     SessionMeta {
+        host: String::new(),
         key: key.to_string(),
         id: key.split(':').nth(1).unwrap_or(key).to_string(),
         agent: AgentId::ClaudeCode,
@@ -313,11 +314,10 @@ fn removing_a_session_tree_writes_every_tombstone_atomically() {
     assert!(store.is_tombstoned(&child.file_path));
 }
 
-#[test]
-fn old_database_marks_grok_backfill_until_scan_finishes() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("old.db");
-    let conn = rusqlite::Connection::open(&path).unwrap();
+/// 最老的 sessions schema(无 parent_key、无 host):迁移类测试共用,
+/// 再加列时别再抄第三份 DDL
+fn create_legacy_db(path: &std::path::Path) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open(path).unwrap();
     conn.execute_batch(
         "CREATE TABLE sessions (
            key TEXT PRIMARY KEY, agent_id TEXT NOT NULL, native_id TEXT NOT NULL,
@@ -329,7 +329,14 @@ fn old_database_marks_grok_backfill_until_scan_finishes() {
          );",
     )
     .unwrap();
-    drop(conn);
+    conn
+}
+
+#[test]
+fn old_database_marks_grok_backfill_until_scan_finishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.db");
+    drop(create_legacy_db(&path));
 
     let store = Store::open(&path).unwrap();
     assert!(store.needs_grok_parent_backfill());
@@ -716,4 +723,70 @@ fn insights_snapshot_and_streaks() {
     let far = chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
     let d = store.insights(far).unwrap();
     assert_eq!((d.current_streak, d.longest_streak), (0, 3));
+}
+
+/// 老库(无 host 列)打开即迁移;既有行落 ''(本地域),写入远程行后
+/// host_counts 只统计非空 host。remote_hosts 配置与同步状态可往返。
+#[test]
+fn host_column_migration_and_remote_host_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.db");
+    let conn = create_legacy_db(&path);
+    conn.execute(
+        "INSERT INTO sessions (key, agent_id, native_id, file_path)
+         VALUES ('claude-code:legacy', 'claude-code', 'legacy', '/tmp/legacy.jsonl')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::open(&path).unwrap();
+    // 老行读出来 host 为空(本地)
+    let legacy = store.get_session("claude-code:legacy").unwrap().unwrap();
+    assert!(legacy.host.is_empty());
+
+    // 远程行写入/读出 host 往返
+    let mut remote = meta("claude-code:devbox:r1", "远程会话");
+    remote.key = "claude-code:devbox:r1".into();
+    remote.id = "r1".into();
+    remote.host = "devbox".into();
+    remote.file_path = "/cache/devbox/.claude/projects/p/r1.jsonl".into();
+    store
+        .write_session(&remote, remote.updated_at, &[])
+        .unwrap();
+    let row = store.get_session("claude-code:devbox:r1").unwrap().unwrap();
+    assert_eq!(row.host, "devbox");
+    assert_eq!(row.id, "r1");
+
+    let counts = store.host_counts().unwrap();
+    assert_eq!(counts.get("devbox"), Some(&1));
+    assert!(!counts.contains_key(""), "本地行不进 host 榜");
+
+    // remote_hosts 配置往返:add → enabled 开关 → 同步状态 → remove
+    store.add_remote_host("devbox").unwrap();
+    store.add_remote_host("devbox").unwrap(); // 幂等
+    let hosts = store.list_remote_hosts().unwrap();
+    assert_eq!(hosts.len(), 1);
+    assert!(hosts[0].enabled && hosts[0].last_sync_at.is_none());
+
+    store.set_remote_host_enabled("devbox", false).unwrap();
+    assert!(!store.list_remote_hosts().unwrap()[0].enabled);
+
+    store
+        .record_remote_sync("devbox", Some("ssh: permission denied"))
+        .unwrap();
+    let host = &store.list_remote_hosts().unwrap()[0];
+    assert_eq!(
+        host.last_sync_error.as_deref(),
+        Some("ssh: permission denied")
+    );
+    assert!(host.last_sync_at.is_none(), "失败不得伪造成功时间");
+
+    store.record_remote_sync("devbox", None).unwrap();
+    let host = &store.list_remote_hosts().unwrap()[0];
+    assert!(host.last_sync_error.is_none(), "成功清掉上次错误");
+    assert!(host.last_sync_at.is_some());
+
+    store.remove_remote_host("devbox").unwrap();
+    assert!(store.list_remote_hosts().unwrap().is_empty());
 }

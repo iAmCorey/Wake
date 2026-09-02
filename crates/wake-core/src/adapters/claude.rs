@@ -420,6 +420,7 @@ fn build_meta(r: &SessionFileRef, p: &ParseResult) -> SessionMeta {
     let project_name = project_name_of(&p.cwd);
     SessionMeta {
         key: format!("claude-code:{}", r.native_id),
+        host: String::new(),
         id: r.native_id.clone(),
         agent: AgentId::ClaudeCode,
         title: p.title.clone(),

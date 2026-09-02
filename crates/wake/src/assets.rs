@@ -100,6 +100,7 @@ icons!(
     "file-text",
     "more-horizontal",
     "hard-drive",
+    "server",
     "database",
     "settings",
     "plus",

@@ -360,6 +360,7 @@ fn build_meta(
         grok_group::canonical_project(&side.cwd, &side.git_remotes, grok_home, &r.native_id, group);
     SessionMeta {
         key: format!("grok:{}", r.native_id),
+        host: String::new(),
         id: r.native_id.clone(),
         agent: AgentId::Grok,
         title,

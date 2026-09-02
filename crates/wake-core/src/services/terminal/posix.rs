@@ -65,35 +65,17 @@ fn parse_probe_output(stdout: &[u8], requested: &[&str]) -> HashMap<String, Stri
     found
 }
 
-/// POSIX 单引号 quote
-pub(crate) fn posix_quote(s: &str) -> String {
-    if !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_-./:=".contains(c))
-    {
-        return s.to_string();
-    }
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
 /// 展示/剪贴板/启动共用的一条可执行命令。POSIX 双端只有一种 shell 方言,
 /// 与宿主无关,`_term` 只为对齐 Windows 的同名接缝(那边按宿主分
-/// cmd/PowerShell 两派,见 windows.rs)
+/// cmd/PowerShell 两派,见 windows.rs);拼装本体在 mod.rs 的
+/// sh_command_line(quote 与连接规则的唯一实现,远程 ssh 同用)
 pub(super) fn compose_command(
     _term: super::TerminalApp,
     cli: &str,
     args: &[String],
     cwd: Option<&str>,
 ) -> String {
-    let core = std::iter::once(cli)
-        .chain(args.iter().map(|s| s.as_str()))
-        .map(posix_quote)
-        .collect::<Vec<_>>()
-        .join(" ");
-    match cwd {
-        Some(dir) => format!("cd {} && {core}", posix_quote(dir)),
-        None => core,
-    }
+    super::sh_command_line(cli, args, cwd)
 }
 
 /// 保守 percent-encode(RFC 3986 unreserved 之外全编;keep_slash 供
