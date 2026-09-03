@@ -719,6 +719,43 @@ fn insights_snapshot_and_streaks() {
         ]
     );
 
+    // 会话按创建日分桶(fixture meta 的 created_at 同一毫秒,本地日由时区定),归档不计
+    let created_day = chrono::Local
+        .timestamp_millis_opt(m1.created_at)
+        .single()
+        .expect("unambiguous local time")
+        .date_naive();
+    assert_eq!(d.daily_sessions, vec![(created_day, 2, 500)]);
+    // 趋势:as_of=1/13(周二)→ 本周从 1/12 起是末列 52;1/7、1/10、1/11 落在
+    // 1/5 那周 = 51。未来行与无 ts 行不进周桶
+    let claude = &d.trend_agents[0];
+    assert_eq!((claude.name.as_str(), claude.total), ("claude-code", 4));
+    assert_eq!((claude.weekly[51], claude.weekly[52]), (3, 1));
+    assert_eq!(claude.weekly.len(), TREND_WEEKS);
+    let codex = &d.trend_agents[1];
+    assert_eq!((codex.name.as_str(), codex.total), ("codex", 2));
+    assert_eq!(codex.weekly[51], 2);
+    assert_eq!(
+        d.trend_models
+            .iter()
+            .map(|s| (s.name.as_str(), s.total))
+            .collect::<Vec<_>>(),
+        vec![("claude-opus", 4), ("gpt-5-codex", 2)]
+    );
+    // Last 7 days(1/7–1/13)对前 7 天(12/31–1/6):prompts 6 / 0,活跃日 4 / 0;
+    // 会话创建在 2023,两窗都是 0
+    let (cur, prev) = d.last_week_pair();
+    assert_eq!(
+        cur,
+        WindowStats {
+            sessions: 0,
+            prompts: 6,
+            tokens: 0,
+            active_days: 4
+        }
+    );
+    assert_eq!(prev, WindowStats::default());
+
     // 断档超过一天 → current 归零,longest 保留
     let far = chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
     let d = store.insights(far).unwrap();

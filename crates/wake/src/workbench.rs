@@ -2003,6 +2003,8 @@ pub struct Workbench {
     insights_range: InsightsRange,
     /// 三个榜单各自的度量档,按 UsageBoard 序数索引
     insights_metrics: [InsightsMetric; 3],
+    /// 趋势图当前分组(agent / 模型),纯视图状态
+    insights_trend: TrendBoard,
     /// 进行中的统计查询;新查询覆盖旧值即取消,扫描风暴下不堆积读锁竞争
     insights_task: Option<Task<()>>,
 
@@ -2088,6 +2090,29 @@ impl InsightsMetric {
         match self {
             Self::Tokens => fmt_tokens(Some(u.tokens)),
             _ => thousands(self.value(u)),
+        }
+    }
+}
+
+/// 趋势图("Over time")的分组维度,‹ › 二选一切换;数据两份常驻,切换不重查
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TrendBoard {
+    Agents,
+    Models,
+}
+
+impl TrendBoard {
+    fn caption(self) -> &'static str {
+        match self {
+            Self::Agents => "Agents",
+            Self::Models => "Models",
+        }
+    }
+
+    fn toggle(self) -> Self {
+        match self {
+            Self::Agents => Self::Models,
+            Self::Models => Self::Agents,
         }
     }
 }
@@ -2320,6 +2345,7 @@ impl Workbench {
             insights_loading: false,
             insights_range: InsightsRange::Hour,
             insights_metrics: [InsightsMetric::Sessions; 3],
+            insights_trend: TrendBoard::Agents,
             insights_task: None,
             scan_events,
             watcher,
@@ -5817,6 +5843,7 @@ impl Workbench {
                         .pb(px(40.))
                         .gap(INSIGHTS_SECTION_GAP)
                         .child(overview)
+                        .child(render_week_section(d, cx))
                         .child(
                             v_flex()
                                 .gap(SPACE_MD)
@@ -5828,6 +5855,7 @@ impl Workbench {
                                 ))
                                 .child(render_heatmap(d, cx)),
                         )
+                        .child(self.render_trend_section(d, cx))
                         .child(self.render_distribution_section(d, cx))
                         .child(self.render_usage_section(
                             UsageBoard::Agents,
@@ -5893,6 +5921,57 @@ impl Workbench {
                 cx,
             ))
             .child(render_distribution(range, values, peak, cx))
+            .into_any_element()
+    }
+
+    /// 趋势区块:近 53 周每周 prompts 按 agent / 模型堆叠,‹ › 二选一。
+    /// 模型序列为空(没有一家报模型)时只剩 Agents,不给切换钮
+    fn render_trend_section(&self, d: &InsightsData, cx: &Context<Self>) -> AnyElement {
+        let has_models = !d.trend_models.is_empty();
+        let board = if has_models {
+            self.insights_trend
+        } else {
+            TrendBoard::Agents
+        };
+        let series = match board {
+            TrendBoard::Agents => &d.trend_agents,
+            TrendBoard::Models => &d.trend_models,
+        };
+        let arrows = has_models.then(|| {
+            insight_arrows(
+                "trend-arrow",
+                Some(board.caption().into()),
+                cx.listener(move |this, _, _window, cx| {
+                    this.insights_trend = this.insights_trend.toggle();
+                    cx.notify();
+                }),
+                cx.listener(move |this, _, _window, cx| {
+                    this.insights_trend = this.insights_trend.toggle();
+                    cx.notify();
+                }),
+                cx,
+            )
+            .into_any_element()
+        });
+        let dark = cx.theme().mode.is_dark();
+        let name_of = move |raw: &str| -> SharedString {
+            match board {
+                TrendBoard::Agents => AgentId::from_str(raw)
+                    .map(|a| a.display_name().into())
+                    .unwrap_or_else(|| raw.to_string().into()),
+                TrendBoard::Models => raw.to_string().into(),
+            }
+        };
+        let _ = dark;
+        v_flex()
+            .gap(SPACE_MD)
+            .child(switch_section_head(
+                "Over time",
+                Some(trend_caption(board, series).into()),
+                arrows,
+                cx,
+            ))
+            .child(render_trend(d, series, name_of, cx))
             .into_any_element()
     }
 
@@ -6973,6 +7052,279 @@ fn render_distribution(range: InsightsRange, values: &[i64], peak: usize, cx: &A
                     })
                 })),
         )
+        .into_any_element()
+}
+
+/// 趋势图堆叠层的着色阶梯:前五个序列按总量降序取 primary 五档不透明度,
+/// 其余合并为 "Other" 用 muted_foreground 淡层——与热力图同一单色语言,
+/// 不引入品牌色(十六家的品牌色叠在一起没法读)
+const TREND_STEPS: [f32; 5] = [1., 0.72, 0.5, 0.34, 0.22];
+const TREND_TOP: usize = TREND_STEPS.len();
+
+fn trend_caption(board: TrendBoard, series: &[TrendSeries]) -> String {
+    let unit = match board {
+        TrendBoard::Agents => "agent",
+        TrendBoard::Models => "model",
+    };
+    // 本周领先者:as_of 所在周 prompts 最多的序列(本周为空则退回上一周)
+    let leader = [TREND_WEEKS - 1, TREND_WEEKS - 2]
+        .into_iter()
+        .find_map(|w| {
+            series
+                .iter()
+                .filter(|s| s.weekly[w] > 0)
+                .max_by_key(|s| s.weekly[w])
+                .map(|s| s.name.clone())
+        });
+    match leader {
+        Some(name) => {
+            let shown = match board {
+                TrendBoard::Agents => AgentId::from_str(&name)
+                    .map(|a| a.display_name().to_string())
+                    .unwrap_or(name),
+                TrendBoard::Models => name,
+            };
+            format!("Prompts per week by {unit} · {shown} leads this week")
+        }
+        None => format!("Prompts per week by {unit}"),
+    }
+}
+
+/// "Last 7 days" 对比行:四个度量各带与前 7 天的相对变化。上涨用 primary,
+/// 持平/下降 muted——不引入第四种文字色
+fn render_week_section(d: &InsightsData, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let (cur, prev) = d.last_week_pair();
+    let delta = |now: i64, before: i64| -> (SharedString, Hsla) {
+        if before == 0 && now == 0 {
+            ("No activity".into(), theme.muted_foreground)
+        } else if before == 0 {
+            ("New this week".into(), theme.primary)
+        } else {
+            let pct = ((now - before) as f64 * 100. / before as f64).round() as i64;
+            let text: SharedString = if pct == 0 {
+                "Same as last week".into()
+            } else {
+                format!("{pct:+}% vs last week").into()
+            };
+            let color = if pct > 0 {
+                theme.primary
+            } else {
+                theme.muted_foreground
+            };
+            (text, color)
+        }
+    };
+    let stat = |value: String, label: &'static str, now: i64, before: i64| {
+        let (text, color) = delta(now, before);
+        v_flex()
+            .gap(px(2.))
+            .child(
+                div()
+                    .text_size(FONT_HEADING)
+                    .font_semibold()
+                    .text_color(theme.foreground)
+                    .child(value),
+            )
+            .child(
+                div()
+                    .text_size(FONT_CAPTION)
+                    .text_color(theme.muted_foreground)
+                    .child(label),
+            )
+            .child(div().text_size(FONT_LABEL).text_color(color).child(text))
+    };
+    v_flex()
+        .gap(SPACE_MD)
+        .child(switch_section_head(
+            "Last 7 days",
+            Some("Compared with the 7 days before".into()),
+            None,
+            cx,
+        ))
+        .child(
+            h_flex()
+                .gap(px(40.))
+                .items_start()
+                .child(stat(
+                    thousands(cur.sessions),
+                    "Sessions",
+                    cur.sessions,
+                    prev.sessions,
+                ))
+                .when(d.tokens > 0, |row| {
+                    row.child(stat(
+                        fmt_tokens(Some(cur.tokens)),
+                        "Tokens",
+                        cur.tokens,
+                        prev.tokens,
+                    ))
+                })
+                .child(stat(
+                    thousands(cur.prompts),
+                    "Prompts",
+                    cur.prompts,
+                    prev.prompts,
+                ))
+                .child(stat(
+                    thousands(cur.active_days),
+                    "Active days",
+                    cur.active_days,
+                    prev.active_days,
+                )),
+        )
+        .into_any_element()
+}
+
+/// 堆叠周柱图:53 列与热力图同宽同步距(左侧留出热力图的星期标签列,
+/// 两图的周列上下对齐),每列 = 各序列该周 prompts 自下而上堆叠,按窗口内
+/// 峰值周归一;零周留 2px muted 基线。图例列出前五 + Other
+fn render_trend(
+    d: &InsightsData,
+    series: &[TrendSeries],
+    name_of: impl Fn(&str) -> SharedString,
+    cx: &App,
+) -> AnyElement {
+    use chrono::Datelike as _;
+    let theme = cx.theme();
+    const CELL: f32 = 9.;
+    const GAP: f32 = 3.;
+    const STEP: f32 = CELL + GAP;
+    const DOW_W: f32 = 26.;
+    const CHART_H: f32 = 72.;
+
+    // 分层:前五序列 + Other 合并
+    let mut layers: Vec<(SharedString, Hsla, Vec<i64>)> = series
+        .iter()
+        .take(TREND_TOP)
+        .enumerate()
+        .map(|(i, s)| {
+            (
+                name_of(&s.name),
+                theme.primary.opacity(TREND_STEPS[i]),
+                s.weekly.clone(),
+            )
+        })
+        .collect();
+    if series.len() > TREND_TOP {
+        let mut other = vec![0i64; TREND_WEEKS];
+        for s in &series[TREND_TOP..] {
+            for (o, n) in other.iter_mut().zip(&s.weekly) {
+                *o += n;
+            }
+        }
+        layers.push(("Other".into(), theme.muted_foreground.opacity(0.35), other));
+    }
+    let totals: Vec<i64> = (0..TREND_WEEKS)
+        .map(|w| layers.iter().map(|(_, _, v)| v[w]).sum())
+        .collect();
+    let max = totals.iter().copied().max().unwrap_or(0).max(1);
+
+    let today = d.as_of;
+    let this_monday = today - chrono::Days::new(today.weekday().num_days_from_monday() as u64);
+    let start = this_monday - chrono::Days::new(52 * 7);
+
+    let mut columns = h_flex()
+        .items_end()
+        .gap(px(GAP))
+        .h(px(CHART_H))
+        .child(div().w(px(DOW_W)).flex_shrink_0());
+    for w in 0..TREND_WEEKS {
+        let total = totals[w];
+        let monday = start + chrono::Days::new(w as u64 * 7);
+        // tooltip:该周总量 + 前三层明细,hover 才格式化
+        let breakdown: Vec<(SharedString, i64)> = layers
+            .iter()
+            .filter(|(_, _, v)| v[w] > 0)
+            .take(3)
+            .map(|(name, _, v)| (name.clone(), v[w]))
+            .collect();
+        let column = if total == 0 {
+            div()
+                .w(px(CELL))
+                .h(px(2.))
+                .rounded(RADIUS_CELL)
+                .bg(theme.muted)
+        } else {
+            let col_h = ((total as f32 / max as f32) * CHART_H).max(3.);
+            // DOM 自上而下 = 视觉自上而下:Other/末层在顶,首序列在底
+            let mut col = v_flex()
+                .w(px(CELL))
+                .h(px(col_h))
+                .justify_end()
+                .rounded(RADIUS_CELL)
+                .overflow_hidden();
+            for (_, color, v) in layers.iter().rev() {
+                if v[w] == 0 {
+                    continue;
+                }
+                let h = (v[w] as f32 / total as f32) * col_h;
+                col = col.child(div().w_full().h(px(h)).bg(*color));
+            }
+            col
+        };
+        columns = columns.child(column.id(("trend", w)).flex_shrink_0().tooltip(
+            move |window, cx| {
+                let mut label = format!(
+                    "Week of {} · {}",
+                    monday.format("%b %-d"),
+                    prompts_label(total)
+                );
+                if !breakdown.is_empty() {
+                    label.push_str("\n");
+                    label.push_str(
+                        &breakdown
+                            .iter()
+                            .map(|(n, c)| format!("{n} {c}"))
+                            .collect::<Vec<_>>()
+                            .join(" · "),
+                    );
+                }
+                gpui_component::tooltip::Tooltip::new(SharedString::from(label)).build(window, cx)
+            },
+        ));
+    }
+
+    // 月份刻度:与热力图同规则(该列周一进入新月份时标)
+    let mut months = div()
+        .relative()
+        .w_full()
+        .h(px(14.))
+        .text_size(FONT_LABEL)
+        .text_color(theme.muted_foreground);
+    for c in 0..TREND_WEEKS as u64 {
+        let monday = start + chrono::Days::new(c * 7);
+        if monday.month() != (monday - chrono::Days::new(7)).month() {
+            months = months.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px(DOW_W + GAP + c as f32 * STEP))
+                    .child(MONTH_SHORT[monday.month0() as usize]),
+            );
+        }
+    }
+
+    let legend = h_flex()
+        .flex_wrap()
+        .gap_x(SPACE_MD)
+        .gap_y(SPACE_XS)
+        .pl(px(DOW_W + GAP))
+        .text_size(FONT_LABEL)
+        .text_color(theme.muted_foreground)
+        .children(layers.iter().map(|(name, color, _)| {
+            h_flex()
+                .gap(px(5.))
+                .items_center()
+                .child(div().size(px(CELL)).rounded(RADIUS_CELL).bg(*color))
+                .child(name.clone())
+        }));
+
+    v_flex()
+        .gap(px(6.))
+        .child(columns)
+        .child(months)
+        .child(legend)
         .into_any_element()
 }
 

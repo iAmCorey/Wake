@@ -1302,6 +1302,89 @@ impl Store {
             &prompts_by_model,
         )?;
 
+        // 会话按创建日分桶(Last 7 days 的 sessions/tokens 对比用);无效
+        // 与未来日期同上不计
+        let mut stmt = conn.prepare_cached(
+            "SELECT date(created_at/1000,'unixepoch','localtime'), COUNT(*), COALESCE(SUM(tokens_used),0)
+             FROM sessions WHERE archived = 0 AND created_at > 0
+             GROUP BY 1 ORDER BY 1",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (d, n, tokens) = row?;
+            let Ok(day) = chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d") else {
+                continue;
+            };
+            if day > today {
+                continue;
+            }
+            data.daily_sessions.push((day, n, tokens));
+        }
+        drop(stmt);
+
+        // 趋势:prompts 按 (agent, 模型, 日) 分桶后折成周(行数 = 组合数×活跃日,
+        // 千级)。周窗与热力图同一把尺:末列 = today 所在周(周一起始)
+        let this_monday = today - chrono::Days::new(today.weekday().num_days_from_monday() as u64);
+        let mut by_agent: HashMap<String, Vec<i64>> = HashMap::new();
+        let mut by_model: HashMap<String, Vec<i64>> = HashMap::new();
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT s.agent_id, COALESCE(s.model,''), date(m.ts/1000,'unixepoch','localtime'), COUNT(*)
+             {PROMPT_ROWS} AND m.ts > 0
+             GROUP BY 1, 2, 3"
+        ))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (agent, model, d, n) = row?;
+            let Ok(day) = chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d") else {
+                continue;
+            };
+            if day > today {
+                continue;
+            }
+            let monday = day - chrono::Days::new(day.weekday().num_days_from_monday() as u64);
+            let weeks_back = (this_monday - monday).num_days() / 7;
+            if !(0..TREND_WEEKS as i64).contains(&weeks_back) {
+                continue;
+            }
+            let ix = TREND_WEEKS - 1 - weeks_back as usize;
+            by_agent
+                .entry(agent)
+                .or_insert_with(|| vec![0; TREND_WEEKS])[ix] += n;
+            if !model.is_empty() {
+                by_model
+                    .entry(model)
+                    .or_insert_with(|| vec![0; TREND_WEEKS])[ix] += n;
+            }
+        }
+        drop(stmt);
+        let into_series = |map: HashMap<String, Vec<i64>>| -> Vec<TrendSeries> {
+            let mut v: Vec<TrendSeries> = map
+                .into_iter()
+                .map(|(name, weekly)| TrendSeries {
+                    total: weekly.iter().sum(),
+                    name,
+                    weekly,
+                })
+                .collect();
+            v.sort_by(|a, b| b.total.cmp(&a.total).then_with(|| a.name.cmp(&b.name)));
+            v
+        };
+        data.trend_agents = into_series(by_agent);
+        data.trend_models = into_series(by_model);
+
         (data.current_streak, data.longest_streak) = compute_streaks(&data.daily, today);
         Ok(data)
     }

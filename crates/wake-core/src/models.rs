@@ -428,7 +428,35 @@ pub struct InsightsData {
     pub projects: Vec<UsageTally>,
     /// 全量模型,同上
     pub models: Vec<UsageTally>,
+    /// 按会话创建日的 (日, 会话数, tokens) 序列(升序,仅有效日期、不含未来日)。
+    /// "Last 7 days" 周对比由它与 daily 派生
+    pub daily_sessions: Vec<(chrono::NaiveDate, i64, i64)>,
+    /// 各 agent 近 53 周(周一起始,末项 = as_of 所在周)的每周 prompts;
+    /// 与热力图同一时间窗,按总量降序
+    pub trend_agents: Vec<TrendSeries>,
+    /// 各模型同上(无模型的会话不计)
+    pub trend_models: Vec<TrendSeries>,
 }
+
+/// 时间窗内的四个度量(Last 7 days 与其前 7 天各一份)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WindowStats {
+    pub sessions: i64,
+    pub prompts: i64,
+    pub tokens: i64,
+    pub active_days: i64,
+}
+
+/// 趋势图的一条序列:`weekly[TREND_WEEKS-1]` 是 as_of 所在周,向前逐周
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrendSeries {
+    pub name: String,
+    pub weekly: Vec<i64>,
+    pub total: i64,
+}
+
+/// 趋势图与热力图共用的周数:52 整周 + 本周
+pub const TREND_WEEKS: usize = 53;
 
 impl InsightsData {
     /// 活跃天数 = daily 长度(派生不另存,免第二个写入点失步)
@@ -438,6 +466,30 @@ impl InsightsData {
 
     pub fn busiest_day(&self) -> Option<(chrono::NaiveDate, i64)> {
         self.daily.iter().max_by_key(|(_, n)| *n).copied()
+    }
+
+    /// `[ending - days + 1, ending]` 闭区间内的度量。会话按创建日归属,
+    /// prompts 按消息日;active_days 数的是有 prompt 的日子(与热力图同口径)
+    pub fn window(&self, days: u32, ending: chrono::NaiveDate) -> WindowStats {
+        let start = ending - chrono::Days::new(u64::from(days.saturating_sub(1)));
+        let in_range = |d: &chrono::NaiveDate| *d >= start && *d <= ending;
+        let mut w = WindowStats::default();
+        for (d, n) in self.daily.iter().filter(|(d, _)| in_range(d)) {
+            let _ = d;
+            w.prompts += n;
+            w.active_days += 1;
+        }
+        for (_, sessions, tokens) in self.daily_sessions.iter().filter(|(d, _, _)| in_range(d)) {
+            w.sessions += sessions;
+            w.tokens += tokens;
+        }
+        w
+    }
+
+    /// 最近 7 天与其前 7 天
+    pub fn last_week_pair(&self) -> (WindowStats, WindowStats) {
+        let prev_end = self.as_of - chrono::Days::new(7);
+        (self.window(7, self.as_of), self.window(7, prev_end))
     }
 }
 
