@@ -114,9 +114,11 @@ impl AgentId {
     /// 与 kooky 同源)。后缀必须带上(与 SVG 图标同理,漏后缀 = 静默空白)。
     /// Copilot/Cursor/OpenCode/Pi/Grok/Kimi 是单色字形(白色+alpha):深色模式
     /// 用白色版,浅色模式用 `-light`(深墨 #2B2A26)版——等效 kooky 的染色;
-    /// Qoder 是白/黑字形配绿色品牌色,同样按模式切图；Hermes(lobe-icons 的
-    /// NousResearch 字形)同为单色双版;其余彩色品牌(Claude/Codex/Gemini/Kiro/
-    /// Omp/Antigravity/OpenClaw 的红龙虾)保持原色,两模式通用。
+    /// Qoder 是白/黑字形配绿色品牌色,同样按模式切图;Hermes(Nous 的少女字形)
+    /// 浅色用墨色透明底字形,**深色不能用白色实心字形**——细节密、16px 下糊成一团白
+    /// (用户 2026-09-03 反馈),深色改用官方形态「白色圆角底 + 墨色画」的贴片;
+    /// 其余彩色品牌(Claude/Codex/Gemini/Kiro/Omp/Antigravity/OpenClaw 的红龙虾)
+    /// 保持原色,两模式通用。
     pub fn brand_icon(&self, dark: bool) -> &'static str {
         match self {
             AgentId::ClaudeCode => "brands/claude-code.png",

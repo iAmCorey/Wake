@@ -5,7 +5,7 @@
     python3 scripts/demo-home.py                 # 生成到 /tmp/wake-demo-home
     HOME=/tmp/wake-demo-home dist/Wake.app/Contents/MacOS/Wake
 
-app 的索引库与七家 agent 扫描目录全部落在假 HOME 内,真实数据不显示也不被读。
+app 的索引库与十六家 agent 扫描目录全部落在假 HOME 内,真实数据不显示也不被读。
 """
 import json
 import os
@@ -480,6 +480,54 @@ def main():
     os.makedirs(os.path.join(HOME, ".gemini"), exist_ok=True)
     with open(os.path.join(HOME, ".gemini", "projects.json"), "w") as f:
         json.dump({"projects": {f"{g}/blog-engine": "demo-gem"}}, f)
+
+
+    # hermes:全明文 SQLite(cli + telegram 两条,含工具调用与 reasoning)
+    hermes_dir = os.path.join(HOME, ".hermes")
+    os.makedirs(hermes_dir, exist_ok=True)
+    c = sqlite3.connect(os.path.join(hermes_dir, "state.db"))
+    c.executescript("""
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, source TEXT NOT NULL, model TEXT, parent_session_id TEXT,
+            started_at REAL NOT NULL, ended_at REAL, message_count INTEGER DEFAULT 0,
+            input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
+            cache_read_tokens INTEGER DEFAULT 0, cache_write_tokens INTEGER DEFAULT 0,
+            reasoning_tokens INTEGER DEFAULT 0, title TEXT);
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL,
+            content TEXT, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT,
+            timestamp REAL NOT NULL, reasoning TEXT);
+    """)
+    h1 = (NOW - timedelta(hours=9)).timestamp()
+    h2 = (NOW - timedelta(days=2, hours=3)).timestamp()
+    c.execute("INSERT INTO sessions VALUES ('hermes-demo-1','cli','gpt-5.2',NULL,?,?,4,1800,320,600,0,90,'Rotate the API keys across services')", (h1, h1 + 240))
+    c.execute("INSERT INTO sessions VALUES ('hermes-demo-2','telegram','claude-fable-5',NULL,?,?,2,400,120,0,0,0,NULL)", (h2, h2 + 60))
+    c.executemany("INSERT INTO messages (session_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, reasoning) VALUES (?,?,?,?,?,?,?,?)", [
+        ("hermes-demo-1", "user", "Rotate the API keys for the staging services and update the secrets store", None, None, None, h1 + 5, None),
+        ("hermes-demo-1", "assistant", None, None, json.dumps([{"id": "call_h1", "type": "function", "function": {"name": "terminal", "arguments": json.dumps({"command": "ls secrets/staging"})}}]), None, h1 + 8, "Need the current key inventory before touching anything."),
+        ("hermes-demo-1", "tool", "api.env  db.env  queue.env", "call_h1", None, "terminal", h1 + 9, None),
+        ("hermes-demo-1", "assistant", "Three services found. Rotated all three keys, updated the secrets store, and verified each service picked up the new value on restart.", None, None, None, h1 + 200, None),
+        ("hermes-demo-1", "user", "Thanks, log it in the runbook", None, None, None, h1 + 230, None),
+        ("hermes-demo-1", "assistant", "Runbook entry added under Rotations with today's date and the three service names.", None, None, None, h1 + 240, None),
+        ("hermes-demo-2", "user", "Summarize what changed in the data-pipeline repo this week", None, None, None, h2 + 5, None),
+        ("hermes-demo-2", "assistant", "Two changes: the June partition backfill landed, and the retry storm in the poller was fixed with a single-flight guard.", None, None, None, h2 + 60, None),
+    ])
+    c.commit(); c.close()
+
+    # openclaw:旧版 sessions/*.jsonl 转录 + sessions.json 索引(fixture 搬运换文案)
+    copy_fixture_tree(
+        "openclaw/agents/main/sessions/cccccccc-aaaa-bbbb-cccc-000000000017.jsonl",
+        ".openclaw/agents/main/sessions/cccccccc-aaaa-bbbb-cccc-000000000017.jsonl",
+        [("/Users/tester/Github/wakefx", f"{g}/blog-engine"),
+         ("OpenClaw QR cleanup", "Draft the weekly changelog post"),
+         ("OpenClaw 看看二维码组件的 useEffect() 清理", "Draft this week's changelog post from the merged PRs"),
+         ("找到泄漏点,已补清理回调。", "Drafted from 14 merged PRs, grouped by area, with links — ready for review."),
+         ("之前的对话:排查二维码组件 useEffect 泄漏并修复", "Earlier: drafted the changelog post from merged PRs"),
+         ("谢谢,合并了", "Looks good, publish it")])
+    copy_fixture_tree(
+        "openclaw/agents/main/sessions/sessions.json",
+        ".openclaw/agents/main/sessions/sessions.json",
+        [])
 
     build_sqlite_agents()
     build_long_tail_agents(g)
