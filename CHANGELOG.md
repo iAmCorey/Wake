@@ -2,9 +2,12 @@
 
 ## Unreleased
 
+## [0.4.0] — 2026-09-03
+
 - New: remote hosts — mirror agent sessions from other machines over SSH into the index. Add a host in Settings → Remote hosts (an alias from `~/.ssh/config` or `user@host`); sessions sync on launch, refresh, and Sync now, then browse and search them alongside local ones with an `@host` badge
 - New: remote sessions offer "Copy SSH command" — a ready-to-paste `ssh -t` command that resumes the session in its original project directory on the remote machine
 - Update: remote mirroring is strictly read-only — only session data is synced (never credentials), nothing on the remote host is ever written, and remote sessions can't be deleted from Wake
+- Fix: the blue focus outline on text fields is no longer clipped inside dialogs and settings pages
 - Credits: remote sessions over SSH were requested in [issue #21](https://github.com/iAmCorey/Wake/issues/21). Thanks to [@megrxu](https://github.com/megrxu) for the proposal and workflow sketch
 
 ## [0.3.6] — 2026-09-02
