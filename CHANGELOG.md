@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## [0.4.2] — 2026-09-03
+
+- Fix: the Hermes Agent icon is readable in dark mode instead of showing as a white blob
+
 ## [0.4.1] — 2026-09-03
 
 - New: Hermes Agent sessions — Wake reads `~/.hermes/state.db` (and every `profiles/*/state.db`), including tool calls, reasoning and the channel a session came from; `HERMES_HOME` is respected
