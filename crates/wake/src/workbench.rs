@@ -5953,7 +5953,6 @@ impl Workbench {
             )
             .into_any_element()
         });
-        let dark = cx.theme().mode.is_dark();
         let name_of = move |raw: &str| -> SharedString {
             match board {
                 TrendBoard::Agents => AgentId::from_str(raw)
@@ -5962,7 +5961,17 @@ impl Workbench {
                 TrendBoard::Models => raw.to_string().into(),
             }
         };
-        let _ = dark;
+        // agent 用品牌色(库里冒出未知 agent_id 时退分类色板),模型按排名取色板
+        let color_of = move |raw: &str, rank: usize| -> Hsla {
+            let palette = crate::theme::SERIES_PALETTE[rank % crate::theme::SERIES_PALETTE.len()];
+            let hex = match board {
+                TrendBoard::Agents => AgentId::from_str(raw)
+                    .map(crate::theme::agent_series_color)
+                    .unwrap_or(palette),
+                TrendBoard::Models => palette,
+            };
+            rgb(hex).into()
+        };
         v_flex()
             .gap(SPACE_MD)
             .child(switch_section_head(
@@ -5971,7 +5980,7 @@ impl Workbench {
                 arrows,
                 cx,
             ))
-            .child(render_trend(d, series, name_of, cx))
+            .child(render_trend(d, series, name_of, color_of, cx))
             .into_any_element()
     }
 
@@ -7055,11 +7064,9 @@ fn render_distribution(range: InsightsRange, values: &[i64], peak: usize, cx: &A
         .into_any_element()
 }
 
-/// 趋势图堆叠层的着色阶梯:前五个序列按总量降序取 primary 五档不透明度,
-/// 其余合并为 "Other" 用 muted_foreground 淡层——与热力图同一单色语言,
-/// 不引入品牌色(十六家的品牌色叠在一起没法读)
-const TREND_STEPS: [f32; 5] = [1., 0.72, 0.5, 0.34, 0.22];
-const TREND_TOP: usize = TREND_STEPS.len();
+/// 趋势图堆叠的序列数上限:前五个按总量降序各自着色(agent 品牌色 / 模型
+/// 色板,见 theme.rs),其余合并为 "Other" 用 muted_foreground 淡层
+const TREND_TOP: usize = 5;
 
 fn trend_caption(board: TrendBoard, series: &[TrendSeries]) -> String {
     let unit = match board {
@@ -7183,6 +7190,7 @@ fn render_trend(
     d: &InsightsData,
     series: &[TrendSeries],
     name_of: impl Fn(&str) -> SharedString,
+    color_of: impl Fn(&str, usize) -> Hsla,
     cx: &App,
 ) -> AnyElement {
     use chrono::Datelike as _;
@@ -7198,13 +7206,7 @@ fn render_trend(
         .iter()
         .take(TREND_TOP)
         .enumerate()
-        .map(|(i, s)| {
-            (
-                name_of(&s.name),
-                theme.primary.opacity(TREND_STEPS[i]),
-                s.weekly.clone(),
-            )
-        })
+        .map(|(i, s)| (name_of(&s.name), color_of(&s.name, i), s.weekly.clone()))
         .collect();
     if series.len() > TREND_TOP {
         let mut other = vec![0i64; TREND_WEEKS];

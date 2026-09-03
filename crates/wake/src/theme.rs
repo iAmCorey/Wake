@@ -78,6 +78,36 @@ pub const MODEL_BADGE_BG: u32 = 0xD97757;
 /// 收藏星选中色——macOS systemYellow(Finder/Mail 星标惯例),两模式通用
 pub const STAR_YELLOW: u32 = 0xFFCC00;
 
+/// Insights 趋势图的 agent 序列色:有彩色品牌的家取品牌色(从内嵌 PNG 取主色,
+/// 与侧栏图标同调),单色字形的家(Copilot/Cursor/OpenCode/Pi/Grok/Kimi)
+/// 给固定备选色——同一家在任何机器上颜色都不变,相邻常见组合(Claude/Codex/
+/// Cursor/Copilot)互不撞色。两模式共用(用户 2026-09-03:单色阶梯分不清)
+pub fn agent_series_color(agent: wake_core::models::AgentId) -> u32 {
+    use wake_core::models::AgentId::*;
+    match agent {
+        ClaudeCode => 0xD97757,
+        Codex => 0x7A8DFF,
+        Grok => 0x8A7F73,
+        Dsh => 0x4D6BFE,
+        Cursor => 0x2DB6C8,
+        Opencode => 0xC98A2E,
+        Pi => 0x3AAE8C,
+        Omp => 0xB05CE6,
+        Kiro => 0x9148FF,
+        Kimi => 0xE4739E,
+        Gemini => 0x3B8BD9,
+        Copilot => 0x6E9C3F,
+        Antigravity => 0x648AB5,
+        Qoder => 0x2BB454,
+        Hermes => 0xE0B040,
+        Openclaw => 0xE04A4A,
+    }
+}
+
+/// 趋势图模型序列的分类色板(按排名取色);模型没有品牌可依,六色足够区分
+/// 前五 + Other
+pub const SERIES_PALETTE: [u32; 6] = [0x4C8DFF, 0xD97757, 0x2BB454, 0x9148FF, 0xE4739E, 0xE0B040];
+
 /// 在 gpui-component 默认主题之上覆写 Wake 的 token。
 /// 每次外观切换后都要重新调用(sync_system_appearance 会重置为默认)。
 pub fn apply_wake_theme(cx: &mut App) {
