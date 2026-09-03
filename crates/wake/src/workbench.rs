@@ -749,10 +749,13 @@ impl ListDelegate for SessionsDelegate {
                                     theme.muted_foreground,
                                 ))
                                 .when(!s.host.is_empty(), |this| {
-                                    // 远程会话的 host 徽章:@ 前缀一眼与项目名区分
-                                    this.child(outline_badge(
+                                    // 远程会话的 host 徽章:填充胶囊但用 primary 淡底 +
+                                    // primary 字,与紧邻的 muted 项目胶囊拉开(描边版、
+                                    // muted 填充版都试过,用户否决 2026-09-03)
+                                    this.child(badge(
                                         format!("@{}", s.host),
-                                        theme.muted_foreground,
+                                        theme.primary.opacity(0.14),
+                                        theme.primary,
                                     ))
                                 })
                                 .when(show_chevron, |this| {
@@ -2767,6 +2770,133 @@ impl Workbench {
     /// 出现。表单作为 Settings 窗口的模态层，esc/取消回到 Locations 页。
     pub(crate) fn open_add_location_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_location_form(FormTarget::Add, window, cx);
+    }
+
+    /// Remote hosts 的 Add host 表单:与 location 表单同一材质(标题缩进轴、
+    /// 标签列宽、Cancel/Add 只在有输入时出现),字段只有一个 host 名;SSH
+    /// 前提说明放在字段下方,填的时候才需要看。回车与 Add 同一条提交路,
+    /// 校验不过留在表单上改(2026-09-03 用户要求与 Locations 版式统一)
+    pub(crate) fn open_add_remote_host_form(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let host_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("alias from ~/.ssh/config, or user@host")
+        });
+        cx.subscribe_in(&host_input, window, |this, input, event, window, cx| {
+            if matches!(event, gpui_component::input::InputEvent::PressEnter { .. }) {
+                let name = input.read(cx).text().to_string();
+                if this.commit_remote_host_form(&name, window, cx) {
+                    window.close_all_dialogs(cx);
+                }
+            }
+        })
+        .detach();
+        let entity = cx.entity();
+        open_closable_dialog(window, cx, move |dialog, _window, cx| {
+            let theme = cx.theme();
+            let field_inset = BUTTON_SM_PX;
+            // 有输入才亮出 Cancel/Add(与 location 表单同规则);Rope 直接扫描,
+            // builder 每帧跑,禁 to_string
+            let dirty = host_input
+                .read(cx)
+                .text()
+                .chars()
+                .any(|c| !c.is_whitespace());
+            let ok_entity = entity.clone();
+            let ok_input = host_input.clone();
+            let dialog = dialog
+                .title(
+                    div()
+                        .pl(field_inset)
+                        .text_size(FONT_HEADING)
+                        .font_semibold()
+                        .child("Add remote host"),
+                )
+                .w(px(500.))
+                .button_props(gpui_component::dialog::DialogButtonProps::default().ok_text("Add"))
+                .child(
+                    v_flex()
+                        .gap(SPACE_MD)
+                        .child(
+                            h_flex()
+                                .px(field_inset)
+                                .gap(SPACE_SM)
+                                .items_center()
+                                .child(
+                                    div()
+                                        .w(FORM_LABEL_W)
+                                        .flex_shrink_0()
+                                        .text_size(FONT_CAPTION)
+                                        .text_color(theme.muted_foreground)
+                                        .child("Host"),
+                                )
+                                .child(div().flex_1().min_w_0().child(Input::new(&host_input))),
+                        )
+                        .child(
+                            // 说明与输入框左缘对齐(跳过标签列)
+                            div()
+                                .pl(field_inset + FORM_LABEL_W + SPACE_SM)
+                                .pr(field_inset)
+                                .text_size(FONT_CAPTION)
+                                .text_color(theme.muted_foreground)
+                                .child(
+                                    "Needs non-interactive SSH (key in your agent) and rsync on \
+                                     both ends. Connect once from a terminal first to trust the \
+                                     host key. Sessions sync on launch, refresh, and Sync now.",
+                                ),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    let name = ok_input.read(cx).text().to_string();
+                    ok_entity.update(cx, |this, cx| {
+                        this.commit_remote_host_form(&name, window, cx)
+                    })
+                });
+            if dirty {
+                dialog.footer(
+                    gpui_component::dialog::DialogFooter::new()
+                        .w_full()
+                        .px(field_inset)
+                        .child(
+                            gpui_component::dialog::DialogClose::new()
+                                .child(Button::new("remote-host-cancel").label("Cancel").outline()),
+                        )
+                        .child(
+                            gpui_component::dialog::DialogAction::new()
+                                .child(Button::new("remote-host-add").label("Add").primary()),
+                        ),
+                )
+            } else {
+                dialog
+            }
+        });
+    }
+
+    /// Add host 表单提交:校验 → 入库 → 只拉这台;返回 true 关弹窗,false 留在
+    /// 表单上改(空输入静默,格式错给通知)
+    fn commit_remote_host_form(
+        &mut self,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let name = name.trim();
+        if name.is_empty() {
+            return false;
+        }
+        if !wake_core::remote::valid_host_name(name) {
+            window.push_notification(
+                Notification::error(
+                    "Host must be an SSH alias or user@host (letters, digits, . _ - @)",
+                ),
+                cx,
+            );
+            return false;
+        }
+        self.add_remote_host(name, window, cx);
+        true
     }
 
     pub(crate) fn open_edit_location_form(
@@ -6306,9 +6436,12 @@ impl Workbench {
                                         },
                                     )
                                     .when(!meta.host.is_empty(), |this| {
+                                        // 详情页保持 model/source 同排的描边形态,色相
+                                        // 与列表行的 host 胶囊一致(primary);muted 描边
+                                        // 用户否决 2026-09-03
                                         this.child(outline_badge(
                                             format!("@{}", meta.host),
-                                            theme.muted_foreground,
+                                            theme.primary,
                                         ))
                                     })
                                     .when(has_detail_facts, |this| {

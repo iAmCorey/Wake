@@ -217,6 +217,11 @@ pub fn apply_wake_theme(cx: &mut App) {
     theme.font_family = ".SystemUIFont".into();
     theme.font_size = gpui::px(14.);
     theme.radius = gpui::px(8.);
+    // 聚焦态只把边框染成 ring 色,不画框外的环:gpui-component 的环是元素框外
+    // 2px 的绝对定位子元素,任何裁切祖先(弹窗面板、滚动列表、圆角容器)都会
+    // 切掉一截——Add host / Add location 表单与设置页里实测残缺(2026-09-03
+    // 用户反馈两轮)。上游自己的建议就是版式裁切多的应用关掉它,边框不占空间
+    theme.focus_ring = false;
     theme.radius_lg = gpui::px(12.);
     theme.shadow = true;
 }
