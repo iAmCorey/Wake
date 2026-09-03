@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.4.3] — 2026-09-03
+
 - New: Insights shows a "Last 7 days" row — sessions, prompts and active days with the change against the previous 7 days
 - New: Insights "Over time" chart — prompts per week for the past year stacked by agent in brand colors, aligned with the activity heatmap
 
