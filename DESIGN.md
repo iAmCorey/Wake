@@ -172,7 +172,7 @@ macOS 不设置横跨三栏的自定义 header。主窗口透明标题栏高 44p
 
 详情加载失败不得退化为空白阅读面：没有匹配 adapter 时明确说明 agent 与会话路径不匹配，转录解析失败时保留底层错误链；两者共用居中的错误态，并提供“在文件管理器中显示”动作定位原始会话文件。异步解析结果只允许写回仍然选中的同一会话，避免快速切换时旧任务覆盖新详情。
 
-对话框标题一律 Heading 16 semibold:组件内建 `.title()` 不设字号(实渲窗口默认 14px),必须显式补 `text_size(FONT_HEADING)`。破坏性确认的主按钮点名动作并用 danger 形态("Move to Trash",Windows 上经 trash_copy! 平台文案为 "Move to Recycle Bin",不留裸 "OK");表单弹窗内控件同档取齐(输入框与下拉/浏览钮同高,次级动作行才允许 small)。
+对话框标题一律 Heading 16 semibold:组件内建 `.title()` 不设字号(实渲窗口默认 14px),必须显式补 `text_size(FONT_HEADING)`。破坏性确认的主按钮点名动作并用 danger 形态("Move to Trash",Windows 上经 trash_copy! 平台文案为 "Move to Recycle Bin",不留裸 "OK");表单弹窗内控件同档取齐(输入框与下拉/浏览钮同高,次级动作行才允许 small)。输入框聚焦态只把边框染成 ring 色,不画框外的聚焦环(theme.rs 关掉了 `focus_ring`):组件的环是元素框外 2px 的绝对定位子元素,弹窗内容层与滚动列表都会裁掉它,染色边框不占空间也不会残缺。
 
 ### 对话阅读面
 

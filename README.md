@@ -21,6 +21,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and a dozen othe
 - **One-click resume** — reopens the session in your terminal (Terminal/iTerm on macOS; native terminal hosts on Linux and Windows) at the original project directory (`claude --resume`, `codex resume`, …)
 - **Manage** — star/pin (stored in Wake's own DB, original files untouched), export to Markdown or save an inline image through the system Save dialog (Wake remembers the last folder), delete (system Trash + tombstone so deleted sessions stay deleted)
 - **Insights** — a stats page for your whole library: GitHub-style activity heatmap with streaks, hour / weekday / month breakdowns, and Agents / Projects / Models leaderboards switchable between sessions, tokens, and prompts
+- **Remote hosts** — mirror the sessions on your other machines over SSH (Settings → Remote hosts); they show up next to local ones with an `@host` badge, searchable like everything else, and resume through a copied `ssh -t` command
 
 ![Full-text search across every agent's sessions](imgs/screenshot-2.webp)
 
@@ -48,11 +49,27 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and a dozen othe
 
 Cursor IDE chats, Windsurf, and Trae encrypt their local data; Amp, Factory (Droid), and Warp keep sessions in the cloud — none of those are supported. Reasonix stores sessions locally but hasn't been mapped yet.
 
+## Remote hosts
+
+Wake can mirror the sessions on your other machines and show them next to the local ones. Add a host in Settings → Remote hosts (an alias from `~/.ssh/config`, or `user@host`); Wake then syncs on launch, on refresh, and whenever you click Sync now. Remote sessions carry an `@host` badge, are searchable like everything else, and resume through *Copy SSH command*, a ready-to-paste `ssh -t <host> 'cd <project> && codex resume <id>'`.
+
+Before you add a host:
+
+- SSH has to work without prompts: load your key into an agent (Wake runs without a terminal, so it can never answer a passphrase prompt) and connect once from a terminal so the host key is already trusted
+- `rsync` is needed on both ends — macOS and most Linux distributions ship one; on Windows install it yourself
+
+How it works, and what it doesn't do yet:
+
+- Wake first asks the remote which of the known agent directories exist, then mirrors only those with `rsync` into `remotes/<host>/` under its own data directory. Only session data and sidecar files are copied, never credentials, and nothing on the remote is ever written
+- Remote sessions are read-only in Wake: they can't be moved to the Trash, and the mirror simply follows whatever is on the remote
+- The remote is assumed to use each agent's default paths under the login user's home (`CODEX_HOME`-style overrides on the remote aren't detected), and remote Windows machines aren't supported
+
 ## Privacy stance
 
 - Agent data directories are opened **read-only**; Wake never writes to another tool's files or databases
 - Credential files (`auth.json` and friends) are never read
-- No background network requests — the only network action is a user-initiated update check against Wake's public GitHub Release metadata; session data is never sent
+- Remote hosts are mirrored read-only with `rsync` over your existing SSH setup: only session data and its sidecar files come across (never credentials), nothing on the remote machine is ever written, and the mirror lives inside Wake's own data directory (`remotes/<host>/`), so removing the host removes it
+- No background network requests — the only network actions are a user-initiated update check against Wake's public GitHub Release metadata and, if you configure remote hosts, SSH/rsync to those hosts on launch, refresh, and Sync now; session data is never sent anywhere else
 - Wake's own index lives at `~/Library/Application Support/wake/wake.db` (Linux: `~/.local/share/wake`, Windows: `%LOCALAPPDATA%\wake`) and can be rebuilt from scratch at any time (stars/pins live in a separate table and survive rebuilds). Two small preference files (`appearance`, `window.json`) sit beside it on macOS, under `~/.config/wake` on Linux and `%APPDATA%\wake` on Windows; Open In and export-folder choices live in the index database's `prefs` table
 
 ## Performance
@@ -109,11 +126,12 @@ cargo run -p wake-core --bin scan      # data-layer smoke test: scan and print s
 cargo run -p wake-core --bin scan -- --search "useEffect("   # search smoke test
 WAKE_THEME=dark cargo run -p wake      # force dark/light (defaults to system)
 WAKE_HOME=/path cargo run -p wake      # point all agent adapters at a different home dir (portable installs, testing)
+WAKE_LIVE_REMOTE_HOST=<host> cargo test -p wake-core --test remote_sync live -- --ignored   # run the remote-host pipeline against a real SSH host
 git config core.hooksPath scripts/hooks   # optional: run tests before every commit
 python3 scripts/demo-home.py           # build a synthetic fake-home dataset for screenshots/demos
 ```
 
-CI runs `cargo test -p wake-core` plus a full app build on every push to main and every PR. The test suite parses synthetic fixture sessions only — your real agent data is never touched.
+CI runs `cargo test -p wake-core` plus a full app build on every push to main and every PR. The test suite parses synthetic fixture sessions only — your real agent data is never touched (the remote-host end-to-end test uses a fake `ssh` and your system `rsync` against a synthetic home).
 
 ## Architecture
 
@@ -122,10 +140,12 @@ crates/
 ├── wake-core        # pure data layer, no UI dependencies
 │   ├── adapters/    #   claude / codex / qoder / copilot / cursor / opencode / kiro
 │   │                #   gemini / pi / omp / grok / kimi / antigravity / dsh
-│   │                #   (AgentAdapter trait — add an adapter, get the whole UI for free)
+│   │                #   (AgentAdapter trait — add an adapter, get the whole UI for free;
+│   │                #   remote.rs wraps any adapter over a synced cache for remote hosts)
+│   ├── remote.rs    #   remote hosts: ssh probe + rsync whitelist mirror into <data dir>/remotes/<host>/
 │   ├── scanner.rs   #   single-pass scan: meta + FTS in one go, mtime incremental
 │   ├── watcher.rs   #   notify-based file watching → per-file incremental updates
-│   ├── db.rs        #   rusqlite (WAL): sessions / messages / messages_fts / user_data / tombstones (+ location & schema meta tables)
+│   ├── db.rs        #   rusqlite (WAL): sessions / messages / messages_fts / user_data / tombstones (+ location, remote_hosts & schema meta tables)
 │   └── services/    #   terminal resume (per-platform: AppleScript / argv / Win32) / export / trash
 └── wake             # GPUI app (three-pane workbench + ⌘K / Ctrl+K palette)
 ```
