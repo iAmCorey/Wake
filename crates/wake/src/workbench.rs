@@ -2003,8 +2003,6 @@ pub struct Workbench {
     insights_range: InsightsRange,
     /// 三个榜单各自的度量档,按 UsageBoard 序数索引
     insights_metrics: [InsightsMetric; 3],
-    /// 趋势图当前分组(agent / 模型),纯视图状态
-    insights_trend: TrendBoard,
     /// 进行中的统计查询;新查询覆盖旧值即取消,扫描风暴下不堆积读锁竞争
     insights_task: Option<Task<()>>,
 
@@ -2090,50 +2088,6 @@ impl InsightsMetric {
         match self {
             Self::Tokens => fmt_tokens(Some(u.tokens)),
             _ => thousands(self.value(u)),
-        }
-    }
-}
-
-/// 趋势图("Over time")的分组维度,‹ › 二选一切换;数据两份常驻,切换不重查
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TrendBoard {
-    Agents,
-    Models,
-}
-
-impl TrendBoard {
-    fn caption(self) -> &'static str {
-        match self {
-            Self::Agents => "Agents",
-            Self::Models => "Models",
-        }
-    }
-
-    fn unit(self) -> &'static str {
-        match self {
-            Self::Agents => "agent",
-            Self::Models => "model",
-        }
-    }
-
-    fn series(self, d: &InsightsData) -> &[TrendSeries] {
-        match self {
-            Self::Agents => &d.trend_agents,
-            Self::Models => &d.trend_models,
-        }
-    }
-
-    fn label(self, raw: &str) -> SharedString {
-        match self {
-            Self::Agents => agent_label(raw),
-            Self::Models => raw.to_string().into(),
-        }
-    }
-
-    fn toggle(self) -> Self {
-        match self {
-            Self::Agents => Self::Models,
-            Self::Models => Self::Agents,
         }
     }
 }
@@ -2366,7 +2320,6 @@ impl Workbench {
             insights_loading: false,
             insights_range: InsightsRange::Hour,
             insights_metrics: [InsightsMetric::Sessions; 3],
-            insights_trend: TrendBoard::Agents,
             insights_task: None,
             scan_events,
             watcher,
@@ -5929,38 +5882,16 @@ impl Workbench {
             .into_any_element()
     }
 
-    /// 趋势区块:近 53 周每周 prompts 按 agent / 模型堆叠,‹ › 二选一。
-    /// 模型序列为空(没有一家报模型)时只剩 Agents,不给切换钮
+    /// 趋势区块:近 53 周每周 prompts 按 agent 堆叠。不按模型出图——
+    /// messages 表没有逐条 model,会话级 model 是末态,切周即改写历史
     fn render_trend_section(&self, d: &InsightsData, cx: &Context<Self>) -> AnyElement {
-        let has_models = !d.trend_models.is_empty();
-        let board = if has_models {
-            self.insights_trend
-        } else {
-            TrendBoard::Agents
-        };
-        let flip = || {
-            cx.listener(|this, _, _window, cx| {
-                this.insights_trend = this.insights_trend.toggle();
-                cx.notify();
-            })
-        };
-        let arrows = has_models.then(|| {
-            insight_arrows(
-                "trend-arrow",
-                Some(board.caption().into()),
-                flip(),
-                flip(),
-                cx,
-            )
-            .into_any_element()
-        });
-        let layers = trend_layers(board, board.series(d), cx);
+        let layers = trend_layers(&d.trend_agents, cx);
         v_flex()
             .gap(SPACE_MD)
             .child(switch_section_head(
                 "Over time",
-                Some(trend_caption(board, &layers).into()),
-                arrows,
+                Some(trend_caption(&layers).into()),
+                None,
                 cx,
             ))
             .child(render_trend(d.trend_start(), layers, cx))
@@ -7118,8 +7049,8 @@ fn agent_label(raw: &str) -> SharedString {
         .unwrap_or_else(|| raw.to_string().into())
 }
 
-/// 趋势图堆叠的序列数上限:前五个按总量降序各自着色(agent 品牌色 / 模型
-/// 色板,见 theme.rs),其余合并为 "Other" 用 muted_foreground 淡层
+/// 趋势图堆叠的序列数上限:前五个按总量降序各自着 agent 品牌色(见 theme.rs),
+/// 其余合并为 "Other" 用 muted_foreground 淡层
 const TREND_TOP: usize = 5;
 
 /// 趋势图的一层:名称、色、TREND_WEEKS 周值;`other` 是合并层(不参评领先者)
@@ -7132,23 +7063,18 @@ struct TrendLayer {
 
 /// series → 图层投影。caption、图例、柱子共用这一份:图例里没有的名字不会
 /// 出现在 caption 里。Rc 让 53 个 tooltip 闭包只各持一个指针,hover 才格式化
-fn trend_layers(board: TrendBoard, series: &[TrendSeries], cx: &App) -> Rc<Vec<TrendLayer>> {
+fn trend_layers(series: &[TrendSeries], cx: &App) -> Rc<Vec<TrendLayer>> {
     let theme = cx.theme();
-    let palette = crate::theme::SERIES_PALETTE;
     let mut layers: Vec<TrendLayer> = series
         .iter()
         .take(TREND_TOP)
-        .enumerate()
-        .map(|(rank, s)| {
-            // agent 用品牌色(未知 agent_id 退分类色板),模型按排名取色板
-            let hex = match board {
-                TrendBoard::Agents => AgentId::from_str(&s.name)
-                    .map(crate::theme::agent_series_color)
-                    .unwrap_or(palette[rank % palette.len()]),
-                TrendBoard::Models => palette[rank % palette.len()],
-            };
+        .map(|s| {
+            // agent 用品牌色;库里冒出未知 agent_id(降级防御)退备选色
+            let hex = AgentId::from_str(&s.name)
+                .map(crate::theme::agent_series_color)
+                .unwrap_or(crate::theme::SERIES_FALLBACK);
             TrendLayer {
-                name: board.label(&s.name),
+                name: agent_label(&s.name),
                 color: rgb(hex).into(),
                 weekly: s.weekly.clone(),
                 other: false,
@@ -7172,8 +7098,7 @@ fn trend_layers(board: TrendBoard, series: &[TrendSeries], cx: &App) -> Rc<Vec<T
     Rc::new(layers)
 }
 
-fn trend_caption(board: TrendBoard, layers: &[TrendLayer]) -> String {
-    let unit = board.unit();
+fn trend_caption(layers: &[TrendLayer]) -> String {
     // 本周领先者:as_of 所在周 prompts 最多的一层(本周为空则退回上一周)
     let leader = [TREND_WEEKS - 1, TREND_WEEKS - 2]
         .into_iter()
@@ -7185,13 +7110,14 @@ fn trend_caption(board: TrendBoard, layers: &[TrendLayer]) -> String {
                 .map(|l| l.name.clone())
         });
     match leader {
-        Some(name) => format!("Prompts per week by {unit} · {name} leads this week"),
-        None => format!("Prompts per week by {unit}"),
+        Some(name) => format!("Prompts per week by agent · {name} leads this week"),
+        None => "Prompts per week by agent".to_string(),
     }
 }
 
-/// "Last 7 days" 对比行:四个度量各带与前 7 天的相对变化。上涨用 primary,
-/// 持平/下降 muted——不引入第四种文字色
+/// "Last 7 days" 对比行:三个度量各带与前 7 天的相对变化。上涨用 primary,
+/// 持平/下降 muted——不引入第四种文字色。Tokens 不在这里:会话级累计量没有
+/// 时间维度,按创建日切窗会颠倒结果(2026-09-03 Codex review)
 fn render_week_section(d: &InsightsData, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let (cur, prev) = d.last_week_pair();
@@ -7228,11 +7154,6 @@ fn render_week_section(d: &InsightsData, cx: &App) -> AnyElement {
                 .gap(px(40.))
                 .items_start()
                 .child(stat("Sessions", cur.sessions, prev.sessions, &thousands))
-                .when(d.tokens > 0, |row| {
-                    row.child(stat("Tokens", cur.tokens, prev.tokens, &|n| {
-                        fmt_tokens(Some(n))
-                    }))
-                })
                 .child(stat("Prompts", cur.prompts, prev.prompts, &thousands))
                 .child(stat(
                     "Active days",

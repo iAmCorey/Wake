@@ -725,7 +725,7 @@ fn insights_snapshot_and_streaks() {
         .single()
         .expect("unambiguous local time")
         .date_naive();
-    assert_eq!(d.daily_sessions, vec![(created_day, 2, 500)]);
+    assert_eq!(d.daily_sessions, vec![(created_day, 2)]);
     // 趋势:as_of=1/13(周二)→ 本周从 1/12 起是末列 52;1/7、1/10、1/11 落在
     // 1/5 那周 = 51。未来行与无 ts 行不进周桶
     let claude = &d.trend_agents[0];
@@ -735,13 +735,6 @@ fn insights_snapshot_and_streaks() {
     let codex = &d.trend_agents[1];
     assert_eq!((codex.name.as_str(), codex.total()), ("codex", 2));
     assert_eq!(codex.weekly[51], 2);
-    assert_eq!(
-        d.trend_models
-            .iter()
-            .map(|s| (s.name.as_str(), s.total()))
-            .collect::<Vec<_>>(),
-        vec![("claude-opus", 4), ("gpt-5-codex", 2)]
-    );
     // Last 7 days(1/7–1/13)对前 7 天(12/31–1/6):prompts 6 / 0,活跃日 4 / 0;
     // 会话创建在 2023,两窗都是 0
     let (cur, prev) = d.last_week_pair();
@@ -750,11 +743,21 @@ fn insights_snapshot_and_streaks() {
         WindowStats {
             sessions: 0,
             prompts: 6,
-            tokens: 0,
             active_days: 4
         }
     );
     assert_eq!(prev, WindowStats::default());
+
+    // 超出 SQLite date() 范围的正 created_at(微秒戳/脏值):date() 回 NULL,
+    // 该行跳过,快照不得整体失败(2026-09-03 Codex review)
+    let mut bad = meta("codex:i-bad", "脏 created_at");
+    bad.created_at = 9_000_000_000_000_000;
+    store
+        .write_session(&bad, bad.updated_at, &[at(0, Role::User, Some(ts(12, 8)))])
+        .unwrap();
+    let d2 = store.insights(today).expect("bad created_at must not abort insights");
+    assert_eq!(d2.sessions, d.sessions + 1);
+    assert_eq!(d2.daily_sessions, vec![(created_day, 2)]);
 
     // 断档超过一天 → current 归零,longest 保留
     let far = chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();

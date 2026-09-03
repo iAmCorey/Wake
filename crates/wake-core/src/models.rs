@@ -428,22 +428,23 @@ pub struct InsightsData {
     pub projects: Vec<UsageTally>,
     /// 全量模型,同上
     pub models: Vec<UsageTally>,
-    /// 按会话创建日的 (日, 会话数, tokens) 序列(升序,仅有效日期、不含未来日)。
-    /// "Last 7 days" 周对比由它与 daily 派生
-    pub daily_sessions: Vec<(chrono::NaiveDate, i64, i64)>,
+    /// 按会话创建日的 (日, 会话数) 序列(升序,仅有效日期、不含未来日)。
+    /// "Last 7 days" 周对比由它与 daily 派生。tokens 不进这里:`tokens_used`
+    /// 是会话终身累计量,没有时间维度,按创建日切窗会把十天前开的长会话的
+    /// 全部用量记到上一窗(2026-09-03 Codex review)
+    pub daily_sessions: Vec<(chrono::NaiveDate, i64)>,
     /// 各 agent 近 53 周(周一起始,末项 = as_of 所在周)的每周 prompts;
-    /// 与热力图同一时间窗,按总量降序
+    /// 与热力图同一时间窗,按总量降序。**不按模型出趋势**:messages 表没有
+    /// 逐条 model,会话级 `model` 是末态,按它归因会把整段历史改写成最后
+    /// 用的那个模型(同一 review)
     pub trend_agents: Vec<TrendSeries>,
-    /// 各模型同上(无模型的会话不计)
-    pub trend_models: Vec<TrendSeries>,
 }
 
-/// 时间窗内的四个度量(Last 7 days 与其前 7 天各一份)
+/// 时间窗内的度量(Last 7 days 与其前 7 天各一份)
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WindowStats {
     pub sessions: i64,
     pub prompts: i64,
-    pub tokens: i64,
     pub active_days: i64,
 }
 
@@ -484,13 +485,12 @@ impl InsightsData {
             w.prompts += n;
             w.active_days += 1;
         }
-        let from = self.daily_sessions.partition_point(|(d, _, _)| *d < start);
-        for (_, sessions, tokens) in self.daily_sessions[from..]
+        let from = self.daily_sessions.partition_point(|(d, _)| *d < start);
+        for (_, sessions) in self.daily_sessions[from..]
             .iter()
-            .take_while(|(d, _, _)| *d <= ending)
+            .take_while(|(d, _)| *d <= ending)
         {
             w.sessions += sessions;
-            w.tokens += tokens;
         }
         w
     }

@@ -107,16 +107,8 @@ pub fn agent_series_color(agent: wake_core::models::AgentId) -> u32 {
     }
 }
 
-/// 趋势图模型序列的分类色板(按排名取色);模型没有品牌可依,六色足够区分
-/// 前五 + Other
-pub const SERIES_PALETTE: [u32; 6] = [
-    0x4C8DFF,
-    CLAUDE_ORANGE,
-    0x2BB454,
-    0x9148FF,
-    0xE4739E,
-    0xE0B040,
-];
+/// 趋势图里库内冒出未知 agent_id(降级防御)时的备选序列色
+pub const SERIES_FALLBACK: u32 = 0x4C8DFF;
 
 /// 在 gpui-component 默认主题之上覆写 Wake 的 token。
 /// 每次外观切换后都要重新调用(sync_system_appearance 会重置为默认)。

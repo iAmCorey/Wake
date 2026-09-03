@@ -1226,13 +1226,13 @@ impl Store {
         drop(stmt);
 
         // 第二遍:榜单 prompts 按(agent,项目,模型,日)一次分组(行数 = 组合数×
-        // 活跃日,千级),拆三张榜单 map + 两组周桶回填——榜单求和不看日期
-        // (无 ts / 未来行也计),周桶只收落在趋势窗内的日
+        // 活跃日,千级),拆三张榜单 map + agent 周桶回填——榜单求和不看日期
+        // (无 ts / 未来行也计),周桶只收落在趋势窗内的日。模型不出周桶:
+        // s.model 是会话末态,按它切周会把整段历史归给最后用的模型
         let mut prompts_by_agent: HashMap<String, i64> = HashMap::new();
         let mut prompts_by_project: HashMap<String, i64> = HashMap::new();
         let mut prompts_by_model: HashMap<String, i64> = HashMap::new();
         let mut by_agent: HashMap<String, Vec<i64>> = HashMap::new();
-        let mut by_model: HashMap<String, Vec<i64>> = HashMap::new();
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT s.agent_id, s.project_path, COALESCE(s.model,''),
                     CASE WHEN m.ts > 0 THEN date(m.ts/1000,'unixepoch','localtime') END d,
@@ -1254,7 +1254,7 @@ impl Store {
             *prompts_by_agent.entry(agent.clone()).or_default() += n;
             *prompts_by_project.entry(project).or_default() += n;
             if !model.is_empty() {
-                *prompts_by_model.entry(model.clone()).or_default() += n;
+                *prompts_by_model.entry(model).or_default() += n;
             }
             let Some(ix) = d
                 .as_deref()
@@ -1266,23 +1266,14 @@ impl Store {
             by_agent
                 .entry(agent)
                 .or_insert_with(|| vec![0; TREND_WEEKS])[ix] += n;
-            if !model.is_empty() {
-                by_model
-                    .entry(model)
-                    .or_insert_with(|| vec![0; TREND_WEEKS])[ix] += n;
-            }
         }
         drop(stmt);
-        let into_series = |map: HashMap<String, Vec<i64>>| -> Vec<TrendSeries> {
-            let mut v: Vec<TrendSeries> = map
-                .into_iter()
-                .map(|(name, weekly)| TrendSeries { name, weekly })
-                .collect();
-            v.sort_by(|a, b| b.total().cmp(&a.total()).then_with(|| a.name.cmp(&b.name)));
-            v
-        };
-        data.trend_agents = into_series(by_agent);
-        data.trend_models = into_series(by_model);
+        data.trend_agents = by_agent
+            .into_iter()
+            .map(|(name, weekly)| TrendSeries { name, weekly })
+            .collect();
+        data.trend_agents
+            .sort_by(|a, b| b.total().cmp(&a.total()).then_with(|| a.name.cmp(&b.name)));
 
         // 榜单主体只查 sessions 表(几百行),prompts 由上面的 map 回填。
         // display 与 group 分开传:项目按 path 分组、按名展示(同名异路径
@@ -1334,23 +1325,21 @@ impl Store {
             &prompts_by_model,
         )?;
 
-        // 会话按创建日分桶(Last 7 days 的 sessions/tokens 对比用)
+        // 会话按创建日分桶(Last 7 days 的 sessions 对比用)。date() 对超出
+        // 其范围的正数(微秒戳、脏值)返回 NULL——按 Option 读,坏行跳过,
+        // 不能让一条脏 created_at 掀翻整张快照(2026-09-03 Codex review)
         let mut stmt = conn.prepare_cached(
-            "SELECT date(created_at/1000,'unixepoch','localtime'), COUNT(*), COALESCE(SUM(tokens_used),0)
+            "SELECT date(created_at/1000,'unixepoch','localtime'), COUNT(*)
              FROM sessions WHERE archived = 0 AND created_at > 0
              GROUP BY 1 ORDER BY 1",
         )?;
         let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, i64>(2)?,
-            ))
+            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?))
         })?;
         for row in rows {
-            let (d, n, tokens) = row?;
-            if let Some(day) = day_of(&d) {
-                data.daily_sessions.push((day, n, tokens));
+            let (d, n) = row?;
+            if let Some(day) = d.as_deref().and_then(day_of) {
+                data.daily_sessions.push((day, n));
             }
         }
         drop(stmt);
