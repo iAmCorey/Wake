@@ -1030,7 +1030,7 @@ impl SettingsView {
 
     /// Settings → Remote hosts:SSH 会话聚合(阶段 1:只读镜像)。
     /// 行结构仿 Locations:名称 + 状态行 + Switch + Remove。
-    fn render_remotes(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_remotes(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let rows = self.workbench.read(cx).remote_hosts_snapshot();
         let syncing = self.workbench.read(cx).remote_sync_in_progress();
@@ -1245,7 +1245,7 @@ impl Render for SettingsView {
         let content = match selected_page {
             SettingsPage::General => self.render_general(cx),
             SettingsPage::Locations => self.render_locations(cx).into_any_element(),
-            SettingsPage::Remotes => self.render_remotes(window, cx),
+            SettingsPage::Remotes => self.render_remotes(cx),
             SettingsPage::Data => self.render_data(cx),
             SettingsPage::Updates => self.render_updates(cx),
             SettingsPage::About => self.render_about(cx),

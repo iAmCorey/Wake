@@ -167,10 +167,10 @@ impl AgentAdapter for RemoteAdapter {
 
     fn with_custom_root(&self, dir: std::path::PathBuf) -> Box<dyn AgentAdapter> {
         // 远程实例没有自定义 location 的产品入口;保持装饰不变量以防未来误用
-        Box::new(Self {
-            inner: self.inner.with_custom_root(dir),
-            host: self.host.clone(),
-        })
+        Box::new(Self::new(
+            self.inner.with_custom_root(dir),
+            self.host.clone(),
+        ))
     }
 
     fn supports_individual_root_removal(&self) -> bool {
@@ -178,9 +178,7 @@ impl AgentAdapter for RemoteAdapter {
     }
 
     fn excluding_data_roots(&self, roots: &[std::path::PathBuf]) -> Option<Box<dyn AgentAdapter>> {
-        Some(Box::new(Self {
-            inner: self.inner.excluding_data_roots(roots)?,
-            host: self.host.clone(),
-        }))
+        let inner = self.inner.excluding_data_roots(roots)?;
+        Some(Box::new(Self::new(inner, self.host.clone())))
     }
 }

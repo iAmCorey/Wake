@@ -35,26 +35,11 @@ impl CodexAdapter {
             scan_archived: true,
         }
     }
+}
 
-    /// state DB 的 threads.rollout_path 是**写库那台机器**上的绝对路径——
-    /// 远程缓存与自定义根下和本实例枚举出的 file_path 对不上,按
-    /// sessions/archived_sessions 尾段重定位到本实例目录(默认根下恒等)。
-    /// 认不出形状(如 Windows 反斜杠路径)原样返回,退回全路径精确匹配。
-    fn remap_rollout_path(&self, raw: &str) -> String {
-        for (marker, base) in [
-            ("/archived_sessions/", &self.archived_dir),
-            ("/sessions/", &self.sessions_dir),
-        ] {
-            if let Some(pos) = raw.rfind(marker) {
-                let mut p = base.clone();
-                for seg in raw[pos + marker.len()..].split('/') {
-                    p.push(seg);
-                }
-                return p.to_string_lossy().into_owned();
-            }
-        }
-        raw.to_string()
-    }
+/// 路径末段,`/` 与 `\` 都算分隔符(state DB 可能是 Windows 机器写的)
+fn rollout_file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 /// rollout 存储本体(用户选中的是数据目录而非 codex home):自身不含
@@ -752,13 +737,16 @@ impl AgentAdapter for CodexAdapter {
 
     fn quick_meta(&self, refs: &[SessionFileRef]) -> Option<HashMap<String, SessionMeta>> {
         let rows = read_threads(&self.state_db)?;
-        let by_path: HashMap<String, &ThreadRow> = rows
+        // state DB 的 rollout_path 是**写库那台机器**上的绝对路径——远程缓存、
+        // 自定义根下与本实例枚举出的 file_path 对不上;rollout 文件名(时间戳 +
+        // uuid)全局唯一,按文件名匹配即可,与根/host/平台分隔符都无关
+        let by_name: HashMap<&str, &ThreadRow> = rows
             .iter()
-            .map(|r| (self.remap_rollout_path(&r.rollout_path), r))
+            .map(|r| (rollout_file_name(&r.rollout_path), r))
             .collect();
         let mut out = HashMap::new();
         for r in refs {
-            let Some(row) = by_path.get(r.file_path.as_str()) else {
+            let Some(row) = by_name.get(rollout_file_name(&r.file_path)) else {
                 continue;
             };
             let title = row

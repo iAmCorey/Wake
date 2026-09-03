@@ -3618,7 +3618,7 @@ impl Workbench {
                     .adapters
                     .iter()
                     .flat_map(|a| a.watch_paths())
-                    .any(|p| p.is_dir() && watched.is_none_or(|w| !w.contains(&p)));
+                    .any(|p| watched.is_none_or(|w| !w.contains(&p)) && p.is_dir());
                 if grown {
                     self.remount_watcher();
                 }
@@ -6058,34 +6058,30 @@ impl Workbench {
                                 h_flex()
                                     .flex_shrink_0()
                                     .gap(SPACE_XS)
-                                    .child(if let [single] =
+                                    .child(if let [terminal::ResumeTarget::CopySshCommand] =
                                         terminal::resume_targets(&meta).as_slice()
                                     {
-                                        // 单目标(阶段 1 的远程会话只有 Copy SSH command):
-                                        // 单段控件用现成 Button,无 chevron 无记忆(split
-                                        // 按钮手搓只因它要双段共壳)
-                                        let target = *single;
-                                        let (label, tip) = match target {
-                                            terminal::ResumeTarget::App(t) => (
-                                                format!("Open in {}", t.display_name()),
-                                                "Open this session".to_string(),
-                                            ),
-                                            terminal::ResumeTarget::CopySshCommand => (
-                                                "Copy SSH command".to_string(),
-                                                "Copy the SSH command that resumes this session on its host"
-                                                    .to_string(),
-                                            ),
-                                        };
+                                        // 远程会话(阶段 1 只有 Copy SSH command):单段控件用
+                                        // 现成 Button,无 chevron 无记忆(split 按钮手搓只因它
+                                        // 要双段共壳)。本地会话即便只剩一个终端也走 split
+                                        // 按钮,品牌图标与 per-agent 记忆不丢
                                         crate::settings::settings_button(
                                             Button::new("open-in-single"),
                                             cx,
                                         )
                                             .h(px(28.))
                                             .icon(icon("icons/terminal.svg").with_size(px(13.)))
-                                            .label(label)
-                                            .tooltip(tip)
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.do_resume(target, false, window, cx);
+                                            .label("Copy SSH command")
+                                            .tooltip(
+                                                "Copy the SSH command that resumes this session on its host",
+                                            )
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.do_resume(
+                                                    terminal::ResumeTarget::CopySshCommand,
+                                                    false,
+                                                    window,
+                                                    cx,
+                                                );
                                             }))
                                             .into_any_element()
                                     } else {

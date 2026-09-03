@@ -127,6 +127,10 @@ fn run_scan_inner(
             .max_by_key(|(root, _)| root.len())
             .map(|(_, ix)| *ix)
     };
+    // 墓碑查询与去重域共用的会话 key:按枚举实例的 host 构造(远程三段),
+    // 下面四处同一口径,别各自 format
+    let key_of =
+        |ix: usize, r: &SessionFileRef| session_key(r.agent, adapters[ix].host(), &r.native_id);
     // 第一遍:全量枚举 + 归属过滤
     let mut per_adapter: Vec<Vec<SessionFileRef>> = Vec::with_capacity(adapters.len());
     for (ix, adapter) in adapters.iter().enumerate() {
@@ -138,8 +142,7 @@ fn run_scan_inner(
             //(2026-08-24 Codex review P1)。key 按实例 host 构造(远程三段)
             // ——阶段 1 远程禁删故无远程墓碑,但格式先写对,放开时不欠债
             .filter(|r| {
-                !store.is_tombstoned(&r.file_path)
-                    && !store.is_key_tombstoned(&session_key(r.agent, adapter.host(), &r.native_id))
+                !store.is_tombstoned(&r.file_path) && !store.is_key_tombstoned(&key_of(ix, r))
             })
             // 无任何根认领的引用(越界枚举或合成测试)保守放行给枚举者;
             // 过滤只裁决"确有更深的根拥有它"的情形
@@ -159,7 +162,7 @@ fn run_scan_inner(
     for (ix, refs) in per_adapter.iter().enumerate() {
         for r in refs {
             candidates
-                .entry(session_key(r.agent, adapters[ix].host(), &r.native_id))
+                .entry(key_of(ix, r))
                 .or_default()
                 .push((ix, r.clone()));
         }
@@ -174,7 +177,7 @@ fn run_scan_inner(
     for (ix, refs) in per_adapter.iter_mut().enumerate() {
         refs.retain(|r| {
             candidates
-                .get(&session_key(r.agent, adapters[ix].host(), &r.native_id))
+                .get(&key_of(ix, r))
                 .is_none_or(|v| v[0].1.file_path == r.file_path)
         });
     }
@@ -194,7 +197,7 @@ fn run_scan_inner(
         }
     }
 
-    for (adapter, refs) in adapters.iter().zip(per_adapter) {
+    for (ix, (adapter, refs)) in adapters.iter().zip(per_adapter).enumerate() {
         let force_adapter = force_grok_backfill && adapter.agent() == AgentId::Grok;
         for r in &refs {
             seen_paths.insert(r.file_path.clone());
@@ -241,7 +244,7 @@ fn run_scan_inner(
                     .as_ref()
                     .and_then(|m| m.get(&r.file_path).cloned());
                 let fallbacks = candidates
-                    .get(&session_key(r.agent, adapter.host(), &r.native_id))
+                    .get(&key_of(ix, &r))
                     .filter(|v| v.len() > 1)
                     .map(|v| v[1..].to_vec())
                     .unwrap_or_default();
