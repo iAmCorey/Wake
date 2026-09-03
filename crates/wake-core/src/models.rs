@@ -19,13 +19,15 @@ pub enum AgentId {
     Copilot,
     Antigravity,
     Qoder,
+    Hermes,
+    Openclaw,
 }
 
 impl AgentId {
-    /// 全部十四家,**枚举声明序**(= Ord = 用户钉的侧栏展示序;面板成组、
+    /// 全部十六家,**枚举声明序**(= Ord = 用户钉的侧栏展示序;面板成组、
     /// 表单下拉共用同一顺序)。曾误抄 create_adapters 的构造序,下拉与侧栏
     /// 排序当场对不上——契约测试现在卡它与 Ord 一致
-    pub const ALL: [AgentId; 14] = [
+    pub const ALL: [AgentId; 16] = [
         AgentId::ClaudeCode,
         AgentId::Codex,
         AgentId::Grok,
@@ -40,6 +42,8 @@ impl AgentId {
         AgentId::Copilot,
         AgentId::Antigravity,
         AgentId::Qoder,
+        AgentId::Hermes,
+        AgentId::Openclaw,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -58,6 +62,8 @@ impl AgentId {
             AgentId::Kimi => "kimi",
             AgentId::Antigravity => "antigravity",
             AgentId::Dsh => "dsh",
+            AgentId::Hermes => "hermes",
+            AgentId::Openclaw => "openclaw",
         }
     }
 
@@ -77,6 +83,8 @@ impl AgentId {
             "kimi" => Some(AgentId::Kimi),
             "antigravity" => Some(AgentId::Antigravity),
             "dsh" => Some(AgentId::Dsh),
+            "hermes" => Some(AgentId::Hermes),
+            "openclaw" => Some(AgentId::Openclaw),
             _ => None,
         }
     }
@@ -97,6 +105,8 @@ impl AgentId {
             AgentId::Kimi => "Kimi Code",
             AgentId::Antigravity => "Antigravity CLI",
             AgentId::Dsh => "DeepSeek Harness",
+            AgentId::Hermes => "Hermes Agent",
+            AgentId::Openclaw => "OpenClaw",
         }
     }
 
@@ -104,8 +114,9 @@ impl AgentId {
     /// 与 kooky 同源)。后缀必须带上(与 SVG 图标同理,漏后缀 = 静默空白)。
     /// Copilot/Cursor/OpenCode/Pi/Grok/Kimi 是单色字形(白色+alpha):深色模式
     /// 用白色版,浅色模式用 `-light`(深墨 #2B2A26)版——等效 kooky 的染色;
-    /// Qoder 是白/黑字形配绿色品牌色,同样按模式切图；其余彩色品牌
-    /// (Claude/Codex/Gemini/Kiro/Omp/Antigravity)保持原色,两模式通用。
+    /// Qoder 是白/黑字形配绿色品牌色,同样按模式切图；Hermes(lobe-icons 的
+    /// NousResearch 字形)同为单色双版;其余彩色品牌(Claude/Codex/Gemini/Kiro/
+    /// Omp/Antigravity/OpenClaw 的红龙虾)保持原色,两模式通用。
     pub fn brand_icon(&self, dark: bool) -> &'static str {
         match self {
             AgentId::ClaudeCode => "brands/claude-code.png",
@@ -164,6 +175,14 @@ impl AgentId {
             }
             AgentId::Antigravity => "brands/antigravity.png",
             AgentId::Dsh => "brands/deepseek.png",
+            AgentId::Hermes => {
+                if dark {
+                    "brands/hermes.png"
+                } else {
+                    "brands/hermes-light.png"
+                }
+            }
+            AgentId::Openclaw => "brands/openclaw.png",
         }
     }
 }
@@ -450,7 +469,7 @@ pub const UNTITLED: &str = "Untitled";
 /// 会话 key 的唯一构造点:本地 `{agent}:{native_id}`,远程
 /// `{agent}:{host}:{native_id}`。scanner 的墓碑查询、watcher 的幸存者反查、
 /// 远程装饰器的 key 改写都走这里——"远程 key 长什么样"只此一处知识。
-/// (十四家 adapter 的本地两段构造保留各自 `format!`,它们从不涉及 host。)
+/// (十六家 adapter 的本地两段构造保留各自 `format!`,它们从不涉及 host。)
 pub fn session_key(agent: AgentId, host: &str, native_id: &str) -> String {
     if host.is_empty() {
         format!("{}:{native_id}", agent.as_str())

@@ -1,0 +1,2 @@
+{"type":"session","version":3,"id":"dddddddd-aaaa-bbbb-cccc-000000000018","timestamp":"2026-08-07T10:00:00.000Z","cwd":"/Users/tester/Github/wakefx"}
+{"type":"message","id":"u1","parentId":null,"timestamp":"2026-08-07T10:00:05.000Z","message":{"role":"user","content":"child task from the orchestrator","timestamp":1786183205000}}

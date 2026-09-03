@@ -53,6 +53,8 @@ pub struct Sidecars {
     pub opencode_next_db: PathBuf,
     pub antigravity_db: PathBuf,
     pub dsh_log: PathBuf,
+    pub hermes_db: PathBuf,
+    pub openclaw_db: PathBuf,
 }
 
 /// 侧档与 SQLite 型 fixture 库:copilot/opencode(两代)/antigravity 现建库,
@@ -125,13 +127,152 @@ pub fn stage_sidecars(home: &Path) -> Sidecars {
     )
     .expect("write dsh subagent log");
 
+    let hermes_dir = home.join(".hermes");
+    fs::create_dir_all(&hermes_dir).expect("mkdir .hermes");
+    let hermes_db = hermes_dir.join("state.db");
+    build_hermes_db(&hermes_db);
+
+    // openclaw:现版库与旧版 jsonl(检入 fixture)同在一个 agent 目录——两代
+    // 存储并存是真机形态(doctor --fix 迁库后旧转录仍留在 sessions/)
+    let claw_agent = home.join(".openclaw").join("agents").join("main");
+    copy_tree(
+        &fixture("openclaw/agents/main/sessions"),
+        &claw_agent.join("sessions"),
+    );
+    let claw_dir = claw_agent.join("agent");
+    fs::create_dir_all(&claw_dir).expect("mkdir openclaw agent dir");
+    let openclaw_db = claw_dir.join("openclaw-agent.sqlite");
+    build_openclaw_db(&openclaw_db);
+
     Sidecars {
         copilot_db,
         opencode_db,
         opencode_next_db,
         antigravity_db,
         dsh_log,
+        hermes_db,
+        openclaw_db,
     }
+}
+
+/// Hermes `state.db` 最小同构库:sessions + messages(时间戳 unix 秒 REAL)。
+/// hs-0001 有用户标题、OpenAI 形状的 tool_calls 与 reasoning;hs-0002 无标题
+///(回退首条用户消息)、telegram 启动面、精简形状 tool_calls(无 id,按顺位回填)、
+/// 多模态 content 是 JSON 块数组;hs-0003 是 session_search 工具内部会话
+///(source=tool,不列);hs-0004 零消息(不列);hs-0005 是 hs-0001 的 /branch 分支
+///(parent_session_id,照常列出、挂父子关系)。
+pub fn build_hermes_db(path: &Path) {
+    let conn = rusqlite::Connection::open(path).expect("create hermes fixture db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, source TEXT NOT NULL, user_id TEXT, model TEXT,
+            model_config TEXT, system_prompt TEXT, parent_session_id TEXT,
+            started_at REAL NOT NULL, ended_at REAL, end_reason TEXT,
+            message_count INTEGER DEFAULT 0, tool_call_count INTEGER DEFAULT 0,
+            input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
+            cache_read_tokens INTEGER DEFAULT 0, cache_write_tokens INTEGER DEFAULT 0,
+            reasoning_tokens INTEGER DEFAULT 0, title TEXT
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+            role TEXT NOT NULL, content TEXT, tool_call_id TEXT, tool_calls TEXT,
+            tool_name TEXT, timestamp REAL NOT NULL, token_count INTEGER,
+            finish_reason TEXT, reasoning TEXT, reasoning_details TEXT,
+            codex_reasoning_items TEXT
+        );
+        INSERT INTO sessions (id, source, model, started_at, ended_at, message_count,
+                              input_tokens, output_tokens, cache_read_tokens, title) VALUES
+            ('hs-0001', 'cli', 'gpt-5.4', 1786172400.0, 1786172520.0, 4, 300, 50, 100, 'Hermes QR fix'),
+            ('hs-0002', 'telegram', 'claude-opus-5', 1786176000.0, NULL, 3, 0, 0, 0, NULL),
+            ('hs-0003', 'tool', 'gpt-5.4', 1786176100.0, 1786176101.0, 2, 0, 0, 0, NULL),
+            ('hs-0004', 'cli', 'gpt-5.4', 1786176200.0, 1786176201.0, 0, 0, 0, 0, NULL);
+        INSERT INTO sessions (id, source, model, started_at, ended_at, message_count, parent_session_id, title) VALUES
+            ('hs-0005', 'cli', 'gpt-5.4', 1786176300.0, 1786176301.0, 1, 'hs-0001', 'Hermes QR fix #2');
+        INSERT INTO messages (session_id, role, content, tool_call_id, tool_calls, tool_name, timestamp, reasoning) VALUES
+            ('hs-0001', 'user', 'Hermes 看看二维码扫描为何闪退,是不是 useEffect() 的问题', NULL, NULL, NULL, 1786172405.0, NULL),
+            ('hs-0001', 'assistant', NULL, NULL,
+             '[{"id":"call_h1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"src/QrScanner.tsx\"}"}}]',
+             NULL, 1786172408.0, '先读一下组件源码'),
+            ('hs-0001', 'tool', 'useEffect(() => watch())', 'call_h1', NULL, 'read_file', 1786172409.0, NULL),
+            ('hs-0001', 'assistant', '是依赖数组问题,我给出了修复补丁。', NULL, NULL, NULL, 1786172412.0, NULL),
+            ('hs-0001', 'user', '谢谢,合并了', NULL, NULL, NULL, 1786172520.0, NULL),
+            ('hs-0002', 'user', '[{"type":"text","text":"无标题会话的兜底标题应取这句"},{"type":"image_url","image_url":{"url":"file:///tmp/a.png"}}]', NULL, NULL, NULL, 1786176005.0, NULL),
+            ('hs-0002', 'assistant', NULL, NULL, '[{"name":"terminal","arguments":"{\"command\":\"ls\"}"}]', NULL, 1786176006.0, NULL),
+            ('hs-0002', 'tool', 'README.md', NULL, NULL, 'terminal', 1786176007.0, NULL),
+            ('hs-0002', 'assistant', '好的。', NULL, NULL, NULL, 1786176008.0, NULL),
+            ('hs-0003', 'user', 'internal search', NULL, NULL, NULL, 1786176100.5, NULL),
+            ('hs-0005', 'user', 'branched from hs-0001', NULL, NULL, NULL, 1786176300.5, NULL),
+            ('hs-0003', 'assistant', 'nothing', NULL, NULL, NULL, 1786176101.0, NULL);
+        "#,
+    )
+    .expect("populate hermes fixture db");
+}
+
+/// OpenClaw `openclaw-agent.sqlite` 最小同构库:session_nodes + session_windows +
+/// transcript_events + session_transcript_active_events(列集只取 Wake 读的)。
+/// claw-0001 是活跃窗口:事件树里塞了一条被回滚的死分支(a2-dead),
+/// active_events 只列可见分支;claw-0002 是被 spawn 的子代理窗口(不列);
+/// claw-0003 是 reset 前的旧窗口,node 指向 claw-0001,无 active_events
+///(退回树回溯),entry_json 的 totalTokens 不归它。
+pub fn build_openclaw_db(path: &Path) {
+    let conn = rusqlite::Connection::open(path).expect("create openclaw fixture db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE session_nodes (
+            session_key TEXT NOT NULL PRIMARY KEY, current_session_id TEXT NOT NULL,
+            entry_json TEXT NOT NULL, updated_at INTEGER NOT NULL, label TEXT,
+            display_name TEXT, spawned_by TEXT, parent_session_key TEXT, archived_at INTEGER
+        );
+        CREATE TABLE session_windows (
+            session_id TEXT NOT NULL PRIMARY KEY, session_key TEXT NOT NULL,
+            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+            transcript_updated_at INTEGER, started_at INTEGER, model TEXT,
+            model_provider TEXT, channel TEXT, chat_type TEXT, spawned_by TEXT,
+            parent_session_key TEXT, display_name TEXT
+        );
+        CREATE TABLE transcript_events (
+            session_id TEXT NOT NULL, seq INTEGER NOT NULL, event_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL, PRIMARY KEY (session_id, seq)
+        );
+        CREATE TABLE session_transcript_active_events (
+            session_id TEXT NOT NULL, active_position INTEGER NOT NULL,
+            event_seq INTEGER NOT NULL, message_position INTEGER,
+            PRIMARY KEY (session_id, active_position)
+        );
+        INSERT INTO session_nodes VALUES
+            ('agent:main:main', 'claw-0001',
+             '{"sessionId":"claw-0001","updatedAt":1786266030000,"model":"claude-opus-5","totalTokens":7300,"label":"Node label"}',
+             1786266030000, 'Node label', NULL, NULL, NULL, NULL),
+            ('agent:main:subagent:sub1', 'claw-0002',
+             '{"sessionId":"claw-0002","updatedAt":1786266100000,"spawnedBy":"agent:main:main"}',
+             1786266100000, NULL, NULL, 'agent:main:main', 'agent:main:main', NULL);
+        INSERT INTO session_windows VALUES
+            ('claw-0001', 'agent:main:main', 1786266000000, 1786266030000, 1786266030000, 1786266000000,
+             'claude-opus-5', 'anthropic', 'telegram', 'direct', NULL, NULL, NULL),
+            ('claw-0002', 'agent:main:subagent:sub1', 1786266100000, 1786266100000, 1786266100000, 1786266100000,
+             'claude-opus-5', 'anthropic', NULL, NULL, 'agent:main:main', 'agent:main:main', NULL),
+            ('claw-0003', 'agent:main:main', 1786176000000, 1786176030000, 1786176030000, 1786176000000,
+             'gpt-5.5', 'openai', 'cli', 'direct', NULL, NULL, NULL);
+        INSERT INTO transcript_events VALUES
+            ('claw-0001', 0, '{"type":"session","version":3,"id":"claw-0001","timestamp":"2026-08-08T09:00:00.000Z","cwd":"/Users/tester/Github/wakefx"}', 1786266000000),
+            ('claw-0001', 1, '{"type":"message","id":"u1","parentId":null,"timestamp":"2026-08-08T09:00:05.000Z","message":{"role":"user","content":"OpenClaw 库里的会话:查二维码组件 useEffect() 清理","timestamp":1786266005000}}', 1786266005000),
+            ('claw-0001', 2, '{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-08-08T09:00:08.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_db_1","name":"exec","arguments":{"command":"rg useEffect src/"}}],"api":"anthropic-messages","provider":"anthropic","model":"claude-opus-5","usage":{"input":100,"output":20,"cacheRead":0,"cacheWrite":0,"totalTokens":7100},"timestamp":1786266008000}}', 1786266008000),
+            ('claw-0001', 3, '{"type":"message","id":"r1","parentId":"a1","timestamp":"2026-08-08T09:00:09.000Z","message":{"role":"toolResult","toolCallId":"call_db_1","toolName":"exec","content":[{"type":"text","text":"src/QrScanner.tsx: useEffect(() => watch())"}],"isError":true,"timestamp":1786266009000}}', 1786266009000),
+            ('claw-0001', 4, '{"type":"message","id":"a2-dead","parentId":"r1","timestamp":"2026-08-08T09:00:11.000Z","message":{"role":"assistant","content":[{"type":"text","text":"死分支,不该出现"}],"api":"anthropic-messages","provider":"anthropic","model":"claude-opus-5","timestamp":1786266011000}}', 1786266011000),
+            ('claw-0001', 5, '{"type":"message","id":"a2","parentId":"r1","timestamp":"2026-08-08T09:00:12.000Z","message":{"role":"assistant","content":[{"type":"text","text":"找到泄漏点,已补清理回调。"}],"api":"anthropic-messages","provider":"anthropic","model":"claude-opus-5","usage":{"input":200,"output":30,"cacheRead":0,"cacheWrite":0,"totalTokens":7300},"timestamp":1786266012000}}', 1786266012000),
+            ('claw-0001', 6, '{"type":"message","id":"u2","parentId":"a2","timestamp":"2026-08-08T09:00:30.000Z","message":{"role":"user","content":"谢谢,合并了","timestamp":1786266030000}}', 1786266030000),
+            ('claw-0002', 0, '{"type":"session","version":3,"id":"claw-0002","timestamp":"2026-08-08T09:01:40.000Z","cwd":"/Users/tester/Github/wakefx"}', 1786266100000),
+            ('claw-0002', 1, '{"type":"message","id":"u1","parentId":null,"timestamp":"2026-08-08T09:01:41.000Z","message":{"role":"user","content":"child task","timestamp":1786266101000}}', 1786266101000),
+            ('claw-0003', 0, '{"type":"session","version":3,"id":"claw-0003","timestamp":"2026-08-07T08:00:00.000Z","cwd":"/Users/tester/Github/wakefx"}', 1786176000000),
+            ('claw-0003', 1, '{"type":"message","id":"u1","parentId":null,"timestamp":"2026-08-07T08:00:05.000Z","message":{"role":"user","content":"reset 之前的老窗口","timestamp":1786176005000}}', 1786176005000),
+            ('claw-0003', 2, '{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-08-07T08:00:30.000Z","message":{"role":"assistant","content":[{"type":"text","text":"收到。"}],"api":"openai-responses","provider":"openai","model":"gpt-5.5","timestamp":1786176030000}}', 1786176030000);
+        INSERT INTO session_transcript_active_events VALUES
+            ('claw-0001', 0, 1, 0), ('claw-0001', 1, 2, 1), ('claw-0001', 2, 3, 2),
+            ('claw-0001', 3, 5, 3), ('claw-0001', 4, 6, 4);
+        "#,
+    )
+    .expect("populate openclaw fixture db");
 }
 
 /// Copilot `session-store.db` 最小同构库:sessions + turns。

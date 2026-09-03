@@ -56,6 +56,9 @@ brands!(
     "kimi-light",
     "antigravity",
     "deepseek",
+    "hermes",
+    "hermes-light",
+    "openclaw",
 );
 
 fn lookup_product(path: &str) -> Option<&'static [u8]> {

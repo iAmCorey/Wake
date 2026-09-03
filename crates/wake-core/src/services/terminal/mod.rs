@@ -137,11 +137,14 @@ pub fn agent_bin(agent: AgentId) -> Option<&'static str> {
         // dsh 官方唯一分发形态是 npx(README 只有 `npx @deepseek-ai/dsh web`,
         // 不发全局命令);包名由 resume_args 作首参带上
         AgentId::Dsh => Some("npx"),
+        AgentId::Hermes => Some("hermes"),
+        AgentId::Openclaw => Some("openclaw"),
     }
 }
 
-fn resume_args(agent: AgentId, id: &str) -> Option<(Vec<String>, bool)> {
-    match agent {
+fn resume_args(meta: &SessionMeta) -> Option<(Vec<String>, bool)> {
+    let id = meta.id.as_str();
+    match meta.agent {
         AgentId::ClaudeCode => Some((vec!["--resume".into(), id.into()], true)),
         AgentId::Codex => Some((vec!["resume".into(), id.into()], false)),
         // Qoder 的历史会话按 cwd 分桶，`--resume <id>` 需在原项目目录启动。
@@ -162,7 +165,24 @@ fn resume_args(agent: AgentId, id: &str) -> Option<(Vec<String>, bool)> {
         // 按官方原样 `npx @deepseek-ai/dsh web` 拉起(workspace 由启动目录
         // 决定),会话在 UI 里即点即续。官方发布 tui bundle 后切回定点 resume
         AgentId::Dsh => Some((vec!["@deepseek-ai/dsh".into(), "web".into()], true)),
-        _ => None,
+        // Hermes 会话不按 cwd 分桶(库里没有 cwd),任何目录都行;`--profile` 必带:
+        // 它显式覆盖 sticky 的 active_profile,会话在哪个档案库里就开哪个档案
+        // (主库 = "default"),否则别的档案激活期间会 "session not found"
+        AgentId::Hermes => Some((
+            vec![
+                "--profile".into(),
+                crate::adapters::hermes::profile_of(&meta.file_path),
+                "--resume".into(),
+                id.into(),
+            ],
+            false,
+        )),
+        // OpenClaw 的 TUI 只按 session **key**(agent:main:main)打开会话,
+        // `--session-id` 只有一次性的 `openclaw agent` 认;Wake 存的是 session id,
+        // 历史窗口(reset/rollover 之前的)也没有可续的 key——不提供 Open In
+        AgentId::Openclaw => None,
+        // Kiro / Gemini CLI 没有按会话 id 续会话的形制
+        AgentId::Kiro | AgentId::Gemini => None,
     }
 }
 
@@ -205,7 +225,7 @@ pub fn ssh_resume_command(meta: &SessionMeta) -> Option<String> {
     if meta.host.is_empty() {
         return None;
     }
-    let (args, _requires_cwd) = resume_args(meta.agent, &meta.id)?;
+    let (args, _requires_cwd) = resume_args(meta)?;
     let bin = session_bin(meta)?;
     // cwd 是远程路径,本地 is_dir 判据无意义:非空就 cd,空则落 ssh 默认 home
     let cwd = (!meta.project_path.is_empty()).then_some(meta.project_path.as_str());
@@ -229,6 +249,11 @@ pub enum ResumeTarget {
 }
 
 pub fn resume_targets(meta: &SessionMeta) -> Vec<ResumeTarget> {
+    // 没有 resume 形制的 agent(OpenClaw)不列任何目标——否则菜单里每一项都是
+    // 点了才报 "isn't supported" 的死项;本地/远程两条路同源于 resume_args
+    if resume_args(meta).is_none() {
+        return Vec::new();
+    }
     if meta.host.is_empty() {
         terminals_for(meta.agent)
             .into_iter()
@@ -248,7 +273,7 @@ pub fn resume_target(meta: &SessionMeta, target: ResumeTarget) -> ResumeOutcome 
 
 fn copy_ssh_outcome(meta: &SessionMeta) -> ResumeOutcome {
     let Some(command) = ssh_resume_command(meta) else {
-        // 十四家全有 resume_args,此臂当前不可达;护栏语义同 resume_session_in
+        // OpenClaw 之外全有 resume_args;护栏语义同 resume_session_in
         return ResumeOutcome {
             ok: false,
             command: String::new(),
@@ -282,7 +307,7 @@ pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome
     if let Some(outcome) = platform::deep_link_resume(meta, term) {
         return outcome;
     }
-    let Some((args, requires_cwd)) = resume_args(meta.agent, &meta.id) else {
+    let Some((args, requires_cwd)) = resume_args(meta) else {
         return ResumeOutcome {
             ok: false,
             command: String::new(),

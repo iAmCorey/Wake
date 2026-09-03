@@ -16,7 +16,7 @@
 //! ①openrsync(macOS 15+ 的 /usr/bin/rsync)做发送端时,某个源连父目录
 //! 都不存在会让它中止整份文件列表,排在后面的源全部静默不传,退出码却
 //! 只是 23;②rsync 家族只要发送端遇到任何 I/O 错误(缺源即算)就整体跳过
-//! 删除阶段——没有哪台机器十四家全装,`--delete` 就永远不会生效。
+//! 删除阶段——没有哪台机器十六家全装,`--delete` 就永远不会生效。
 //!
 //! 同步跑在**独立于扫描的线程**(Workbench::spawn_remote_sync):本地扫描
 //! 不等网络,不可达 host 只拖慢自己;缓存落盘由 watcher 增量收编,同步
@@ -44,9 +44,12 @@ pub struct RemoteAgentLayout {
     ///(缺了 sqlite_ro 的 copy 梯度兜底)。字符集限 `[A-Za-z0-9._/-]`——
     /// 它们不加引号直接进探测脚本(sh -c 单引号串内)与 rsync 源参数(单测卡)
     pub sync_paths: &'static [&'static str],
+    /// rsync `--exclude` 模式(按文件名匹配,作用于整次同步)。凭证与本家不读的
+    /// 大索引写在自己这一行——不放全局列表,新增带凭证的 agent 在这里声明
+    pub exclude: &'static [&'static str],
 }
 
-/// 十四家的远程布局。远程主机按 Linux/macOS 默认路径假设(两平台一致,
+/// 十六家的远程布局。远程主机按 Linux/macOS 默认路径假设(两平台一致,
 /// 均为 home 相对;OpenCode 的 XDG 变体、CODEX_HOME 这类 env 覆盖在远端
 /// 探测不到,阶段 1 不支持非默认远程布局)。
 pub const REMOTE_LAYOUTS: &[RemoteAgentLayout] = &[
@@ -54,6 +57,7 @@ pub const REMOTE_LAYOUTS: &[RemoteAgentLayout] = &[
         agent: AgentId::ClaudeCode,
         mount: ".claude/projects",
         sync_paths: &[".claude/projects"],
+        exclude: &[],
     },
     RemoteAgentLayout {
         agent: AgentId::Codex,
@@ -65,22 +69,26 @@ pub const REMOTE_LAYOUTS: &[RemoteAgentLayout] = &[
             ".codex/state_5.sqlite",
             ".codex/state_5.sqlite-wal",
         ],
+        exclude: &[],
     },
     RemoteAgentLayout {
         agent: AgentId::Qoder,
         mount: ".qoder/projects",
         sync_paths: &[".qoder/projects"],
+        exclude: &[],
     },
     RemoteAgentLayout {
         agent: AgentId::Copilot,
         // 目录层:db = <mount>/session-store.db(is_file 判据对未同步目录失真)
         mount: ".copilot",
         sync_paths: &[".copilot/session-store.db", ".copilot/session-store.db-wal"],
+        exclude: &[],
     },
     RemoteAgentLayout {
         agent: AgentId::Cursor,
         mount: ".cursor/projects",
         sync_paths: &[".cursor/projects"],
+        exclude: &[],
     },
     RemoteAgentLayout {
         agent: AgentId::Opencode,
@@ -92,38 +100,46 @@ pub const REMOTE_LAYOUTS: &[RemoteAgentLayout] = &[
             ".local/share/opencode/opencode-next.db",
             ".local/share/opencode/opencode-next.db-wal",
         ],
+        exclude: &[],
     },
     RemoteAgentLayout {
         agent: AgentId::Kiro,
         mount: ".kiro/sessions/cli",
         sync_paths: &[".kiro/sessions/cli"],
+        exclude: &[],
     },
     RemoteAgentLayout {
         agent: AgentId::Gemini,
         // tmp 层:projects.json 由 parent 派生(.gemini 顶层有凭证,不整树同步)
         mount: ".gemini/tmp",
         sync_paths: &[".gemini/tmp", ".gemini/projects.json"],
+        exclude: &[],
     },
     RemoteAgentLayout {
         agent: AgentId::Pi,
         mount: ".pi/agent/sessions",
         sync_paths: &[".pi/agent/sessions"],
+        exclude: &[],
     },
     RemoteAgentLayout {
         agent: AgentId::Omp,
         mount: ".omp/agent/sessions",
         sync_paths: &[".omp/agent/sessions"],
+        exclude: &[],
     },
     RemoteAgentLayout {
         agent: AgentId::Grok,
         // sessions 目录名判据 → home=parent,summary/chat_history 都在树内
         mount: ".grok/sessions",
         sync_paths: &[".grok/sessions"],
+        // Grok 自家的搜索索引库,量大且 Wake 不读
+        exclude: &["session_search.sqlite*"],
     },
     RemoteAgentLayout {
         agent: AgentId::Kimi,
         mount: ".kimi-code/sessions",
         sync_paths: &[".kimi-code/sessions", ".kimi-code/session_index.jsonl"],
+        exclude: &[],
     },
     RemoteAgentLayout {
         agent: AgentId::Antigravity,
@@ -133,11 +149,30 @@ pub const REMOTE_LAYOUTS: &[RemoteAgentLayout] = &[
             ".gemini/antigravity-cli/conversation_summaries.db",
             ".gemini/antigravity-cli/conversation_summaries.db-wal",
         ],
+        exclude: &[],
     },
     RemoteAgentLayout {
         agent: AgentId::Dsh,
         mount: ".dsh/sessions",
         sync_paths: &[".dsh/sessions"],
+        exclude: &[],
+    },
+    RemoteAgentLayout {
+        agent: AgentId::Hermes,
+        // 库所在目录层:db = <mount>/state.db(profiles 多档案不同步)
+        mount: ".hermes",
+        sync_paths: &[".hermes/state.db", ".hermes/state.db-wal"],
+        exclude: &[],
+    },
+    RemoteAgentLayout {
+        agent: AgentId::Openclaw,
+        // agents/<id>/ 整树,exclude 挡掉每个 agent 目录里的凭证:auth-profiles.json
+        // 与 openclaw-agent.sqlite(库内 auth_profile_store 表存着 API key/OAuth
+        // token,会话与凭证同库,只能整库不拉)——远程 OpenClaw 因此只覆盖旧版
+        // sessions/*.jsonl 转录
+        mount: ".openclaw/agents",
+        sync_paths: &[".openclaw/agents"],
+        exclude: &["auth-profiles.json", "openclaw-agent.sqlite*"],
     },
 ];
 
@@ -219,16 +254,18 @@ fn present_remote_paths(stdout: &str) -> Vec<&'static str> {
 /// 布局;`--delete` 让远程删除传播到缓存(watcher 收 Remove 后清库内行)——
 /// 它只作用于各源树**内部**,整棵源消失由 sync_host 的缺席清理负责。
 fn rsync_args(host: &str, dest: &Path, paths: &[&str]) -> Vec<String> {
-    let mut args = vec![
-        "-az".to_string(),
-        "-R".to_string(),
-        "--delete".to_string(),
-        // Grok 自家的搜索索引库,量大且 Wake 不读
-        "--exclude=session_search.sqlite*".to_string(),
+    let mut args = vec!["-az".to_string(), "-R".to_string(), "--delete".to_string()];
+    args.extend(
+        REMOTE_LAYOUTS
+            .iter()
+            .flat_map(|l| l.exclude.iter())
+            .map(|pat| format!("--exclude={pat}")),
+    );
+    args.extend([
         "--timeout=120".to_string(),
         "-e".to_string(),
         format!("ssh {}", SSH_OPTS.join(" ")),
-    ];
+    ]);
     args.extend(paths.iter().map(|path| format!("{host}:./{path}")));
     args.push(dest.to_string_lossy().to_string());
     args
@@ -555,5 +592,18 @@ mod tests {
         );
         // 目标在最后
         assert_eq!(args.last().unwrap(), "/tmp/cache/devbox");
+        // 各家声明的 exclude 全部落到命令行(OpenClaw 的凭证靠它挡)
+        for pat in REMOTE_LAYOUTS.iter().flat_map(|l| l.exclude.iter()) {
+            assert!(
+                args.contains(&format!("--exclude={pat}")),
+                "{pat} 未进 rsync 参数"
+            );
+            assert!(
+                pat.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '*')),
+                "exclude {pat:?} needs quoting"
+            );
+        }
+        assert!(args.contains(&"--exclude=openclaw-agent.sqlite*".to_string()));
     }
 }

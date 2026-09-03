@@ -2118,7 +2118,7 @@ impl UsageBoard {
         }
     }
 
-    /// Agents 全量列出(总共十四家);项目/模型长尾长,取前 6
+    /// Agents 全量列出(总共十六家);项目/模型长尾长,取前 6
     fn limit(self) -> usize {
         match self {
             Self::Agents => usize::MAX,
@@ -6188,7 +6188,11 @@ impl Workbench {
                                 h_flex()
                                     .flex_shrink_0()
                                     .gap(SPACE_XS)
-                                    .child(if let [terminal::ResumeTarget::CopySshCommand] =
+                                    .child(if terminal::resume_targets(&meta).is_empty() {
+                                        // 没有 resume 形制的 agent(OpenClaw 的 TUI 只按 session
+                                        // key 开会话):不画 Open In,别给一组点了才报错的死按钮
+                                        div().into_any_element()
+                                    } else if let [terminal::ResumeTarget::CopySshCommand] =
                                         terminal::resume_targets(&meta).as_slice()
                                     {
                                         // 远程会话(阶段 1 只有 Copy SSH command):单段控件用
@@ -6219,7 +6223,14 @@ impl Workbench {
                                         // 目标的应用图标,点击直开;右段 chevron 展开列表。
                                         // 目标列表按 agent 过滤(Kooky 深链不认 dsh);
                                         // 偏好目标不在列表时(如 dsh 会话 + 偏好 Kooky)回退首项
-                                        let terms = terminal::terminals_for(meta.agent);
+                                        let terms: Vec<terminal::TerminalApp> =
+                                            terminal::resume_targets(&meta)
+                                                .into_iter()
+                                                .filter_map(|t| match t {
+                                                    terminal::ResumeTarget::App(app) => Some(app),
+                                                    _ => None,
+                                                })
+                                                .collect();
                                         let current = self.open_in_target(meta.agent, &terms);
                                         let current_icon = current
                                             .and_then(|t| self.terminal_icons.get(t.id()).cloned());

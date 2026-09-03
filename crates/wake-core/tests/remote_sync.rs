@@ -121,7 +121,13 @@ fn remote_pipeline_end_to_end() {
     // 开发机的真实数据;env 根覆盖一并清掉
     std::env::set_var("WAKE_HOME", &local_home);
     std::env::set_var("HOME", &local_home);
-    for var in ["XDG_DATA_HOME", "CODEX_HOME", "QODER_CONFIG_DIR"] {
+    for var in [
+        "XDG_DATA_HOME",
+        "CODEX_HOME",
+        "QODER_CONFIG_DIR",
+        "HERMES_HOME",
+        "OPENCLAW_STATE_DIR",
+    ] {
         std::env::remove_var(var);
     }
     build_remote_home(&home);
@@ -177,7 +183,7 @@ fn remote_pipeline_end_to_end() {
         "SQLite 型的文件源没到"
     );
 
-    // ② 真实 roster + 全量扫描:十三家远程会话以三段 key 入库,host/id/file_path 都对
+    // ② 真实 roster + 全量扫描:十五家远程会话以三段 key 入库,host/id/file_path 都对
     let roster = create_adapter_roster_for(&store);
     run_scan(&roster.active, &store, &NullEvents, true).expect("scan ok");
     let all = SessionFilter {
@@ -316,7 +322,13 @@ fn live_remote_host() {
     fs::create_dir_all(&local_home).unwrap();
     // 本地 roster 指向空 home(HOME 保留,ssh 要读 ~/.ssh)
     std::env::set_var("WAKE_HOME", &local_home);
-    for var in ["XDG_DATA_HOME", "CODEX_HOME", "QODER_CONFIG_DIR"] {
+    for var in [
+        "XDG_DATA_HOME",
+        "CODEX_HOME",
+        "QODER_CONFIG_DIR",
+        "HERMES_HOME",
+        "OPENCLAW_STATE_DIR",
+    ] {
         std::env::remove_var(var);
     }
     let store = Arc::new(Store::open(&tmp.path().join("wake.db")).unwrap());

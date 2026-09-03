@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- New: Hermes Agent sessions — Wake reads `~/.hermes/state.db` (and every `profiles/*/state.db`), including tool calls, reasoning and the channel a session came from; `HERMES_HOME` is respected
+- New: OpenClaw sessions — both the current per-agent SQLite store and legacy `sessions/*.jsonl` transcripts are scanned, showing only the active branch of each conversation; `OPENCLAW_STATE_DIR` is respected
+- Update: remote hosts mirror Hermes session databases and OpenClaw legacy transcripts too — OpenClaw's SQLite store stays on the remote machine because it also holds credentials
+
 ## [0.4.0] — 2026-09-03
 
 - New: remote hosts — mirror agent sessions from other machines over SSH into the index. Add a host in Settings → Remote hosts (an alias from `~/.ssh/config` or `user@host`); sessions sync on launch, refresh, and Sync now, then browse and search them alongside local ones with an `@host` badge

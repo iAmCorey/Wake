@@ -1,8 +1,8 @@
 use super::parse_utils::*;
+use super::pi_format::{PiRender, PiRenderOptions};
 use super::{units_from_messages, AgentAdapter};
 use crate::models::*;
 use anyhow::Result;
-use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -75,8 +75,8 @@ fn parse_pi_jsonl(path: &Path, decode_images: bool) -> Result<PiParse> {
         tokens_used: None,
         unknown_lines: 0,
     };
-    // toolCallId → (消息下标, tool_calls 下标),toolResult 行回填用
-    let mut tool_index: HashMap<String, (usize, usize)> = HashMap::new();
+    // 消息渲染核心与 OpenClaw 共用(pi_format);Pi 是它的基础配置
+    let mut render = PiRender::new(PiRenderOptions::default(), decode_images);
 
     for line in reader.lines() {
         let Ok(line) = line else {
@@ -113,100 +113,8 @@ fn parse_pi_jsonl(path: &Path, decode_images: bool) -> Result<PiParse> {
                     .map(iso_ms)
                     .unwrap_or(0);
                 p.last_ts = p.last_ts.max(ts);
-                let content = msg.get("content").unwrap_or(&serde_json::Value::Null);
-                match msg.get("role").and_then(|v| v.as_str()) {
-                    Some("user") => {
-                        let parsed = content_parts(content, decode_images);
-                        if !parsed.text.is_empty() || !parsed.images.is_empty() {
-                            let mut message = text_msg(Role::User, &parsed.text, ts);
-                            message.images = parsed.images;
-                            p.messages.push(message);
-                        }
-                    }
-                    Some("assistant") => {
-                        let parsed = content_parts(content, decode_images);
-                        let mut tools: Vec<ToolCallView> = Vec::new();
-                        for b in content.as_array().into_iter().flatten() {
-                            if b.get("type").and_then(|v| v.as_str()) == Some("toolCall") {
-                                let id = b.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-                                let name =
-                                    b.get("name").and_then(|v| v.as_str()).unwrap_or_default();
-                                let input = b
-                                    .get("arguments")
-                                    .cloned()
-                                    .unwrap_or(serde_json::Value::Null);
-                                tools.push(tool_call_view(
-                                    id.to_string(),
-                                    name,
-                                    &input,
-                                    None,
-                                    false,
-                                ));
-                            }
-                        }
-                        if parsed.text.is_empty() && tools.is_empty() && parsed.images.is_empty() {
-                            continue;
-                        }
-                        let model = msg.get("model").and_then(|v| v.as_str()).map(String::from);
-                        if model.is_some() {
-                            p.model = model.clone();
-                        }
-                        if let Some(t) = msg
-                            .get("usage")
-                            .and_then(|u| u.get("totalTokens"))
-                            .and_then(|v| v.as_i64())
-                        {
-                            p.tokens_used = Some(t);
-                        }
-                        // 连续 assistant 行(中间只隔 toolResult)合并成一条,
-                        // 详情页每个回合一条助手消息
-                        if !matches!(p.messages.last(), Some(m) if m.role == Role::Assistant) {
-                            p.messages.push(text_msg(Role::Assistant, "", ts));
-                        }
-                        let base = p.messages.len() - 1;
-                        let last = &mut p.messages[base];
-                        // 合并后统一压 MAX_MSG_TEXT 上限(整个 agentic 回合并成
-                        // 一条消息,不能靠单行的 text_msg clip)
-                        if !parsed.text.is_empty() || !parsed.images.is_empty() {
-                            if last.text.len() < MAX_MSG_TEXT {
-                                append_content_to_message(last, parsed, "\n\n");
-                            } else {
-                                append_images_to_message_end(last, parsed.images);
-                            }
-                            if last.text.len() > MAX_MSG_TEXT {
-                                let (t, _) = clip(&last.text, MAX_MSG_TEXT);
-                                last.text = t;
-                                last.truncated = true;
-                            }
-                        }
-                        if model.is_some() {
-                            last.model = model;
-                        }
-                        for tc in tools {
-                            tool_index.insert(tc.id.clone(), (base, last.tool_calls.len()));
-                            last.tool_calls.push(tc);
-                        }
-                    }
-                    Some("toolResult") => {
-                        let Some(call_id) = msg.get("toolCallId").and_then(|v| v.as_str()) else {
-                            continue;
-                        };
-                        if let Some(&(mi, ti)) = tool_index.get(call_id) {
-                            let parsed = content_parts(content, decode_images);
-                            let message = &mut p.messages[mi];
-                            let tc = &mut message.tool_calls[ti];
-                            if !parsed.text.is_empty() {
-                                tc.output = Some(clip(&parsed.text, MAX_TOOL_IO).0);
-                            }
-                            if msg.get("isError").and_then(|v| v.as_bool()) == Some(true) {
-                                tc.is_error = true;
-                            }
-                            append_images_to_message_end(message, parsed.images);
-                        }
-                    }
-                    _ => {
-                        p.unknown_lines += 1;
-                    }
+                if !render.push(msg, ts) {
+                    p.unknown_lines += 1;
                 }
             }
             // 已知的非内容行:模型/思考档位切换等,静默跳过
@@ -216,6 +124,9 @@ fn parse_pi_jsonl(path: &Path, decode_images: bool) -> Result<PiParse> {
             }
         }
     }
+    p.messages = render.messages;
+    p.model = render.model;
+    p.tokens_used = render.tokens_used;
     assign_seq(&mut p.messages);
     Ok(p)
 }

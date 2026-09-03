@@ -1,4 +1,4 @@
-//! 十四家 adapter 的解析契约测试:全部走公开 API(`AgentAdapter` trait),
+//! 十六家 adapter 的解析契约测试:全部走公开 API(`AgentAdapter` trait),
 //! fixture 为全合成数据(tests/fixtures/,SQLite 型在临时 HOME 里现建,
 //! dsh 的 zstd 日志由检入的明文 fixture 在临时 HOME 里压制)。
 //!
@@ -21,8 +21,10 @@ use wake_core::adapters::cursor::CursorAdapter;
 use wake_core::adapters::dsh::DshAdapter;
 use wake_core::adapters::gemini::GeminiAdapter;
 use wake_core::adapters::grok::GrokAdapter;
+use wake_core::adapters::hermes::HermesAdapter;
 use wake_core::adapters::kimi::KimiAdapter;
 use wake_core::adapters::kiro::KiroAdapter;
+use wake_core::adapters::openclaw::OpenclawAdapter;
 use wake_core::adapters::opencode::OpencodeAdapter;
 use wake_core::adapters::pi::PiAdapter;
 use wake_core::adapters::qoder::QoderAdapter;
@@ -40,6 +42,8 @@ struct TestEnv {
     opencode_next_db: PathBuf,
     antigravity_db: PathBuf,
     dsh_log: PathBuf,
+    hermes_db: PathBuf,
+    openclaw_db: PathBuf,
     /// 假 HOME 目录本体,持有 TempDir 保证整个测试进程期间不被清理
     _home: tempfile::TempDir,
 }
@@ -69,12 +73,16 @@ fn setup() -> &'static TestEnv {
         std::env::remove_var("XDG_DATA_HOME");
         std::env::remove_var("CODEX_HOME");
         std::env::remove_var("QODER_CONFIG_DIR");
+        std::env::remove_var("HERMES_HOME");
+        std::env::remove_var("OPENCLAW_STATE_DIR");
         TestEnv {
             copilot_db: sc.copilot_db,
             opencode_db: sc.opencode_db,
             opencode_next_db: sc.opencode_next_db,
             antigravity_db: sc.antigravity_db,
             dsh_log: sc.dsh_log,
+            hermes_db: sc.hermes_db,
+            openclaw_db: sc.openclaw_db,
             _home: home,
         }
     })
@@ -1250,13 +1258,13 @@ fn overlapping_watch_roots_dispatch_to_deepest() {
 
 #[test]
 fn data_roots_contract() {
-    // roster 单实例契约:create_adapters 返回全量十四家(不按 detect 过滤,
+    // roster 单实例契约:create_adapters 返回全量十六家(不按 detect 过滤,
     // scanner 对缺根家靠各自 list_session_files 降级为空);每家必须给出
     // 绝对路径的数据根——"Session locations" 面板、watch_paths 派生、按
     // (agent, 根) 计数全都建立在它上面
     let _env = setup();
     let adapters = wake_core::adapters::create_adapters();
-    assert_eq!(adapters.len(), 14, "全量 roster 必须十四家,含本机没装的");
+    assert_eq!(adapters.len(), 16, "全量 roster 必须十六家,含本机没装的");
     for a in &adapters {
         let tag = a.agent().as_str();
         let roots = a.data_roots();
@@ -1430,10 +1438,317 @@ fn seq_contract_holds_for_all_agents() {
             Box::new(DshAdapter::new()),
             fs_ref(AgentId::Dsh, &env.dsh_log, "dsh-e2e4-0001"),
         ),
+        (
+            Box::new(HermesAdapter::new()),
+            db_ref(AgentId::Hermes, &env.hermes_db, "hs-0001"),
+        ),
+        (
+            Box::new(OpenclawAdapter::new()),
+            db_ref(AgentId::Openclaw, &env.openclaw_db, "claw-0001"),
+        ),
+        (Box::new(OpenclawAdapter::new()), openclaw_legacy_ref(env)),
     ];
     for (adapter, r) in &checks {
         assert_seq_contract(adapter.as_ref(), r);
     }
+}
+
+/// 旧版转录取假 HOME 里 stage_sidecars 拷入的那份(file_ref 只认自己根下的路径)
+fn openclaw_legacy_ref(env: &TestEnv) -> SessionFileRef {
+    let sessions = env
+        .openclaw_db
+        .parent()
+        .and_then(Path::parent)
+        .expect("openclaw agent dir")
+        .join("sessions");
+    fs_ref(
+        AgentId::Openclaw,
+        &sessions.join("cccccccc-aaaa-bbbb-cccc-000000000017.jsonl"),
+        "cccccccc-aaaa-bbbb-cccc-000000000017",
+    )
+}
+
+#[test]
+fn hermes_parse_contract() {
+    let env = setup();
+    let adapter = HermesAdapter::new();
+    // 枚举:tool 内部会话与零消息会话不列
+    let mut ids: Vec<String> = adapter
+        .list_session_files()
+        .expect("hermes list")
+        .into_iter()
+        .map(|r| r.native_id)
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec!["hs-0001", "hs-0002", "hs-0005"]);
+    // /branch 分支挂到父会话下(parent_session_id),不当顶层
+    assert!(adapter.manages_parent_links());
+    assert_eq!(
+        adapter.parent_links(),
+        vec![("hermes:hs-0005".to_string(), "hermes:hs-0001".to_string())]
+    );
+
+    let r = db_ref(AgentId::Hermes, &env.hermes_db, "hs-0001");
+    let s = adapter.parse_session(&r).expect("hermes parse_session");
+    let t = adapter
+        .parse_transcript(&r)
+        .expect("hermes parse_transcript");
+    assert_eq!(s.meta.key, "hermes:hs-0001");
+    assert_eq!(s.meta.title, "Hermes QR fix"); // 库内标题优先
+    assert_eq!(s.meta.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(s.meta.tokens_used, Some(450));
+    assert_eq!(s.meta.source, None); // cli 不打徽章
+    assert_eq!(s.meta.project_path, ""); // 库里没有 cwd
+    assert_eq!(s.meta.created_at, ms("2026-08-08T07:00:00Z"));
+    assert_eq!(s.meta.updated_at, ms("2026-08-08T07:02:00Z"));
+    assert_eq!(s.meta.message_count, 3);
+    assert!(s.meta.file_path.ends_with("#hs-0001"));
+    // assistant(tool_calls)→ tool → assistant(text) 合并成一条
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+            (Role::User, MessageKind::Text),
+        ]
+    );
+    let a = &t.mainline[1];
+    assert_eq!(a.text, "是依赖数组问题,我给出了修复补丁。");
+    assert_eq!(a.thinking.as_deref(), Some("先读一下组件源码"));
+    assert_eq!(a.timestamp, Some(ms("2026-08-08T07:00:08Z")));
+    assert_eq!(a.tool_calls.len(), 1);
+    assert_eq!(a.tool_calls[0].name, "read_file");
+    // arguments 是 JSON 字符串,解开后预览才有路径
+    assert!(a.tool_calls[0].input_preview.contains("QrScanner"));
+    assert_eq!(
+        a.tool_calls[0].output.as_deref(),
+        Some("useEffect(() => watch())")
+    );
+    assert_eq!(
+        s.units.iter().map(|u| u.seq).collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+
+    // 无标题 → 首条用户消息;telegram 启动面成徽章;精简形状 tool_calls 无 id
+    // 按 tool_name 顺位回填;多模态 content 数组只取文本(图片退占位)
+    let r2 = db_ref(AgentId::Hermes, &env.hermes_db, "hs-0002");
+    let s2 = adapter.parse_session(&r2).expect("hermes fallback parse");
+    let t2 = adapter
+        .parse_transcript(&r2)
+        .expect("hermes fallback transcript");
+    assert_eq!(s2.meta.title, "无标题会话的兜底标题应取这句");
+    assert_eq!(s2.meta.source.as_deref(), Some("telegram"));
+    assert_eq!(s2.meta.tokens_used, None);
+    assert_eq!(s2.meta.updated_at, ms("2026-08-08T08:00:08Z")); // 无 ended_at 取末条消息
+    let a2 = &t2.mainline[1];
+    assert_eq!(a2.tool_calls.len(), 1);
+    assert_eq!(a2.tool_calls[0].name, "terminal");
+    assert_eq!(a2.tool_calls[0].output.as_deref(), Some("README.md"));
+    assert_eq!(a2.text, "好的。");
+
+    // 自定义 location:选 Hermes home(连同 profiles/*)或库文件本身都认
+    let home = env.hermes_db.parent().unwrap().to_path_buf();
+    let profile_db = home.join("profiles").join("coder").join("state.db");
+    fs::create_dir_all(profile_db.parent().unwrap()).unwrap();
+    common::build_hermes_db(&profile_db);
+    let rooted = HermesAdapter::new().with_custom_root(home.clone());
+    assert_eq!(
+        rooted.data_roots(),
+        vec![env.hermes_db.clone(), profile_db.clone()]
+    );
+    let direct = HermesAdapter::new().with_custom_root(env.hermes_db.clone());
+    assert_eq!(direct.data_roots(), vec![env.hermes_db.clone()]);
+    // resume 必须带所属档案:主库 = default,profiles/<name> = name(虚拟路径同样认)
+    use wake_core::adapters::hermes::profile_of;
+    assert_eq!(
+        profile_of(&format!("{}#hs-0001", env.hermes_db.display())),
+        "default"
+    );
+    assert_eq!(
+        profile_of(&format!("{}#hs-0001", profile_db.display())),
+        "coder"
+    );
+    fs::remove_dir_all(home.join("profiles")).unwrap();
+}
+
+/// 没被新版 Hermes 迁移过的库(schema v2:无 title、无 cache/reasoning 列、
+/// messages 无 reasoning)必须照常枚举与解析,不能整家消失
+#[test]
+fn hermes_legacy_schema_still_parses() {
+    setup();
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("state.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, source TEXT NOT NULL, model TEXT, parent_session_id TEXT,
+            started_at REAL NOT NULL, ended_at REAL, message_count INTEGER DEFAULT 0,
+            input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL,
+            content TEXT, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT,
+            timestamp REAL NOT NULL, finish_reason TEXT
+        );
+        INSERT INTO sessions VALUES ('old-1', 'cli', 'gpt-5.4', NULL, 1786172400.0, NULL, 2, 10, 5);
+        INSERT INTO messages (session_id, role, content, timestamp) VALUES
+            ('old-1', 'user', '老库里的会话', 1786172401.0),
+            ('old-1', 'assistant', '仍要能解析', 1786172402.0);
+        "#,
+    )
+    .unwrap();
+    drop(conn);
+    let adapter = HermesAdapter::new().with_custom_root(db.clone());
+    let refs = adapter.list_session_files().expect("legacy list");
+    assert_eq!(refs.len(), 1);
+    let s = adapter.parse_session(&refs[0]).expect("legacy parse");
+    assert_eq!(s.meta.title, "老库里的会话");
+    assert_eq!(s.meta.tokens_used, Some(15));
+    assert_eq!(s.meta.message_count, 2);
+}
+
+#[test]
+fn openclaw_parse_contract() {
+    let env = setup();
+    let adapter = OpenclawAdapter::new();
+    // 枚举:库里的活跃窗口 + reset 前旧窗口 + 旧版 jsonl;子代理(spawned_by /
+    // sessions.json 的 spawnedBy)与 checkpoint 快照都不列
+    let mut ids: Vec<String> = adapter
+        .list_session_files()
+        .expect("openclaw list")
+        .into_iter()
+        .map(|r| r.native_id)
+        .collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec![
+            "cccccccc-aaaa-bbbb-cccc-000000000017",
+            "claw-0001",
+            "claw-0003"
+        ]
+    );
+
+    // —— 现版 SQLite:active_events 给出可见分支,死分支 a2-dead 不出现
+    let r = db_ref(AgentId::Openclaw, &env.openclaw_db, "claw-0001");
+    let s = adapter.parse_session(&r).expect("openclaw parse_session");
+    let t = adapter
+        .parse_transcript(&r)
+        .expect("openclaw parse_transcript");
+    assert_eq!(s.meta.key, "openclaw:claw-0001");
+    assert_eq!(s.meta.title, "Node label"); // 无 session_info 时取 node label
+    assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx"); // header cwd
+    assert_eq!(s.meta.model.as_deref(), Some("claude-opus-5"));
+    assert_eq!(s.meta.tokens_used, Some(7300));
+    assert_eq!(s.meta.source.as_deref(), Some("telegram"));
+    assert_eq!(s.meta.created_at, ms("2026-08-08T09:00:00Z"));
+    assert_eq!(s.meta.updated_at, ms("2026-08-08T09:00:30Z"));
+    assert_eq!(s.meta.message_count, 3);
+    assert_eq!(s.unknown_line_count, 0);
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+            (Role::User, MessageKind::Text),
+        ]
+    );
+    let a = &t.mainline[1];
+    assert_eq!(a.text, "找到泄漏点,已补清理回调。");
+    assert_eq!(a.tool_calls.len(), 1);
+    assert_eq!(a.tool_calls[0].name, "exec");
+    assert!(a.tool_calls[0].is_error);
+    assert!(a.tool_calls[0]
+        .output
+        .as_deref()
+        .unwrap_or_default()
+        .contains("QrScanner"));
+    assert_eq!(
+        s.units.iter().map(|u| u.seq).collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+
+    // 旧窗口:无 active_events 退回树回溯;node 的 totalTokens 不归它
+    let r3 = db_ref(AgentId::Openclaw, &env.openclaw_db, "claw-0003");
+    let s3 = adapter.parse_session(&r3).expect("openclaw old window");
+    assert_eq!(s3.meta.title, "Node label");
+    assert_eq!(s3.meta.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(s3.meta.tokens_used, None);
+    assert_eq!(s3.meta.source, None); // cli 不打徽章
+    assert_eq!(s3.meta.message_count, 2);
+
+    // —— 旧版 jsonl:file_ref 只认 agents/<id>/sessions/ 下的活转录
+    let legacy = openclaw_legacy_ref(env);
+    let path = Path::new(&legacy.file_path);
+    let by_ref = adapter.file_ref(path).expect("openclaw file_ref");
+    assert_eq!(by_ref.native_id, "cccccccc-aaaa-bbbb-cccc-000000000017");
+    let checkpoint = path.with_file_name("cccccccc-aaaa-bbbb-cccc-000000000017.checkpoint.1.jsonl");
+    assert!(adapter.file_ref(&checkpoint).is_none());
+    assert!(adapter
+        .file_ref(&path.parent().unwrap().join("sessions.json"))
+        .is_none());
+
+    let s = adapter
+        .parse_session(&legacy)
+        .expect("openclaw legacy parse_session");
+    let t = adapter
+        .parse_transcript(&legacy)
+        .expect("openclaw legacy parse_transcript");
+    assert_eq!(s.meta.title, "OpenClaw QR cleanup"); // session_info 压过 sessions.json 的 label
+    assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx");
+    assert_eq!(s.meta.model.as_deref(), Some("claude-opus-5"));
+    assert_eq!(s.meta.tokens_used, Some(5200));
+    assert_eq!(s.meta.created_at, ms("2026-08-07T09:00:00Z"));
+    assert_eq!(s.meta.updated_at, ms("2026-08-07T09:00:30Z"));
+    // wibble-entry 是叶:回溯经 u3→c1→a2→r1→a1→u2→u1→i1→m1,死分支 a2-dead 不在链上;
+    // 未知类型计 1
+    assert_eq!(s.unknown_line_count, 1);
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![
+            (Role::User, MessageKind::Meta), // runtimeContextCarrier
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+            (Role::System, MessageKind::CompactSummary),
+            (Role::User, MessageKind::Text),
+        ]
+    );
+    assert_eq!(s.meta.message_count, 3);
+    let a = &t.mainline[2];
+    assert_eq!(a.text, "找到泄漏点,已补清理回调。");
+    assert_eq!(a.thinking.as_deref(), Some("先搜一下 useEffect"));
+    assert_eq!(a.tool_calls.len(), 1);
+    assert!(!a.tool_calls[0].is_error);
+    assert!(t.mainline[3].text.contains("useEffect 泄漏"));
+
+    // OpenClaw 没有 resume 形制:详情页不该给任何 Open In 目标
+    assert!(wake_core::services::terminal::resume_targets(&s.meta).is_empty());
+
+    // 自定义 location:状态目录、agents 目录都整形到 agents 层
+    let state = env
+        .openclaw_db
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let agents = state.join("agents");
+    assert_eq!(
+        OpenclawAdapter::new()
+            .with_custom_root(state.to_path_buf())
+            .data_roots(),
+        vec![agents.clone()]
+    );
+    assert_eq!(
+        OpenclawAdapter::new()
+            .with_custom_root(agents.clone())
+            .data_roots(),
+        vec![agents]
+    );
 }
 
 // ---------------------------------------------------------------- quickMeta 合并
@@ -1629,7 +1944,7 @@ fn agent_id_all_matches_ord_and_roster() {
 fn removed_defaults_suppress_instances() {
     setup();
     let roster = wake_core::adapters::create_adapters_with(&[], &[AgentId::ClaudeCode]);
-    assert_eq!(roster.len(), 13);
+    assert_eq!(roster.len(), 15);
     assert!(roster.iter().all(|a| a.agent() != AgentId::ClaudeCode));
 
     let dir = tempfile::tempdir().unwrap();
@@ -1927,13 +2242,13 @@ fn adapter_ix_for_routes_to_owning_instance() {
     let custom = dir.path().to_path_buf();
     let roster =
         wake_core::adapters::create_adapters_with(&[(AgentId::ClaudeCode, custom.clone())], &[]);
-    assert_eq!(roster.len(), 15, "14 默认 + 1 自定义");
-    assert_eq!(roster[14].agent(), AgentId::ClaudeCode);
+    assert_eq!(roster.len(), 17, "16 默认 + 1 自定义");
+    assert_eq!(roster[16].agent(), AgentId::ClaudeCode);
 
     let under = format!("{}/projects/p/x.jsonl", custom.display());
     assert_eq!(
         wake_core::adapters::adapter_ix_for(&roster, AgentId::ClaudeCode, &under),
-        Some(14),
+        Some(16),
         "自定义根下的文件应路由到自定义实例"
     );
     // 兄弟目录(裸前缀)不得吸入
@@ -1966,7 +2281,7 @@ fn remote_adapters_stay_inside_cache_and_rewrite_keys() {
     let empty = tempfile::tempdir().unwrap();
     let adapters =
         wake_core::adapters::remote::create_remote_adapters(&templates, "devbox", empty.path());
-    assert_eq!(adapters.len(), 14, "每家一个远程实例");
+    assert_eq!(adapters.len(), 16, "每家一个远程实例");
     let cache_prefix = empty.path().to_string_lossy().to_string();
     for adapter in &adapters {
         assert_eq!(adapter.host(), "devbox");
@@ -2142,7 +2457,7 @@ fn roster_appends_remote_instances_for_enabled_hosts() {
 
     store.add_remote_host("devbox").unwrap();
     let roster = wake_core::adapters::create_adapter_roster_for(&store);
-    assert_eq!(roster.active.len(), local_n + 14, "每家一个远程实例");
+    assert_eq!(roster.active.len(), local_n + 16, "每家一个远程实例");
     assert_eq!(
         roster.locations.len(),
         locations_n,
@@ -2153,7 +2468,7 @@ fn roster_appends_remote_instances_for_enabled_hosts() {
         .iter()
         .filter(|a| a.host() == "devbox")
         .count();
-    assert_eq!(remote_count, 14);
+    assert_eq!(remote_count, 16);
     // 顺序契约:默认实例在前,"按 agent 找第一个"的兜底不受远程影响
     assert!(roster.active[..local_n].iter().all(|a| a.host().is_empty()));
 

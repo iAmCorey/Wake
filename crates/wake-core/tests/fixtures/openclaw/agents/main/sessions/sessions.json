@@ -1,0 +1,4 @@
+{
+  "agent:main:main": {"sessionId":"cccccccc-aaaa-bbbb-cccc-000000000017","updatedAt":1786179630000,"label":"legacy label loses to session_info","model":"claude-opus-5","totalTokens":5200,"chatType":"direct"},
+  "agent:main:subagent:dddddddd": {"sessionId":"dddddddd-aaaa-bbbb-cccc-000000000018","updatedAt":1786183205000,"spawnedBy":"agent:main:main","label":"child"}
+}

@@ -44,8 +44,10 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and a dozen othe
 | Kimi Code | `~/.kimi-code/sessions/**/wire.jsonl` | — | — |
 | Antigravity CLI | `~/.gemini/antigravity-cli/conversation_summaries.db` (metadata only — transcripts are encrypted) | — | — |
 | DeepSeek Harness (`dsh`) | `~/.dsh/sessions/**/session.jsonl[.zstd]` (zstd-compressed logs are decoded transparently) | ✅ | — |
+| Hermes Agent | `~/.hermes/state.db` + `profiles/*/state.db` (`HERMES_HOME` is respected) | ✅ | ✅ |
+| OpenClaw | `~/.openclaw/agents/*/agent/openclaw-agent.sqlite` + legacy `agents/*/sessions/*.jsonl` (`OPENCLAW_STATE_DIR` is respected) | ✅ | ✅ |
 
-**Model** = whether Wake shows which LLM a session used (the model the session last used). **Via** = whether Wake shows where the session was started from (CLI, IDE extension, desktop app) — only Codex records this in its local data. A "—" means the agent's local data simply doesn't record that field, not a missing feature.
+**Model** = whether Wake shows which LLM a session used (the model the session last used). **Via** = whether Wake shows where the session was started from (CLI, IDE extension, desktop app) — Codex records this in its local data; Hermes and OpenClaw record the channel a session came in through (Telegram, Discord, …). A "—" means the agent's local data simply doesn't record that field, not a missing feature.
 
 Cursor IDE chats, Windsurf, and Trae encrypt their local data; Amp, Factory (Droid), and Warp keep sessions in the cloud — none of those are supported. Reasonix stores sessions locally but hasn't been mapped yet.
 
@@ -138,7 +140,7 @@ CI runs `cargo test -p wake-core` plus a full app build on every push to main an
 ```
 crates/
 ├── wake-core        # pure data layer, no UI dependencies
-│   ├── adapters/    #   claude / codex / qoder / copilot / cursor / opencode / kiro
+│   ├── adapters/    #   claude / codex / qoder / copilot / cursor / opencode / kiro / hermes / openclaw
 │   │                #   gemini / pi / omp / grok / kimi / antigravity / dsh
 │   │                #   (AgentAdapter trait — add an adapter, get the whole UI for free;
 │   │                #   remote.rs wraps any adapter over a synced cache for remote hosts)

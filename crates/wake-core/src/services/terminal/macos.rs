@@ -367,7 +367,7 @@ fn launch_kooky_cli(meta: &SessionMeta) -> ResumeOutcome {
             "kooky-cli not found — update Kooky to 0.51+".into(),
         );
     };
-    let Some((bin, (args, _))) = session_bin(meta).zip(resume_args(meta.agent, &meta.id)) else {
+    let Some((bin, (args, _))) = session_bin(meta).zip(resume_args(meta)) else {
         return fail(
             String::new(),
             format!(
