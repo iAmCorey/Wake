@@ -729,16 +729,16 @@ fn insights_snapshot_and_streaks() {
     // 趋势:as_of=1/13(周二)→ 本周从 1/12 起是末列 52;1/7、1/10、1/11 落在
     // 1/5 那周 = 51。未来行与无 ts 行不进周桶
     let claude = &d.trend_agents[0];
-    assert_eq!((claude.name.as_str(), claude.total), ("claude-code", 4));
+    assert_eq!((claude.name.as_str(), claude.total()), ("claude-code", 4));
     assert_eq!((claude.weekly[51], claude.weekly[52]), (3, 1));
     assert_eq!(claude.weekly.len(), TREND_WEEKS);
     let codex = &d.trend_agents[1];
-    assert_eq!((codex.name.as_str(), codex.total), ("codex", 2));
+    assert_eq!((codex.name.as_str(), codex.total()), ("codex", 2));
     assert_eq!(codex.weekly[51], 2);
     assert_eq!(
         d.trend_models
             .iter()
-            .map(|s| (s.name.as_str(), s.total))
+            .map(|s| (s.name.as_str(), s.total()))
             .collect::<Vec<_>>(),
         vec![("claude-opus", 4), ("gpt-5-codex", 2)]
     );

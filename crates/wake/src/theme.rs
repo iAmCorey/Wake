@@ -71,9 +71,12 @@ fn c(hex: u32) -> Hsla {
     .into()
 }
 
+/// Claude 品牌橙:model badge、趋势图 Claude 层、模型色板第二档共用
+const CLAUDE_ORANGE: u32 = 0xD97757;
+
 /// 详情页 model badge 色——用户指定的 Claude 橙(非 agent 语义,纯配色选择);
 /// outline badge 形态,两模式通用
-pub const MODEL_BADGE_BG: u32 = 0xD97757;
+pub const MODEL_BADGE_BG: u32 = CLAUDE_ORANGE;
 
 /// 收藏星选中色——macOS systemYellow(Finder/Mail 星标惯例),两模式通用
 pub const STAR_YELLOW: u32 = 0xFFCC00;
@@ -85,7 +88,7 @@ pub const STAR_YELLOW: u32 = 0xFFCC00;
 pub fn agent_series_color(agent: wake_core::models::AgentId) -> u32 {
     use wake_core::models::AgentId::*;
     match agent {
-        ClaudeCode => 0xD97757,
+        ClaudeCode => CLAUDE_ORANGE,
         Codex => 0x7A8DFF,
         Grok => 0x8A7F73,
         Dsh => 0x4D6BFE,
@@ -106,7 +109,14 @@ pub fn agent_series_color(agent: wake_core::models::AgentId) -> u32 {
 
 /// 趋势图模型序列的分类色板(按排名取色);模型没有品牌可依,六色足够区分
 /// 前五 + Other
-pub const SERIES_PALETTE: [u32; 6] = [0x4C8DFF, 0xD97757, 0x2BB454, 0x9148FF, 0xE4739E, 0xE0B040];
+pub const SERIES_PALETTE: [u32; 6] = [
+    0x4C8DFF,
+    CLAUDE_ORANGE,
+    0x2BB454,
+    0x9148FF,
+    0xE4739E,
+    0xE0B040,
+];
 
 /// 在 gpui-component 默认主题之上覆写 Wake 的 token。
 /// 每次外观切换后都要重新调用(sync_system_appearance 会重置为默认)。

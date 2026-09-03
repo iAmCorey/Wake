@@ -2109,6 +2109,27 @@ impl TrendBoard {
         }
     }
 
+    fn unit(self) -> &'static str {
+        match self {
+            Self::Agents => "agent",
+            Self::Models => "model",
+        }
+    }
+
+    fn series(self, d: &InsightsData) -> &[TrendSeries] {
+        match self {
+            Self::Agents => &d.trend_agents,
+            Self::Models => &d.trend_models,
+        }
+    }
+
+    fn label(self, raw: &str) -> SharedString {
+        match self {
+            Self::Agents => agent_label(raw),
+            Self::Models => raw.to_string().into(),
+        }
+    }
+
     fn toggle(self) -> Self {
         match self {
             Self::Agents => Self::Models,
@@ -5775,25 +5796,10 @@ impl Workbench {
         let theme = cx.theme();
 
         // ---- 概览大数字行 ----
-        let stat = |value: String, label: &'static str| {
-            v_flex()
-                .gap(px(2.))
-                .child(
-                    div()
-                        .text_size(FONT_TITLE)
-                        .font_semibold()
-                        .text_color(theme.foreground)
-                        .child(value),
-                )
-                .child(
-                    div()
-                        .text_size(FONT_CAPTION)
-                        .text_color(theme.muted_foreground)
-                        .child(label),
-                )
-        };
         // 序:Sessions / Tokens / Prompts / Agents / Projects / Active days
         // (用户钉的)
+        let stat =
+            |value: String, label: &'static str| stat_cell(value, label, FONT_TITLE, None, cx);
         let overview = h_flex()
             .gap(px(40.))
             .child(stat(thousands(d.sessions), "Sessions"))
@@ -5808,13 +5814,12 @@ impl Workbench {
         // ---- 三个榜单的行首/名称(闭包只捕获 Copy 的色值) ----
         let dark = theme.mode.is_dark();
         let muted = theme.muted_foreground;
-        let agent_head = move |u: &UsageTally| match AgentId::from_str(&u.name) {
-            Some(agent) => (
-                Some(img(agent.brand_icon(dark)).size(px(15.)).into_any_element()),
-                agent.display_name().into(),
-            ),
-            // 库里出现未知 agent_id(降级防御):无图标裸名,比整行消失诚实
-            None => (None, u.name.clone().into()),
+        let agent_head = move |u: &UsageTally| {
+            (
+                AgentId::from_str(&u.name)
+                    .map(|a| img(a.brand_icon(dark)).size(px(15.)).into_any_element()),
+                agent_label(&u.name),
+            )
         };
         let project_head = move |u: &UsageTally| {
             (
@@ -5933,54 +5938,32 @@ impl Workbench {
         } else {
             TrendBoard::Agents
         };
-        let series = match board {
-            TrendBoard::Agents => &d.trend_agents,
-            TrendBoard::Models => &d.trend_models,
+        let flip = || {
+            cx.listener(|this, _, _window, cx| {
+                this.insights_trend = this.insights_trend.toggle();
+                cx.notify();
+            })
         };
         let arrows = has_models.then(|| {
             insight_arrows(
                 "trend-arrow",
                 Some(board.caption().into()),
-                cx.listener(move |this, _, _window, cx| {
-                    this.insights_trend = this.insights_trend.toggle();
-                    cx.notify();
-                }),
-                cx.listener(move |this, _, _window, cx| {
-                    this.insights_trend = this.insights_trend.toggle();
-                    cx.notify();
-                }),
+                flip(),
+                flip(),
                 cx,
             )
             .into_any_element()
         });
-        let name_of = move |raw: &str| -> SharedString {
-            match board {
-                TrendBoard::Agents => AgentId::from_str(raw)
-                    .map(|a| a.display_name().into())
-                    .unwrap_or_else(|| raw.to_string().into()),
-                TrendBoard::Models => raw.to_string().into(),
-            }
-        };
-        // agent 用品牌色(库里冒出未知 agent_id 时退分类色板),模型按排名取色板
-        let color_of = move |raw: &str, rank: usize| -> Hsla {
-            let palette = crate::theme::SERIES_PALETTE[rank % crate::theme::SERIES_PALETTE.len()];
-            let hex = match board {
-                TrendBoard::Agents => AgentId::from_str(raw)
-                    .map(crate::theme::agent_series_color)
-                    .unwrap_or(palette),
-                TrendBoard::Models => palette,
-            };
-            rgb(hex).into()
-        };
+        let layers = trend_layers(board, board.series(d), cx);
         v_flex()
             .gap(SPACE_MD)
             .child(switch_section_head(
                 "Over time",
-                Some(trend_caption(board, series).into()),
+                Some(trend_caption(board, &layers).into()),
                 arrows,
                 cx,
             ))
-            .child(render_trend(d, series, name_of, color_of, cx))
+            .child(render_trend(d.trend_start(), layers, cx))
             .into_any_element()
     }
 
@@ -6276,12 +6259,12 @@ impl Workbench {
                                 h_flex()
                                     .flex_shrink_0()
                                     .gap(SPACE_XS)
-                                    .child(if terminal::resume_targets(&meta).is_empty() {
+                                    .child(if terminal::resume_targets(meta).is_empty() {
                                         // 没有 resume 形制的 agent(OpenClaw 的 TUI 只按 session
                                         // key 开会话):不画 Open In,别给一组点了才报错的死按钮
                                         div().into_any_element()
                                     } else if let [terminal::ResumeTarget::CopySshCommand] =
-                                        terminal::resume_targets(&meta).as_slice()
+                                        terminal::resume_targets(meta).as_slice()
                                     {
                                         // 远程会话(阶段 1 只有 Copy SSH command):单段控件用
                                         // 现成 Button,无 chevron 无记忆(split 按钮手搓只因它
@@ -6312,7 +6295,7 @@ impl Workbench {
                                         // 目标列表按 agent 过滤(Kooky 深链不认 dsh);
                                         // 偏好目标不在列表时(如 dsh 会话 + 偏好 Kooky)回退首项
                                         let terms: Vec<terminal::TerminalApp> =
-                                            terminal::resume_targets(&meta)
+                                            terminal::resume_targets(meta)
                                                 .into_iter()
                                                 .filter_map(|t| match t {
                                                     terminal::ResumeTarget::App(app) => Some(app),
@@ -7064,230 +7047,19 @@ fn render_distribution(range: InsightsRange, values: &[i64], peak: usize, cx: &A
         .into_any_element()
 }
 
-/// 趋势图堆叠的序列数上限:前五个按总量降序各自着色(agent 品牌色 / 模型
-/// 色板,见 theme.rs),其余合并为 "Other" 用 muted_foreground 淡层
-const TREND_TOP: usize = 5;
+/// 周格网格几何:热力图与趋势图共用——两图的周列必须上下对齐(DESIGN.md),
+/// 改任何一个数都同时改两张图
+const WEEK_CELL: f32 = 9.;
+const WEEK_GAP: f32 = 3.;
+const WEEK_STEP: f32 = WEEK_CELL + WEEK_GAP;
+/// 热力图左侧星期标签列宽;趋势图同样留出这一列,周列才对齐
+const DOW_W: f32 = 26.;
 
-fn trend_caption(board: TrendBoard, series: &[TrendSeries]) -> String {
-    let unit = match board {
-        TrendBoard::Agents => "agent",
-        TrendBoard::Models => "model",
-    };
-    // 本周领先者:as_of 所在周 prompts 最多的序列(本周为空则退回上一周)
-    let leader = [TREND_WEEKS - 1, TREND_WEEKS - 2]
-        .into_iter()
-        .find_map(|w| {
-            series
-                .iter()
-                .filter(|s| s.weekly[w] > 0)
-                .max_by_key(|s| s.weekly[w])
-                .map(|s| s.name.clone())
-        });
-    match leader {
-        Some(name) => {
-            let shown = match board {
-                TrendBoard::Agents => AgentId::from_str(&name)
-                    .map(|a| a.display_name().to_string())
-                    .unwrap_or(name),
-                TrendBoard::Models => name,
-            };
-            format!("Prompts per week by {unit} · {shown} leads this week")
-        }
-        None => format!("Prompts per week by {unit}"),
-    }
-}
-
-/// "Last 7 days" 对比行:四个度量各带与前 7 天的相对变化。上涨用 primary,
-/// 持平/下降 muted——不引入第四种文字色
-fn render_week_section(d: &InsightsData, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    let (cur, prev) = d.last_week_pair();
-    let delta = |now: i64, before: i64| -> (SharedString, Hsla) {
-        if before == 0 && now == 0 {
-            ("No activity".into(), theme.muted_foreground)
-        } else if before == 0 {
-            ("New this week".into(), theme.primary)
-        } else {
-            let pct = ((now - before) as f64 * 100. / before as f64).round() as i64;
-            let text: SharedString = if pct == 0 {
-                "Same as last week".into()
-            } else {
-                format!("{pct:+}% vs last week").into()
-            };
-            let color = if pct > 0 {
-                theme.primary
-            } else {
-                theme.muted_foreground
-            };
-            (text, color)
-        }
-    };
-    let stat = |value: String, label: &'static str, now: i64, before: i64| {
-        let (text, color) = delta(now, before);
-        v_flex()
-            .gap(px(2.))
-            .child(
-                div()
-                    .text_size(FONT_HEADING)
-                    .font_semibold()
-                    .text_color(theme.foreground)
-                    .child(value),
-            )
-            .child(
-                div()
-                    .text_size(FONT_CAPTION)
-                    .text_color(theme.muted_foreground)
-                    .child(label),
-            )
-            .child(div().text_size(FONT_LABEL).text_color(color).child(text))
-    };
-    v_flex()
-        .gap(SPACE_MD)
-        .child(switch_section_head(
-            "Last 7 days",
-            Some("Compared with the 7 days before".into()),
-            None,
-            cx,
-        ))
-        .child(
-            h_flex()
-                .gap(px(40.))
-                .items_start()
-                .child(stat(
-                    thousands(cur.sessions),
-                    "Sessions",
-                    cur.sessions,
-                    prev.sessions,
-                ))
-                .when(d.tokens > 0, |row| {
-                    row.child(stat(
-                        fmt_tokens(Some(cur.tokens)),
-                        "Tokens",
-                        cur.tokens,
-                        prev.tokens,
-                    ))
-                })
-                .child(stat(
-                    thousands(cur.prompts),
-                    "Prompts",
-                    cur.prompts,
-                    prev.prompts,
-                ))
-                .child(stat(
-                    thousands(cur.active_days),
-                    "Active days",
-                    cur.active_days,
-                    prev.active_days,
-                )),
-        )
-        .into_any_element()
-}
-
-/// 堆叠周柱图:53 列与热力图同宽同步距(左侧留出热力图的星期标签列,
-/// 两图的周列上下对齐),每列 = 各序列该周 prompts 自下而上堆叠,按窗口内
-/// 峰值周归一;零周留 2px muted 基线。图例列出前五 + Other
-fn render_trend(
-    d: &InsightsData,
-    series: &[TrendSeries],
-    name_of: impl Fn(&str) -> SharedString,
-    color_of: impl Fn(&str, usize) -> Hsla,
-    cx: &App,
-) -> AnyElement {
+/// 月份刻度行:该列周一进入新月份时标注(与前一周比,首列同规则,相邻标签
+/// 由此天然隔开 ≥4 列不会叠)。热力图与趋势图共用同一行
+fn month_ticks(start: chrono::NaiveDate, cx: &App) -> Div {
     use chrono::Datelike as _;
     let theme = cx.theme();
-    const CELL: f32 = 9.;
-    const GAP: f32 = 3.;
-    const STEP: f32 = CELL + GAP;
-    const DOW_W: f32 = 26.;
-    const CHART_H: f32 = 72.;
-
-    // 分层:前五序列 + Other 合并
-    let mut layers: Vec<(SharedString, Hsla, Vec<i64>)> = series
-        .iter()
-        .take(TREND_TOP)
-        .enumerate()
-        .map(|(i, s)| (name_of(&s.name), color_of(&s.name, i), s.weekly.clone()))
-        .collect();
-    if series.len() > TREND_TOP {
-        let mut other = vec![0i64; TREND_WEEKS];
-        for s in &series[TREND_TOP..] {
-            for (o, n) in other.iter_mut().zip(&s.weekly) {
-                *o += n;
-            }
-        }
-        layers.push(("Other".into(), theme.muted_foreground.opacity(0.35), other));
-    }
-    let totals: Vec<i64> = (0..TREND_WEEKS)
-        .map(|w| layers.iter().map(|(_, _, v)| v[w]).sum())
-        .collect();
-    let max = totals.iter().copied().max().unwrap_or(0).max(1);
-
-    let today = d.as_of;
-    let this_monday = today - chrono::Days::new(today.weekday().num_days_from_monday() as u64);
-    let start = this_monday - chrono::Days::new(52 * 7);
-
-    let mut columns = h_flex()
-        .items_end()
-        .gap(px(GAP))
-        .h(px(CHART_H))
-        .child(div().w(px(DOW_W)).flex_shrink_0());
-    for w in 0..TREND_WEEKS {
-        let total = totals[w];
-        let monday = start + chrono::Days::new(w as u64 * 7);
-        // tooltip:该周总量 + 前三层明细,hover 才格式化
-        let breakdown: Vec<(SharedString, i64)> = layers
-            .iter()
-            .filter(|(_, _, v)| v[w] > 0)
-            .take(3)
-            .map(|(name, _, v)| (name.clone(), v[w]))
-            .collect();
-        let column = if total == 0 {
-            div()
-                .w(px(CELL))
-                .h(px(2.))
-                .rounded(RADIUS_CELL)
-                .bg(theme.muted)
-        } else {
-            let col_h = ((total as f32 / max as f32) * CHART_H).max(3.);
-            // DOM 自上而下 = 视觉自上而下:Other/末层在顶,首序列在底
-            let mut col = v_flex()
-                .w(px(CELL))
-                .h(px(col_h))
-                .justify_end()
-                .rounded(RADIUS_CELL)
-                .overflow_hidden();
-            for (_, color, v) in layers.iter().rev() {
-                if v[w] == 0 {
-                    continue;
-                }
-                let h = (v[w] as f32 / total as f32) * col_h;
-                col = col.child(div().w_full().h(px(h)).bg(*color));
-            }
-            col
-        };
-        columns = columns.child(column.id(("trend", w)).flex_shrink_0().tooltip(
-            move |window, cx| {
-                let mut label = format!(
-                    "Week of {} · {}",
-                    monday.format("%b %-d"),
-                    prompts_label(total)
-                );
-                if !breakdown.is_empty() {
-                    label.push_str("\n");
-                    label.push_str(
-                        &breakdown
-                            .iter()
-                            .map(|(n, c)| format!("{n} {c}"))
-                            .collect::<Vec<_>>()
-                            .join(" · "),
-                    );
-                }
-                gpui_component::tooltip::Tooltip::new(SharedString::from(label)).build(window, cx)
-            },
-        ));
-    }
-
-    // 月份刻度:与热力图同规则(该列周一进入新月份时标)
     let mut months = div()
         .relative()
         .w_full()
@@ -7301,31 +7073,260 @@ fn render_trend(
                 div()
                     .absolute()
                     .top_0()
-                    .left(px(DOW_W + GAP + c as f32 * STEP))
+                    .left(px(DOW_W + WEEK_GAP + c as f32 * WEEK_STEP))
                     .child(MONTH_SHORT[monday.month0() as usize]),
             );
         }
+    }
+    months
+}
+
+/// Insights 大数字格:概览行(Title 22)与 Last 7 days(Heading 16)共用,
+/// 后者多一行相对变化(note)
+fn stat_cell(
+    value: String,
+    label: &'static str,
+    size: Pixels,
+    note: Option<(SharedString, Hsla)>,
+    cx: &App,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    v_flex()
+        .gap(px(2.))
+        .child(
+            div()
+                .text_size(size)
+                .font_semibold()
+                .text_color(theme.foreground)
+                .child(value),
+        )
+        .child(
+            div()
+                .text_size(FONT_CAPTION)
+                .text_color(theme.muted_foreground)
+                .child(label),
+        )
+        .when_some(note, |cell, (text, color)| {
+            cell.child(div().text_size(FONT_LABEL).text_color(color).child(text))
+        })
+}
+
+/// agent_id → 展示名。库里冒出未知 agent_id(降级防御)时裸名,比整行消失诚实
+fn agent_label(raw: &str) -> SharedString {
+    AgentId::from_str(raw)
+        .map(|a| a.display_name().into())
+        .unwrap_or_else(|| raw.to_string().into())
+}
+
+/// 趋势图堆叠的序列数上限:前五个按总量降序各自着色(agent 品牌色 / 模型
+/// 色板,见 theme.rs),其余合并为 "Other" 用 muted_foreground 淡层
+const TREND_TOP: usize = 5;
+
+/// 趋势图的一层:名称、色、TREND_WEEKS 周值;`other` 是合并层(不参评领先者)
+struct TrendLayer {
+    name: SharedString,
+    color: Hsla,
+    weekly: Vec<i64>,
+    other: bool,
+}
+
+/// series → 图层投影。caption、图例、柱子共用这一份:图例里没有的名字不会
+/// 出现在 caption 里。Rc 让 53 个 tooltip 闭包只各持一个指针,hover 才格式化
+fn trend_layers(board: TrendBoard, series: &[TrendSeries], cx: &App) -> Rc<Vec<TrendLayer>> {
+    let theme = cx.theme();
+    let palette = crate::theme::SERIES_PALETTE;
+    let mut layers: Vec<TrendLayer> = series
+        .iter()
+        .take(TREND_TOP)
+        .enumerate()
+        .map(|(rank, s)| {
+            // agent 用品牌色(未知 agent_id 退分类色板),模型按排名取色板
+            let hex = match board {
+                TrendBoard::Agents => AgentId::from_str(&s.name)
+                    .map(crate::theme::agent_series_color)
+                    .unwrap_or(palette[rank % palette.len()]),
+                TrendBoard::Models => palette[rank % palette.len()],
+            };
+            TrendLayer {
+                name: board.label(&s.name),
+                color: rgb(hex).into(),
+                weekly: s.weekly.clone(),
+                other: false,
+            }
+        })
+        .collect();
+    if series.len() > TREND_TOP {
+        let mut other = vec![0i64; TREND_WEEKS];
+        for s in &series[TREND_TOP..] {
+            for (o, n) in other.iter_mut().zip(&s.weekly) {
+                *o += n;
+            }
+        }
+        layers.push(TrendLayer {
+            name: "Other".into(),
+            color: theme.muted_foreground.opacity(0.35),
+            weekly: other,
+            other: true,
+        });
+    }
+    Rc::new(layers)
+}
+
+fn trend_caption(board: TrendBoard, layers: &[TrendLayer]) -> String {
+    let unit = board.unit();
+    // 本周领先者:as_of 所在周 prompts 最多的一层(本周为空则退回上一周)
+    let leader = [TREND_WEEKS - 1, TREND_WEEKS - 2]
+        .into_iter()
+        .find_map(|w| {
+            layers
+                .iter()
+                .filter(|l| !l.other && l.weekly[w] > 0)
+                .max_by_key(|l| l.weekly[w])
+                .map(|l| l.name.clone())
+        });
+    match leader {
+        Some(name) => format!("Prompts per week by {unit} · {name} leads this week"),
+        None => format!("Prompts per week by {unit}"),
+    }
+}
+
+/// "Last 7 days" 对比行:四个度量各带与前 7 天的相对变化。上涨用 primary,
+/// 持平/下降 muted——不引入第四种文字色
+fn render_week_section(d: &InsightsData, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let (cur, prev) = d.last_week_pair();
+    let note = |now: i64, before: i64| -> (SharedString, Hsla) {
+        match (now, before) {
+            (0, 0) => ("No activity".into(), theme.muted_foreground),
+            (_, 0) => ("New this week".into(), theme.primary),
+            _ => {
+                let pct = ((now - before) as f64 * 100. / before as f64).round() as i64;
+                match pct {
+                    0 => ("Same as last week".into(), theme.muted_foreground),
+                    p if p > 0 => (format!("{p:+}% vs last week").into(), theme.primary),
+                    p => (
+                        format!("{p:+}% vs last week").into(),
+                        theme.muted_foreground,
+                    ),
+                }
+            }
+        }
+    };
+    let stat = |label: &'static str, now: i64, before: i64, fmt: &dyn Fn(i64) -> String| {
+        stat_cell(fmt(now), label, FONT_HEADING, Some(note(now, before)), cx)
+    };
+    v_flex()
+        .gap(SPACE_MD)
+        .child(switch_section_head(
+            "Last 7 days",
+            Some("Compared with the 7 days before".into()),
+            None,
+            cx,
+        ))
+        .child(
+            h_flex()
+                .gap(px(40.))
+                .items_start()
+                .child(stat("Sessions", cur.sessions, prev.sessions, &thousands))
+                .when(d.tokens > 0, |row| {
+                    row.child(stat("Tokens", cur.tokens, prev.tokens, &|n| {
+                        fmt_tokens(Some(n))
+                    }))
+                })
+                .child(stat("Prompts", cur.prompts, prev.prompts, &thousands))
+                .child(stat(
+                    "Active days",
+                    cur.active_days,
+                    prev.active_days,
+                    &thousands,
+                )),
+        )
+        .into_any_element()
+}
+
+/// 堆叠周柱图:TREND_WEEKS 列与热力图同宽同步距(左侧留出热力图的星期标签
+/// 列,两图的周列上下对齐),每列 = 各层该周 prompts 自下而上堆叠,按窗口内
+/// 峰值周归一;零周留 2px muted 基线。图例列出各层
+fn render_trend(start: chrono::NaiveDate, layers: Rc<Vec<TrendLayer>>, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    const CHART_H: f32 = 72.;
+    let totals: Vec<i64> = (0..TREND_WEEKS)
+        .map(|w| layers.iter().map(|l| l.weekly[w]).sum())
+        .collect();
+    let max = totals.iter().copied().max().unwrap_or(0).max(1);
+
+    let mut columns = h_flex()
+        .items_end()
+        .gap(px(WEEK_GAP))
+        .h(px(CHART_H))
+        .child(div().w(px(DOW_W)).flex_shrink_0());
+    for w in 0..TREND_WEEKS {
+        let total = totals[w];
+        let column = if total == 0 {
+            div()
+                .w(px(WEEK_CELL))
+                .h(px(2.))
+                .rounded(RADIUS_CELL)
+                .bg(theme.muted)
+        } else {
+            let col_h = ((total as f32 / max as f32) * CHART_H).max(3.);
+            // DOM 自上而下 = 视觉自上而下:Other/末层在顶,首层在底
+            let mut col = v_flex()
+                .w(px(WEEK_CELL))
+                .h(px(col_h))
+                .justify_end()
+                .rounded(RADIUS_CELL)
+                .overflow_hidden();
+            for l in layers.iter().rev().filter(|l| l.weekly[w] > 0) {
+                let h = (l.weekly[w] as f32 / total as f32) * col_h;
+                col = col.child(div().w_full().h(px(h)).bg(l.color));
+            }
+            col
+        };
+        // tooltip 只捕获 Rc + 两个 Copy 值,该周总量与前三层明细 hover 才算
+        let layers = Rc::clone(&layers);
+        columns = columns.child(column.id(("trend", w)).flex_shrink_0().tooltip(
+            move |window, cx| {
+                let monday = start + chrono::Days::new(w as u64 * 7);
+                let mut label = format!(
+                    "Week of {} · {}",
+                    monday.format("%b %-d"),
+                    prompts_label(total)
+                );
+                let breakdown: Vec<String> = layers
+                    .iter()
+                    .filter(|l| l.weekly[w] > 0)
+                    .take(3)
+                    .map(|l| format!("{} {}", l.name, l.weekly[w]))
+                    .collect();
+                if !breakdown.is_empty() {
+                    label.push('\n');
+                    label.push_str(&breakdown.join(" · "));
+                }
+                gpui_component::tooltip::Tooltip::new(SharedString::from(label)).build(window, cx)
+            },
+        ));
     }
 
     let legend = h_flex()
         .flex_wrap()
         .gap_x(SPACE_MD)
         .gap_y(SPACE_XS)
-        .pl(px(DOW_W + GAP))
+        .pl(px(DOW_W + WEEK_GAP))
         .text_size(FONT_LABEL)
         .text_color(theme.muted_foreground)
-        .children(layers.iter().map(|(name, color, _)| {
+        .children(layers.iter().map(|l| {
             h_flex()
                 .gap(px(5.))
                 .items_center()
-                .child(div().size(px(CELL)).rounded(RADIUS_CELL).bg(*color))
-                .child(name.clone())
+                .child(div().size(px(WEEK_CELL)).rounded(RADIUS_CELL).bg(l.color))
+                .child(l.name.clone())
         }));
 
     v_flex()
         .gap(px(6.))
         .child(columns)
-        .child(months)
+        .child(month_ticks(start, cx))
         .child(legend)
         .into_any_element()
 }
@@ -7334,21 +7335,19 @@ fn render_trend(
 /// 调阶只改这里
 const HEAT: [f32; 4] = [0.25, 0.5, 0.75, 1.];
 
-/// GitHub 风活跃热力图:53 周 × 7 天(周一起始),最右列为本周(d.as_of,
+/// GitHub 风活跃热力图:TREND_WEEKS 周 × 7 天(周一起始),最右列为本周(d.as_of,
 /// 与 streak 同一天,渲染层不再读时钟)。格子 9px:网格总宽 26 + 3 +
 /// 53×9 + 52×3 = 662,必须收进最小窗口的内容宽 668(940 − 224 侧栏 −
 /// 两侧 24 padding)——10px 格的 715 会在最小窗口被裁掉右缘
 /// (2026-08-27 Codex review)。daily 升序,二分出窗口后填定长数组——
 /// 渲染路径零哈希零日期运算;tooltip 文案 hover 才格式化
 fn render_heatmap(d: &InsightsData, cx: &App) -> AnyElement {
-    use chrono::Datelike as _;
     let theme = cx.theme();
     let today = d.as_of;
-    let this_monday = today - chrono::Days::new(today.weekday().num_days_from_monday() as u64);
-    let start = this_monday - chrono::Days::new(52 * 7);
+    let start = d.trend_start();
     let today_ix = (today - start).num_days();
 
-    const DAYS: usize = 53 * 7;
+    const DAYS: usize = TREND_WEEKS * 7;
     let mut window = [0i64; DAYS];
     let mut heat_max = 1i64;
     let from = d.daily.partition_point(|(day, _)| *day < start);
@@ -7366,31 +7365,11 @@ fn render_heatmap(d: &InsightsData, cx: &App) -> AnyElement {
         let quartile = ((n as f32 / heat_max as f32) * 4.).ceil().clamp(1., 4.) as usize;
         theme.primary.opacity(HEAT[quartile - 1])
     };
-    const CELL: f32 = 9.;
-    const GAP: f32 = 3.;
-    const STEP: f32 = CELL + GAP;
-    const DOW_W: f32 = 26.;
+    const CELL: f32 = WEEK_CELL;
+    const GAP: f32 = WEEK_GAP;
+    const STEP: f32 = WEEK_STEP;
 
-    // 月份标签:该列周一进入新月份时标注(与前一周比,首列同规则,
-    // 相邻标签由此天然隔开 ≥4 列不会叠)
-    let mut months = div()
-        .relative()
-        .w_full()
-        .h(px(14.))
-        .text_size(FONT_LABEL)
-        .text_color(theme.muted_foreground);
-    for c in 0..53u64 {
-        let monday = start + chrono::Days::new(c * 7);
-        if monday.month() != (monday - chrono::Days::new(7)).month() {
-            months = months.child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left(px(DOW_W + GAP + c as f32 * STEP))
-                    .child(MONTH_SHORT[monday.month0() as usize]),
-            );
-        }
-    }
+    let months = month_ticks(start, cx);
 
     // 星期标签列:行 r 的格子 y = r×STEP,文字行高 ≈13px,
     // (CELL−13)/2 = −2 光学对行
@@ -7410,7 +7389,7 @@ fn render_heatmap(d: &InsightsData, cx: &App) -> AnyElement {
         }));
 
     let mut grid = h_flex().gap(px(GAP)).items_start().child(dow_col);
-    for c in 0..53usize {
+    for c in 0..TREND_WEEKS {
         let mut col = v_flex().gap(px(GAP));
         for r in 0..7usize {
             let ix = c * 7 + r;

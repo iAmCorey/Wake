@@ -447,12 +447,17 @@ pub struct WindowStats {
     pub active_days: i64,
 }
 
-/// 趋势图的一条序列:`weekly[TREND_WEEKS-1]` 是 as_of 所在周,向前逐周
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// 趋势图的一条序列:`weekly` 长 TREND_WEEKS,末项是 as_of 所在周,向前逐周
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrendSeries {
     pub name: String,
     pub weekly: Vec<i64>,
-    pub total: i64,
+}
+
+impl TrendSeries {
+    pub fn total(&self) -> i64 {
+        self.weekly.iter().sum()
+    }
 }
 
 /// 趋势图与热力图共用的周数:52 整周 + 本周
@@ -468,18 +473,22 @@ impl InsightsData {
         self.daily.iter().max_by_key(|(_, n)| *n).copied()
     }
 
-    /// `[ending - days + 1, ending]` 闭区间内的度量。会话按创建日归属,
-    /// prompts 按消息日;active_days 数的是有 prompt 的日子(与热力图同口径)
-    pub fn window(&self, days: u32, ending: chrono::NaiveDate) -> WindowStats {
-        let start = ending - chrono::Days::new(u64::from(days.saturating_sub(1)));
-        let in_range = |d: &chrono::NaiveDate| *d >= start && *d <= ending;
+    /// 以 `ending` 收尾的 7 天闭区间内的度量。会话按创建日归属,prompts 按
+    /// 消息日;active_days 数的是有 prompt 的日子(与热力图同口径)。两个日序列
+    /// 都升序,二分定位后只读窗内的行(每帧调用,别线性扫全史)
+    pub fn week_ending(&self, ending: chrono::NaiveDate) -> WindowStats {
+        let start = ending - chrono::Days::new(6);
         let mut w = WindowStats::default();
-        for (d, n) in self.daily.iter().filter(|(d, _)| in_range(d)) {
-            let _ = d;
+        let from = self.daily.partition_point(|(d, _)| *d < start);
+        for (_, n) in self.daily[from..].iter().take_while(|(d, _)| *d <= ending) {
             w.prompts += n;
             w.active_days += 1;
         }
-        for (_, sessions, tokens) in self.daily_sessions.iter().filter(|(d, _, _)| in_range(d)) {
+        let from = self.daily_sessions.partition_point(|(d, _, _)| *d < start);
+        for (_, sessions, tokens) in self.daily_sessions[from..]
+            .iter()
+            .take_while(|(d, _, _)| *d <= ending)
+        {
             w.sessions += sessions;
             w.tokens += tokens;
         }
@@ -488,9 +497,32 @@ impl InsightsData {
 
     /// 最近 7 天与其前 7 天
     pub fn last_week_pair(&self) -> (WindowStats, WindowStats) {
-        let prev_end = self.as_of - chrono::Days::new(7);
-        (self.window(7, self.as_of), self.window(7, prev_end))
+        (
+            self.week_ending(self.as_of),
+            self.week_ending(self.as_of - chrono::Days::new(7)),
+        )
     }
+
+    /// 趋势图/热力图窗口的首个周一(末列 = as_of 所在周)
+    pub fn trend_start(&self) -> chrono::NaiveDate {
+        week_start(self.as_of) - chrono::Days::new((TREND_WEEKS as u64 - 1) * 7)
+    }
+}
+
+/// 周起始 = 周一。Insights 所有"按周"的口径(趋势分桶、热力图列、窗口起点)
+/// 只此一处
+pub fn week_start(day: chrono::NaiveDate) -> chrono::NaiveDate {
+    use chrono::Datelike as _;
+    day - chrono::Days::new(day.weekday().num_days_from_monday() as u64)
+}
+
+/// 日 → 趋势窗口内的周下标(末项 = as_of 所在周);窗外/未来为 None。
+/// 与 `InsightsData::trend_start` 是一对互逆:`trend_start + ix×7 天` 回到该周周一
+pub fn trend_week_index(as_of: chrono::NaiveDate, day: chrono::NaiveDate) -> Option<usize> {
+    let weeks_back = (week_start(as_of) - week_start(day)).num_days() / 7;
+    (0..TREND_WEEKS as i64)
+        .contains(&weeks_back)
+        .then(|| TREND_WEEKS - 1 - weeks_back as usize)
 }
 
 /// Insights 榜单的一行(agent/项目/模型共用)。tokens = 0 表示该组不报
