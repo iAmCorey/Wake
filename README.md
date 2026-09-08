@@ -22,6 +22,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and a dozen othe
 - **Manage** — star/pin (stored in Wake's own DB, original files untouched), export to Markdown or save an inline image through the system Save dialog (Wake remembers the last folder), delete (system Trash + tombstone so deleted sessions stay deleted)
 - **Insights** — a stats page for your whole library: GitHub-style activity heatmap with streaks, hour / weekday / month breakdowns, and Agents / Projects / Models leaderboards switchable between sessions, tokens, and prompts
 - **Remote hosts** — mirror the sessions on your other machines over SSH (Settings → Remote hosts); they show up next to local ones with an `@host` badge, searchable like everything else, and resume through a copied `ssh -t` command
+- **Connect your agents (MCP)** — a bundled read-only MCP server, `wake-mcp`, lets Claude Code, Codex, Cursor or any MCP client search your whole history, list recent sessions per project and read transcripts page by page, so a new agent can pick up where another one left off; Settings → Connect has copy-paste setup snippets
 
 ![Full-text search across every agent's sessions](imgs/screenshot-2.webp)
 
@@ -65,6 +66,39 @@ How it works, and what it doesn't do yet:
 - Wake first asks the remote which of the known agent directories exist, then mirrors only those with `rsync` into `remotes/<host>/` under its own data directory. Only session data and sidecar files are copied, never credentials, and nothing on the remote is ever written
 - Remote sessions are read-only in Wake: they can't be moved to the Trash, and the mirror simply follows whatever is on the remote
 - The remote is assumed to use each agent's default paths under the login user's home (`CODEX_HOME`-style overrides on the remote aren't detected), and remote Windows machines aren't supported
+
+## Connect your agents (MCP)
+
+Wake ships `wake-mcp`, a small read-only [MCP](https://modelcontextprotocol.io) server over stdio that sits next to the app binary (`Wake.app/Contents/MacOS/wake-mcp` on macOS, beside `wake` on Linux and Windows). Point an MCP client at it and the agent gets four tools:
+
+| Tool | What it does |
+|---|---|
+| `wake_search` | Full-text search across every agent's transcripts (CJK and code substrings work); each snippet carries a `wake://session/<key>#<seq>` reference |
+| `wake_list_sessions` | Most recently updated sessions, scoped by project (pass the agent's working directory), agent, time window or starred |
+| `wake_get_session` | One transcript as compact Markdown — user and assistant messages with `[seq N]` markers, tool calls folded to a line, injected context omitted — paginated by `from_seq` |
+| `wake_list_projects` | Projects with indexed sessions, most recently active first |
+
+Setup is a copy-paste from Settings → Connect, or run `wake-mcp setup` in a terminal. For example, Claude Code:
+
+```bash
+claude mcp add --scope user wake -- "/Applications/Wake.app/Contents/MacOS/wake-mcp"
+```
+
+Codex reads the same server from `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.wake]
+command = "/Applications/Wake.app/Contents/MacOS/wake-mcp"
+```
+
+A few things worth knowing:
+
+- Everything is read-only: the server opens Wake's index without write access and never scans or modifies anything; there are no delete or star tools
+- Search and lists come from Wake's index, so keep Wake running for fresh results — every reply says how recent the index is. Reading a transcript parses the agent's files live, so it is always current
+- Agents see the same session files Wake indexes, on this machine only (remote-host mirrors included); nothing leaves the machine
+- `wake-mcp call wake_search '{"query":"useEffect("}'` runs a single tool from the terminal, handy for checking what an agent would see
+
+The full reference — every parameter, output formats, key and reference formats, error semantics, troubleshooting — is in [docs/mcp.md](docs/mcp.md).
 
 ## Privacy stance
 
@@ -126,6 +160,8 @@ scripts/test.sh --smoke                # adds a real-data scan baseline (reads y
 cargo test -p wake-core                # data-layer tests only (adapter contracts, FTS, scanner)
 cargo run -p wake-core --bin scan      # data-layer smoke test: scan and print stats
 cargo run -p wake-core --bin scan -- --search "useEffect("   # search smoke test
+cargo run -p wake-core --bin wake-mcp -- setup                # print MCP setup snippets for the dev build
+cargo run -p wake-core --bin wake-mcp -- call wake_search '{"query":"useEffect("}'   # run one MCP tool against your index
 WAKE_THEME=dark cargo run -p wake      # force dark/light (defaults to system)
 WAKE_HOME=/path cargo run -p wake      # point all agent adapters at a different home dir (portable installs, testing)
 WAKE_LIVE_REMOTE_HOST=<host> cargo test -p wake-core --test remote_sync live -- --ignored   # run the remote-host pipeline against a real SSH host
@@ -148,7 +184,8 @@ crates/
 │   ├── scanner.rs   #   single-pass scan: meta + FTS in one go, mtime incremental
 │   ├── watcher.rs   #   notify-based file watching → per-file incremental updates
 │   ├── db.rs        #   rusqlite (WAL): sessions / messages / messages_fts / user_data / tombstones (+ location, remote_hosts & schema meta tables)
-│   └── services/    #   terminal resume (per-platform: AppleScript / argv / Win32) / export / trash
+│   ├── mcp/         #   wake-mcp: read-only MCP server over stdio (hand-written JSON-RPC, four tools)
+│   └── services/    #   terminal resume (per-platform: AppleScript / argv / Win32) / export / trash / agent context helpers
 └── wake             # GPUI app (three-pane workbench + ⌘K / Ctrl+K palette)
 ```
 
