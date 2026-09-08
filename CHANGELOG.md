@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [0.5.0] — 2026-09-08
+
+- New: Connect your coding agents to Wake over MCP — the bundled read-only `wake-mcp` server lets Claude Code, Codex, Cursor and any other MCP client search your session history, list recent sessions per project and read transcripts page by page
+- New: Settings → Connect shows the server path and one-click copy of the Claude Code / Codex / Cursor setup, with Show to peek at each snippet; `wake-mcp setup` prints the same from a terminal
+- New: a guide and full reference for the MCP server at docs/mcp.md — how to connect, what to ask, every tool and parameter, troubleshooting
+
 ## [0.4.3] — 2026-09-03
 
 - New: Insights shows a "Last 7 days" row — sessions, prompts and active days with the change against the previous 7 days
