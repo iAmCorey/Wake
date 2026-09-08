@@ -2,7 +2,6 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_component::notification::Notification;
 use gpui_component::switch::Switch;
 use gpui_component::{
     h_flex, v_flex, ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _,
@@ -194,6 +193,13 @@ pub(crate) struct SettingsView {
     connect: ConnectInfo,
     /// Connect 页里展开了代码片段的行(按 snippets 下标);Settings 重开即复位
     connect_shown: std::collections::HashSet<usize>,
+    /// 刚复制过的按钮 id:按钮原地显示 "Copied" 1.6s。不用 toast——gpui-component 的
+    /// 通知在窗口失活或被悬停时会暂停自动关闭,Settings 这种从属窗里它常常就
+    /// 挂着不走(用户 2026-09-08 反馈);主界面的 Copy Session ID / Copy code 也
+    /// 从不弹通知
+    copied: Option<SharedString>,
+    /// 连点时只有最后一次的定时器能清掉 copied
+    copied_generation: u64,
     _workbench_observer: Option<Subscription>,
 }
 
@@ -217,6 +223,8 @@ impl SettingsView {
             show_unavailable: false,
             connect: ConnectInfo::probe(),
             connect_shown: Default::default(),
+            copied: None,
+            copied_generation: 0,
             _workbench_observer: None,
         }
     }
@@ -543,7 +551,7 @@ impl SettingsView {
             .into_any_element()
     }
 
-    /// Settings → Connect 的复制按钮:写剪贴板 + 一条成功通知
+    /// Settings → Connect 的复制按钮:写剪贴板,按钮原地变 "Copied" 片刻后复原
     fn copy_button(
         &self,
         id: SharedString,
@@ -551,16 +559,45 @@ impl SettingsView {
         text: String,
         cx: &Context<Self>,
     ) -> Button {
+        let copied = self.copied.as_ref() == Some(&id);
+        let clicked_id = id.clone();
         settings_button(
             Button::new(id)
-                .icon(icon("icons/copy.svg").with_size(px(13.)))
-                .label(label),
+                .icon(
+                    icon(if copied {
+                        "icons/check.svg"
+                    } else {
+                        "icons/copy.svg"
+                    })
+                    .with_size(px(13.)),
+                )
+                .label(if copied { "Copied" } else { label }),
             cx,
         )
-        .on_click(move |_, window, cx| {
+        .on_click(cx.listener(move |this, _, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-            window.push_notification(Notification::success("Copied to clipboard"), cx);
+            this.show_copied(clicked_id.clone(), cx);
+        }))
+    }
+
+    fn show_copied(&mut self, id: SharedString, cx: &mut Context<Self>) {
+        self.copied_generation = self.copied_generation.wrapping_add(1);
+        let generation = self.copied_generation;
+        self.copied = Some(id);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1_600))
+                .await;
+            this.update(cx, |this, cx| {
+                if this.copied_generation == generation {
+                    this.copied = None;
+                    cx.notify();
+                }
+            })
+            .ok();
         })
+        .detach();
     }
 
     /// Settings → Connect:把 Wake 的索引以 MCP 只读暴露给 coding agent。页面只放
