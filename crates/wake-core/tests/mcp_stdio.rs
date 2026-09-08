@@ -329,7 +329,10 @@ fn stdio_contract_end_to_end() {
     );
     let (projects, _) = c.call("wake_list_projects", json!({}));
     assert!(projects.contains(CLAUDE_PROJECT));
-    let (since_none, _) = c.call("wake_list_sessions", json!({ "since": "1m" }));
+    // 用不可能到达的绝对日期,不用 "1m":fixture 的 updated_at 有的取自文件 mtime,
+    // Linux 的 fs::copy 不保留 mtime(macOS 走 APFS clone 会保留),staged 的
+    // fixture 在 Linux 上就是"刚刚"——2026-09-08 CI 只红 ubuntu 那路
+    let (since_none, _) = c.call("wake_list_sessions", json!({ "since": "2999-01-01" }));
     assert!(since_none.starts_with("No sessions"), "{since_none}");
 
     // 6. 坏 key 是给 LLM 看的失败结果,不是协议错误、更不是崩溃
