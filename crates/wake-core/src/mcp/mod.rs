@@ -32,13 +32,17 @@ const SUPPORTED: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11
 pub const SERVER_NAME: &str = "wake";
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// 随 initialize 下发给客户端的使用说明(LLM 会读)
-const INSTRUCTIONS: &str = "Wake indexes the coding-agent sessions on this machine \
+/// 随 initialize 下发给客户端的使用说明(LLM 会读)。重点是"什么时候该用":
+/// 模型对陌生工具默认不碰,问"最近在做什么"会去翻 git log——要点明会话记录里
+/// 有而 git 里没有的东西(讨论、决策、试过的路、停在哪)
+const INSTRUCTIONS: &str = "Wake indexes every coding-agent session on this machine \
 (Claude Code, Codex, Cursor, Gemini CLI, OpenCode and more) and exposes them read-only. \
-Use wake_list_projects or wake_list_sessions to orient (pass your working directory as \
-`project` to scope to the current repo), wake_search for full-text search across every \
-agent's transcripts (CJK text and code substrings both work), and wake_get_session to read \
-a transcript page by page. Nothing here can modify sessions.";
+Use these tools whenever the user refers to earlier conversations or sessions with any AI \
+coding agent: what was discussed, decided or tried, why something was done a certain way, \
+where previous work stopped, or whether an error was seen before. Git history and the \
+working tree do not contain that; Wake does. Start with wake_list_sessions (pass the \
+current working directory as `project`) or wake_search, then read the relevant transcript \
+with wake_get_session. Nothing here can modify a session.";
 
 const JSONRPC_PARSE_ERROR: i64 = -32700;
 const JSONRPC_INVALID_REQUEST: i64 = -32600;

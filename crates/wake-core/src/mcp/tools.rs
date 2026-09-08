@@ -119,7 +119,7 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": SEARCH,
             "title": "Search session history",
-            "description": "Full-text search across every indexed coding-agent session on this machine (user prompts, assistant replies, tool names and inputs). Terms are ANDed; CJK text and code substrings like `useEffect(` work. Returns matching sessions with up to three snippets each, plus a `wake://session/<key>#<seq>` reference per snippet that you can read with wake_get_session.",
+            "description": "Full-text search across every indexed coding-agent session on this machine (user prompts, assistant replies, tool names and inputs). Use it when the user asks whether something was discussed, tried or solved before, or wants the conversation about a topic, an error message, a file or a decision — git history does not hold that. Terms are ANDed; CJK text and code substrings like `useEffect(` work. Returns matching sessions with up to three snippets each, plus a `wake://session/<key>#<seq>` reference per snippet that you can read with wake_get_session.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -136,7 +136,7 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": LIST_SESSIONS,
             "title": "List recent sessions",
-            "description": "Most recently updated sessions, optionally scoped to a project, to some agents, to a time window, or to starred sessions. Use it to see what was worked on recently (\"what did I do in this repo yesterday?\") and to get session keys for wake_get_session. Subagent sessions are folded into their parents; archived sessions are excluded.",
+            "description": "Most recently updated coding-agent sessions, optionally scoped to a project, to some agents, to a time window, or to starred sessions. Use it when the user asks what they or an agent worked on recently, wants to resume or continue earlier work, or refers to \"yesterday's session\", \"last time\", \"what Codex did here\" — pass the current working directory as `project`. It returns the session keys wake_get_session needs. Subagent sessions are folded into their parents; archived sessions are excluded.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -152,7 +152,7 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": GET_SESSION,
             "title": "Read a session transcript",
-            "description": "Read one session's transcript, parsed live from the agent's own files, as compact Markdown: user and assistant messages with `[seq N]` markers, tool calls folded to one line each, injected context omitted. Paginated — when the reply ends with a `from_seq` hint, call again with it to continue. Accepts a session key (from wake_search / wake_list_sessions) or a `wake://session/<key>#<seq>` reference (the seq becomes the starting point).",
+            "description": "Read one session's transcript, parsed live from the agent's own files, as compact Markdown: user and assistant messages with `[seq N]` markers, tool calls folded to one line each, injected context omitted. Use it after wake_search or wake_list_sessions to see what actually happened — the reasoning, the decisions and the exact steps of an earlier session. Paginated: when the reply ends with a `from_seq` hint, call again with it to continue. Accepts a session key or a `wake://session/<key>#<seq>` reference (the seq becomes the starting point).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -171,7 +171,7 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": LIST_PROJECTS,
             "title": "List indexed projects",
-            "description": "Projects (working directories) that have indexed sessions, most recently active first, with session counts. Useful to find the right `project` value or to see what the user has been working on.",
+            "description": "Projects (working directories) that have coding-agent session history, most recently active first, with session counts. Use it when the user asks broadly what they have been working on (\"which projects did I touch this month?\") or to find the right `project` value for the other tools.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
