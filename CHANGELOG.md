@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Update: the MCP tools now tell agents when to use Wake — earlier conversations, decisions, where work stopped, "have we seen this error" — so a fresh session reaches for session history instead of answering from git log
+- Fix: Copy buttons on Settings → Connect confirm inline with a brief "Copied" instead of a notification that could stay on screen
+
 ## [0.5.0] — 2026-09-08
 
 - New: Connect your coding agents to Wake over MCP — the bundled read-only `wake-mcp` server lets Claude Code, Codex, Cursor and any other MCP client search your session history, list recent sessions per project and read transcripts page by page
