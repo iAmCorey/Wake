@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.5.1] — 2026-09-08
+
 - Update: the MCP tools now tell agents when to use Wake — earlier conversations, decisions, where work stopped, "have we seen this error" — so a fresh session reaches for session history instead of answering from git log
 - Fix: Copy buttons on Settings → Connect confirm inline with a brief "Copied" instead of a notification that could stay on screen
 
