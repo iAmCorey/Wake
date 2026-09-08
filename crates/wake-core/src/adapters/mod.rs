@@ -440,3 +440,18 @@ pub(crate) fn units_from_messages(messages: &[TranscriptMessage]) -> Vec<IndexUn
         })
         .collect()
 }
+
+/// 手输路径的 `~` 前缀展开(仅前缀;边界落在分隔符上,Windows 用户手输
+/// `~\foo` 同样认)。HOME 与 adapter 同源(`home_dir` 的 WAKE_HOME 开关);
+/// UI 的 `format::expand_tilde` 与 wake-mcp 的 project 参数都走这里
+pub fn expand_tilde(p: &str) -> String {
+    match p.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with(std::path::is_separator) => {
+            match home_dir() {
+                Some(h) => format!("{}{rest}", h.to_string_lossy()),
+                None => p.to_string(),
+            }
+        }
+        _ => p.to_string(),
+    }
+}

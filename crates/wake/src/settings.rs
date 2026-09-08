@@ -2,6 +2,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_component::notification::Notification;
 use gpui_component::switch::Switch;
 use gpui_component::{
     h_flex, v_flex, ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _,
@@ -10,6 +11,7 @@ use gpui_component::{
 
 use wake_core::models::AgentId;
 
+use crate::format::tilde_path;
 use crate::ui::{
     overlay_layers, BUTTON_SM_H, FONT_BODY, FONT_CAPTION, FONT_DISPLAY, FONT_HEADING, FONT_LABEL,
     FONT_TITLE, RADIUS_BUTTON, SHOW_IN_FM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS,
@@ -21,6 +23,8 @@ use crate::{theme, theme::AppearancePreference};
 
 const SETTINGS_SIDEBAR_W: Pixels = px(180.);
 const SETTINGS_PAGE_TOP: Pixels = px(38.);
+/// Settings → Connect 页尾 Setup guide 的去处:仓库里的 MCP 完整文档
+const CONNECT_GUIDE_URL: &str = "https://github.com/iAmCorey/Wake/blob/main/docs/mcp.md";
 
 fn icon(path: &'static str) -> Icon {
     Icon::empty().path(path)
@@ -47,6 +51,7 @@ pub(crate) enum SettingsPage {
     General,
     Locations,
     Remotes,
+    Connect,
     Data,
     Updates,
     About,
@@ -89,11 +94,106 @@ fn settings_primary_button(button: Button, cx: &App) -> Button {
         .rounded(RADIUS_BUTTON)
 }
 
+/// Settings 各页顶部的标题 + 一句说明(版式只写一次:SPACE_XXL 边距、
+/// SETTINGS_PAGE_TOP 顶距、FONT_TITLE semibold + FONT_CAPTION muted)
+fn settings_page_header(title: &'static str, subtitle: &'static str, cx: &App) -> Div {
+    let theme = cx.theme();
+    v_flex()
+        .flex_shrink_0()
+        .px(SPACE_XXL)
+        .pt(SETTINGS_PAGE_TOP)
+        .pb(SPACE_XL)
+        .gap(px(5.))
+        .child(
+            div()
+                .text_size(FONT_TITLE)
+                .font_semibold()
+                .text_color(theme.foreground)
+                .child(title),
+        )
+        .child(
+            div()
+                .text_size(FONT_CAPTION)
+                .text_color(theme.muted_foreground)
+                .child(subtitle),
+        )
+}
+
+/// "一张卡一行"的信息卡(Data 的 Storage、Connect 的 MCP server 共用):popover
+/// 底圆角卡,84px 行,主信息 FONT_BODY,副行由调用方给(caption 级),右侧一个操作
+fn settings_info_card(
+    primary: &'static str,
+    details: Vec<AnyElement>,
+    trailing: AnyElement,
+    cx: &App,
+) -> Div {
+    let theme = cx.theme();
+    // overflow_hidden 让 taffy 把这张卡的 min-height 当 0,放进滚动列里会被
+    // 压扁到只剩一行;固定内容的卡必须 flex_shrink_0(CLAUDE.md 的 flex 陷阱)
+    v_flex()
+        .w_full()
+        .flex_shrink_0()
+        .overflow_hidden()
+        .rounded(theme.radius_lg)
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.popover)
+        .child(
+            h_flex()
+                .min_h(px(84.))
+                .px(SPACE_LG)
+                .gap(SPACE_LG)
+                .items_center()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(3.))
+                        .child(
+                            div()
+                                .text_size(FONT_BODY)
+                                .text_color(theme.foreground)
+                                .child(primary),
+                        )
+                        .children(details),
+                )
+                .child(trailing),
+        )
+}
+
+/// Connect 页展示的 wake-mcp 事实,开窗时算一次:current_exe/stat/片段拼装都
+/// 不该跑在每帧的 render 里(CLAUDE.md:render 里的路径探测必须缓存)
+struct ConnectInfo {
+    bin_path: String,
+    bin_display: SharedString,
+    bin_exists: bool,
+    snippets: Vec<wake_core::mcp::SetupSnippet>,
+}
+
+impl ConnectInfo {
+    fn probe() -> Self {
+        let bin = wake_core::mcp::sibling_binary();
+        let bin_exists = bin.as_ref().is_some_and(|p| p.is_file());
+        let bin_path = bin
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "wake-mcp".to_string());
+        Self {
+            bin_display: tilde_path(&bin_path).into(),
+            bin_exists,
+            snippets: wake_core::mcp::setup_snippets(std::path::Path::new(&bin_path)),
+            bin_path,
+        }
+    }
+}
+
 pub(crate) struct SettingsView {
     focus_handle: FocusHandle,
     workbench: Entity<Workbench>,
     appearance: AppearancePreference,
     show_unavailable: bool,
+    connect: ConnectInfo,
+    /// Connect 页里展开了代码片段的行(按 snippets 下标);Settings 重开即复位
+    connect_shown: std::collections::HashSet<usize>,
     _workbench_observer: Option<Subscription>,
 }
 
@@ -115,6 +215,8 @@ impl SettingsView {
             workbench,
             appearance: theme::appearance_preference(),
             show_unavailable: false,
+            connect: ConnectInfo::probe(),
+            connect_shown: Default::default(),
             _workbench_observer: None,
         }
     }
@@ -202,6 +304,13 @@ impl SettingsView {
                         "Remote hosts",
                         "icons/server.svg",
                         SettingsPage::Remotes,
+                        cx,
+                    ))
+                    .child(self.render_nav_item(
+                        "settings-connect-nav",
+                        "Connect",
+                        "icons/plug.svg",
+                        SettingsPage::Connect,
                         cx,
                     ))
                     .child(self.render_nav_item(
@@ -371,14 +480,10 @@ impl SettingsView {
     fn render_data(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let snapshot = self.workbench.read(cx).data_settings_snapshot();
-        let session_word = if snapshot.session_count == 1 {
-            "session"
-        } else {
-            "sessions"
-        };
         let summary: SharedString = format!(
-            "{} {session_word} · {}",
+            "{} session{} · {}",
             snapshot.session_count,
+            wake_core::text::plural(snapshot.session_count),
             format_storage_size(snapshot.size_bytes)
         )
         .into();
@@ -392,35 +497,31 @@ impl SettingsView {
         .on_click(move |_, _, _| {
             wake_core::services::terminal::open_in_file_manager(reveal_path.as_ref())
         });
+        let details = vec![
+            div()
+                .w_full()
+                .truncate()
+                .text_size(FONT_CAPTION)
+                .text_color(theme.muted_foreground)
+                .child(snapshot.display_path)
+                .into_any_element(),
+            div()
+                .text_size(FONT_CAPTION)
+                .text_color(theme.muted_foreground)
+                .child(summary)
+                .into_any_element(),
+        ];
 
         v_flex()
             .flex_1()
             .min_w_0()
             .h_full()
             .bg(theme.background)
-            .child(
-                v_flex()
-                    .flex_shrink_0()
-                    .px(SPACE_XXL)
-                    .pt(SETTINGS_PAGE_TOP)
-                    .pb(SPACE_XL)
-                    .gap(px(5.))
-                    .child(
-                        div()
-                            .text_size(FONT_TITLE)
-                            .font_semibold()
-                            .text_color(theme.foreground)
-                            .child("Data"),
-                    )
-                    .child(
-                        div()
-                            .text_size(FONT_CAPTION)
-                            .text_color(theme.muted_foreground)
-                            .child(
-                                "See where Wake stores local data. Sessions refresh automatically.",
-                            ),
-                    ),
-            )
+            .child(settings_page_header(
+                "Data",
+                "See where Wake stores local data. Sessions refresh automatically.",
+                cx,
+            ))
             .child(
                 v_flex()
                     .px(SPACE_XXL)
@@ -432,48 +533,241 @@ impl SettingsView {
                             .text_color(theme.foreground)
                             .child("Storage"),
                     )
+                    .child(settings_info_card(
+                        "Wake data",
+                        details,
+                        show_in_finder.into_any_element(),
+                        cx,
+                    )),
+            )
+            .into_any_element()
+    }
+
+    /// Settings → Connect 的复制按钮:写剪贴板 + 一条成功通知
+    fn copy_button(
+        &self,
+        id: SharedString,
+        label: &'static str,
+        text: String,
+        cx: &Context<Self>,
+    ) -> Button {
+        settings_button(
+            Button::new(id)
+                .icon(icon("icons/copy.svg").with_size(px(13.)))
+                .label(label),
+            cx,
+        )
+        .on_click(move |_, window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            window.push_notification(Notification::success("Copied to clipboard"), cx);
+        })
+    }
+
+    /// Settings → Connect:把 Wake 的索引以 MCP 只读暴露给 coding agent。页面只放
+    /// **状态与动作**:server 卡(路径 + Copy path)、Agents 卡(每家一行一个
+    /// Copy 钮)、一句 caption 加 Setup guide 链接。代码块与工具表都不放——那是
+    /// README 的内容,塞进设置窗怎么排都像教程(用户 2026-09-08 三轮定稿)。
+    /// 只展示与复制,不代写别家配置;片段与 `wake-mcp setup` 同源(wake-core mcp)
+    fn render_connect(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let dark = theme.mode.is_dark();
+        let info = &self.connect;
+        let mono = theme.mono_font_family.clone();
+        let count = info.snippets.len();
+
+        let agent_rows: Vec<AnyElement> = info
+            .snippets
+            .iter()
+            .enumerate()
+            .map(|(ix, s)| {
+                let shown = self.connect_shown.contains(&ix);
+                let copy = self.copy_button(
+                    format!("connect-copy-{ix}").into(),
+                    s.copy_label,
+                    s.text.clone(),
+                    cx,
+                );
+                // 低强调的展开切换:片段默认收起,想核对再看
+                let toggle = Button::new(SharedString::from(format!("connect-show-{ix}")))
+                    .custom(
+                        ButtonCustomVariant::new(cx)
+                            .color(theme.transparent)
+                            .foreground(theme.muted_foreground)
+                            .hover(theme.secondary_hover)
+                            .active(theme.popover),
+                    )
+                    .small()
+                    .rounded(RADIUS_BUTTON)
+                    .icon(
+                        icon(if shown {
+                            "icons/chevron-down.svg"
+                        } else {
+                            "icons/chevron-right.svg"
+                        })
+                        .with_size(px(13.)),
+                    )
+                    .label(if shown { "Hide" } else { "Show" })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.connect_shown.remove(&ix) {
+                            this.connect_shown.insert(ix);
+                        }
+                        cx.notify();
+                    }));
+                let lines: Vec<AnyElement> = s
+                    .text
+                    .lines()
+                    .map(|l| div().child(l.to_string()).into_any_element())
+                    .collect();
+                v_flex()
+                    .w_full()
+                    .when(ix + 1 < count, |this| {
+                        this.border_b_1().border_color(theme.border)
+                    })
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .min_h(px(52.))
+                            .px(SPACE_LG)
+                            .py(SPACE_SM)
+                            .gap(SPACE_MD)
+                            .items_center()
+                            .child(img(s.agent.brand_icon(dark)).size(px(17.)).flex_shrink_0())
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .text_size(FONT_BODY)
+                                            .text_color(theme.foreground)
+                                            .child(s.client),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(FONT_CAPTION)
+                                            .text_color(theme.muted_foreground)
+                                            .child(s.hint),
+                                    ),
+                            )
+                            .child(toggle)
+                            .child(copy),
+                    )
+                    .when(shown, |this| {
+                        this.child(
+                            // 左缘对齐到文字轴:行内边距 + 图标 17 + 间距 12
+                            v_flex()
+                                .ml(SPACE_LG + px(17.) + SPACE_MD)
+                                .mr(SPACE_LG)
+                                .mb(SPACE_MD)
+                                .px(SPACE_MD)
+                                .py(SPACE_SM)
+                                .rounded(theme.radius)
+                                .bg(theme.secondary)
+                                .font_family(mono.clone())
+                                .text_size(FONT_CAPTION)
+                                .text_color(theme.foreground)
+                                .children(lines),
+                        )
+                    })
+                    .into_any_element()
+            })
+            .collect();
+
+        let copy_path = self.copy_button(
+            "connect-copy-path".into(),
+            "Copy path",
+            info.bin_path.clone(),
+            cx,
+        );
+        let mut details = vec![div()
+            .w_full()
+            .truncate()
+            .text_size(FONT_CAPTION)
+            .font_family(mono.clone())
+            .text_color(theme.muted_foreground)
+            .child(info.bin_display.clone())
+            .into_any_element()];
+        if !info.bin_exists {
+            details.push(
+                div()
+                    .text_size(FONT_CAPTION)
+                    .text_color(theme.danger)
+                    .child("Not found next to the Wake app — reinstall Wake, or build it with `cargo build -p wake-core --bin wake-mcp`")
+                    .into_any_element(),
+            );
+        }
+
+        let section = |label: &'static str| {
+            div()
+                .flex_shrink_0()
+                .text_size(FONT_CAPTION)
+                .font_semibold()
+                .text_color(theme.foreground)
+                .child(label)
+        };
+        let guide = div()
+            .id("connect-setup-guide")
+            .cursor_pointer()
+            .flex_shrink_0()
+            .text_size(FONT_CAPTION)
+            .text_color(theme.primary)
+            .on_click(|_, _, cx| cx.open_url(CONNECT_GUIDE_URL))
+            .child("Setup guide");
+
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .bg(theme.background)
+            .child(settings_page_header(
+                "Connect",
+                "Let your coding agents look up your past sessions from Wake.",
+                cx,
+            ))
+            .child(
+                v_flex()
+                    .id("settings-connect-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(SPACE_XXL)
+                    .pb(SPACE_XXL)
+                    .gap(SPACE_SM)
+                    .child(section("MCP server"))
+                    .child(settings_info_card(
+                        "wake-mcp",
+                        details,
+                        copy_path.into_any_element(),
+                        cx,
+                    ))
+                    .child(section("Agents").pt(SPACE_LG))
                     .child(
                         v_flex()
                             .w_full()
+                            .flex_shrink_0()
                             .overflow_hidden()
                             .rounded(theme.radius_lg)
                             .border_1()
                             .border_color(theme.border)
                             .bg(theme.popover)
+                            .children(agent_rows),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_shrink_0()
+                            .pt(SPACE_SM)
+                            .gap(SPACE_SM)
+                            .items_center()
                             .child(
-                                h_flex()
-                                    .min_h(px(84.))
-                                    .px(SPACE_LG)
-                                    .gap(SPACE_LG)
-                                    .items_center()
-                                    .child(
-                                        v_flex()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .gap(px(3.))
-                                            .child(
-                                                div()
-                                                    .text_size(FONT_BODY)
-                                                    .text_color(theme.foreground)
-                                                    .child("Wake data"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .w_full()
-                                                    .truncate()
-                                                    .text_size(FONT_CAPTION)
-                                                    .text_color(theme.muted_foreground)
-                                                    .child(snapshot.display_path),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(FONT_CAPTION)
-                                                    .text_color(theme.muted_foreground)
-                                                    .child(summary),
-                                            ),
-                                    )
-                                    .child(show_in_finder),
-                            ),
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(FONT_CAPTION)
+                                    .text_color(theme.muted_foreground)
+                                    .child("Agents get four read-only tools: search, recent sessions, transcripts, projects."),
+                            )
+                            .child(guide),
                     ),
             )
             .into_any_element()
@@ -1196,6 +1490,9 @@ impl SettingsView {
                         this.child(
                             v_flex()
                                 .w_full()
+                                // 同 Connect 页:overflow_hidden 的卡在滚动列里 min-height
+                                // 视为 0,host 一多会被压扁裁切而不是滚动
+                                .flex_shrink_0()
                                 .overflow_hidden()
                                 .rounded(theme.radius_lg)
                                 .border_1()
@@ -1233,6 +1530,7 @@ impl Render for SettingsView {
             SettingsPage::General => self.render_general(cx),
             SettingsPage::Locations => self.render_locations(cx).into_any_element(),
             SettingsPage::Remotes => self.render_remotes(cx),
+            SettingsPage::Connect => self.render_connect(cx),
             SettingsPage::Data => self.render_data(cx),
             SettingsPage::Updates => self.render_updates(cx),
             SettingsPage::About => self.render_about(cx),

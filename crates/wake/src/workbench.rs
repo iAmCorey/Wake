@@ -271,7 +271,9 @@ fn build_row_groups_at(
 
 fn same_session_query(left: &SessionFilter, right: &SessionFilter) -> bool {
     left.agents == right.agents
-        && left.project_path == right.project_path
+        && left.project_paths == right.project_paths
+        && left.updated_since == right.updated_since
+        && left.ignore_pins == right.ignore_pins
         && left.favorite_only == right.favorite_only
         && left.include_archived == right.include_archived
         && left.roots_only == right.roots_only
@@ -282,10 +284,10 @@ fn same_session_query(left: &SessionFilter, right: &SessionFilter) -> bool {
 
 fn session_matches_filter(session: &SessionMeta, filter: &SessionFilter) -> bool {
     (filter.agents.is_empty() || filter.agents.contains(&session.agent))
+        && (filter.project_paths.is_empty() || filter.project_paths.contains(&session.project_path))
         && filter
-            .project_path
-            .as_ref()
-            .is_none_or(|project| project == &session.project_path)
+            .updated_since
+            .is_none_or(|since| session.updated_at >= since)
         && (!filter.favorite_only || session.favorite)
         && (filter.include_archived || !session.archived)
         && filter
@@ -2372,7 +2374,6 @@ impl Workbench {
     fn current_filter(&self) -> SessionFilter {
         SessionFilter {
             agents: self.selected_agent.into_iter().collect(),
-            project_path: self.selected_project.clone(),
             favorite_only: self.favorite_only,
             include_archived: false,
             roots_only: !self.favorite_only,
@@ -2381,6 +2382,9 @@ impl Workbench {
             ascending: self.sort_ascending,
             limit: SESSION_PAGE_SIZE,
             offset: 0,
+            updated_since: None,
+            project_paths: self.selected_project.clone().into_iter().collect(),
+            ignore_pins: false,
         }
     }
 
@@ -2434,7 +2438,7 @@ impl Workbench {
         // (HashMap 迭代无序),每次刷新侧栏顺序都会跳
         counts.sort_by_key(|&(a, _)| a);
         self.agent_counts = counts;
-        self.projects = self.store.list_projects().unwrap_or_default();
+        self.projects = self.store.list_projects(false).unwrap_or_default();
         self.starred_count = self.store.starred_count().unwrap_or(0);
         // Insights 打开着就顺带重算:扫描增量/收藏变更等一切走 refresh 的
         // 路径都会让页面数据跟上,不设第二条失效通道
@@ -2602,8 +2606,13 @@ impl Workbench {
             display_path: tilde_path(&raw).into(),
             raw_path: raw.into(),
             size_bytes,
-            session_count: self.agent_counts.iter().map(|(_, count)| count).sum(),
+            session_count: self.session_total(),
         }
+    }
+
+    /// 库内会话总数(各 agent 计数之和;侧栏 All Sessions、Data / Connect 页共用)
+    pub(crate) fn session_total(&self) -> i64 {
+        self.agent_counts.iter().map(|(_, n)| n).sum()
     }
 
     pub(crate) fn settings_page(&self) -> SettingsPage {
@@ -4828,7 +4837,7 @@ impl Workbench {
                         "all",
                         RowLead::Icon(icon("icons/layers.svg")),
                         "All Sessions",
-                        Some(self.agent_counts.iter().map(|(_, n)| n).sum()),
+                        Some(self.session_total()),
                         all_active,
                         RowLevel::Primary,
                         cx.listener(|this, _, window, cx| {
@@ -5006,7 +5015,7 @@ impl Workbench {
     fn render_session_list(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let shown = self.list_state.read(cx).delegate().rows.len();
-        let library_empty = self.agent_counts.iter().map(|(_, n)| *n).sum::<i64>() == 0;
+        let library_empty = self.session_total() == 0;
         let listed_count = self.total_sessions.max(0);
         let shown_label: SharedString = format!(
             "{} {}",

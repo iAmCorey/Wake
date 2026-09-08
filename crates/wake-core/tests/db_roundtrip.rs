@@ -144,7 +144,6 @@ fn list_sessions_filters_and_counts() {
 
     let all = SessionFilter {
         agents: vec![],
-        project_path: None,
         favorite_only: false,
         include_archived: false,
         roots_only: false,
@@ -153,6 +152,9 @@ fn list_sessions_filters_and_counts() {
         ascending: false,
         limit: 10,
         offset: 0,
+        updated_since: None,
+        project_paths: Vec::new(),
+        ignore_pins: false,
     };
     let (sessions, total) = store.list_sessions(&all).unwrap();
     assert_eq!(total, 2);
@@ -261,7 +263,7 @@ fn nested_sessions_are_aggregated_but_starred_stays_flat() {
     assert_eq!(store.agent_counts().unwrap()["grok"], 2);
     assert_eq!(
         store
-            .list_projects()
+            .list_projects(false)
             .unwrap()
             .iter()
             .find(|project| project.path == parent.project_path)
@@ -283,6 +285,102 @@ fn nested_sessions_are_aggregated_but_starred_stays_flat() {
         rows[0].key, child.key,
         "Starred must keep child sessions flat"
     );
+}
+
+#[test]
+fn since_on_root_lists_uses_aggregated_child_activity() {
+    let (_dir, store) = temp_store();
+    let mut parent = meta("grok:since-parent", "parent");
+    parent.agent = AgentId::Grok;
+    parent.file_path = "/tmp/grok/s/parent/updates.jsonl".into();
+    parent.updated_at = 100;
+    let mut child = meta("grok:since-child", "child");
+    child.agent = AgentId::Grok;
+    child.file_path = "/tmp/grok/s/child/updates.jsonl".into();
+    child.updated_at = 500;
+    store
+        .write_meta_only(&[
+            (parent.clone(), parent.updated_at),
+            (child.clone(), child.updated_at),
+        ])
+        .unwrap();
+    store
+        .replace_parent_links(AgentId::Grok, &[(child.key.clone(), parent.key.clone())])
+        .unwrap();
+
+    // 父旧子新:根列表按聚合活动时间过滤,父会话必须还在(否则父子都消失)
+    let roots = SessionFilter {
+        roots_only: true,
+        updated_since: Some(300),
+        limit: 20,
+        ..Default::default()
+    };
+    let (rows, total) = store.list_sessions(&roots).unwrap();
+    assert_eq!(total, 1);
+    assert_eq!(rows[0].key, parent.key);
+    assert_eq!(rows[0].updated_at, 500, "返回的时间同样是聚合值");
+    // 平铺列表仍按自身时间过滤
+    let flat = SessionFilter {
+        updated_since: Some(300),
+        limit: 20,
+        ..Default::default()
+    };
+    let (rows, _) = store.list_sessions(&flat).unwrap();
+    assert_eq!(
+        rows.iter().map(|s| s.key.as_str()).collect::<Vec<_>>(),
+        [child.key.as_str()]
+    );
+}
+
+#[test]
+fn ignore_pins_gives_true_recency_order() {
+    let (_dir, store) = temp_store();
+    let mut old = meta("claude-code:old-pinned", "old");
+    old.updated_at = 100;
+    let mut new = meta("claude-code:newest", "new");
+    new.updated_at = 900;
+    store
+        .write_meta_only(&[(old.clone(), 100), (new.clone(), 900)])
+        .unwrap();
+    store.set_user_data(&old.key, None, Some(true)).unwrap();
+
+    let gui = SessionFilter {
+        limit: 1,
+        ..Default::default()
+    };
+    let (rows, _) = store.list_sessions(&gui).unwrap();
+    assert_eq!(rows[0].key, old.key, "GUI 列表置顶优先");
+    let mcp = SessionFilter {
+        limit: 1,
+        ignore_pins: true,
+        ..Default::default()
+    };
+    let (rows, _) = store.list_sessions(&mcp).unwrap();
+    assert_eq!(rows[0].key, new.key, "ignore_pins 后 limit 内是真最近");
+}
+
+#[test]
+fn archived_only_projects_are_listed_only_when_asked() {
+    let (_dir, store) = temp_store();
+    let mut archived = meta("codex:archived-only", "old work");
+    archived.agent = AgentId::Codex;
+    archived.archived = true;
+    archived.project_path = "/work/retired".into();
+    archived.project_name = "retired".into();
+    archived.file_path = "/tmp/codex/archived_sessions/r.jsonl".into();
+    store
+        .write_meta_only(&[(archived.clone(), archived.updated_at)])
+        .unwrap();
+    let paths = |include: bool| {
+        store
+            .list_projects(include)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.path)
+            .collect::<Vec<_>>()
+    };
+    assert!(paths(false).is_empty(), "GUI 项目列表不含归档");
+    assert_eq!(paths(true), ["/work/retired".to_string()]);
 }
 
 #[test]
@@ -755,7 +853,9 @@ fn insights_snapshot_and_streaks() {
     store
         .write_session(&bad, bad.updated_at, &[at(0, Role::User, Some(ts(12, 8)))])
         .unwrap();
-    let d2 = store.insights(today).expect("bad created_at must not abort insights");
+    let d2 = store
+        .insights(today)
+        .expect("bad created_at must not abort insights");
     assert_eq!(d2.sessions, d.sessions + 1);
     assert_eq!(d2.daily_sessions, vec![(created_day, 2)]);
 

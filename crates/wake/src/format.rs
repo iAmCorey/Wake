@@ -114,8 +114,7 @@ pub fn fmt_tokens(n: Option<i64>) -> String {
     }
 }
 
-/// 进程内不变的 HOME,缓存住:数据源路径折叠与手输展开(expand_tilde)
-/// 共用同一份。
+/// 进程内不变的 HOME,缓存住:数据源路径折叠(tilde_path)每帧都要用。
 fn cached_home() -> Option<&'static str> {
     static HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     HOME.get_or_init(|| {
@@ -148,18 +147,10 @@ pub fn tilde_path(p: &str) -> String {
     }
 }
 
-/// 手输路径的 `~` 前缀展开(tilde_path 的逆;仅前缀,边界同样落在分隔符上
-/// ——Windows 用户手输 `~\foo` 同样认)
+/// 手输路径的 `~` 前缀展开(tilde_path 的逆)。实现在 wake-core,与 adapter
+/// 的 HOME 同源;这里只是转发,UI 调用点不必知道 wake_core::adapters
 pub fn expand_tilde(p: &str) -> String {
-    match p.strip_prefix('~') {
-        Some(rest) if rest.is_empty() || rest.starts_with(std::path::is_separator) => {
-            match cached_home() {
-                Some(h) => format!("{h}{rest}"),
-                None => p.to_string(),
-            }
-        }
-        _ => p.to_string(),
-    }
+    wake_core::adapters::expand_tilde(p)
 }
 
 /// 图片字节数的人读格式；详情预览只需要 KB/MB 两档。
@@ -174,17 +165,9 @@ pub fn human_bytes(bytes: usize) -> String {
     }
 }
 
-/// 首行截断预览
+/// 首行截断预览(实现在 wake-core text 模块,wake-mcp 的会话行同一条规则)
 pub fn one_line(s: &str, max_chars: usize) -> String {
-    let joined = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let chars: Vec<char> = joined.chars().collect();
-    if chars.len() > max_chars {
-        let mut t: String = chars[..max_chars].iter().collect();
-        t.push('…');
-        t
-    } else {
-        joined
-    }
+    wake_core::text::one_line(s, max_chars)
 }
 
 #[cfg(test)]

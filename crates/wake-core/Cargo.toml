@@ -45,3 +45,8 @@ tempfile = "3"
 [[bin]]
 name = "scan"
 path = "src/bin/scan.rs"
+
+# 只读 MCP server(stdio),随 Wake 一起打包、与主程序并排;见 src/mcp/
+[[bin]]
+name = "wake-mcp"
+path = "src/bin/wake_mcp.rs"

@@ -162,7 +162,7 @@ fn open_conn(path: &Path) -> Result<Connection> {
     )?;
     // host 迁移(2026-09-01 远程会话加列;空串 = 本地)。老库首扫时既有行
     // 全部落 '',与远程装饰器生产的非空 host 天然分域,无需回填
-    if !table_has_column(&conn, "sessions", "host")? {
+    if !table_has_column(&conn, NEWEST_COLUMN.0, NEWEST_COLUMN.1)? {
         conn.execute(
             "ALTER TABLE sessions ADD COLUMN host TEXT NOT NULL DEFAULT ''",
             [],
@@ -174,6 +174,21 @@ fn open_conn(path: &Path) -> Result<Connection> {
         "CREATE INDEX IF NOT EXISTS idx_sessions_host ON sessions(host) WHERE host != ''",
         [],
     )?;
+    Ok(conn)
+}
+
+/// 最近一次迁移加的列——`open_read_only` 用它判断库够不够新。**加新迁移时把
+/// 这里改成新列**,否则只读入口会放行老库、深处查询才报 no such column
+const NEWEST_COLUMN: (&str, &str) = ("sessions", "host");
+
+/// 只读连接:不建表、不迁移、不改 journal_mode(旁路进程用;`open_read_only`
+/// 与只读 Store 的 insights 临时连接共用,别的入口不要直开)
+fn open_conn_ro(path: &Path) -> Result<Connection> {
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(std::time::Duration::from_millis(3000))?;
     Ok(conn)
 }
 
@@ -222,6 +237,9 @@ pub struct Store {
     /// insights() 开临时连接用:统计要连扫 messages 几十毫秒,共用唯一
     /// 读连接会让 UI 线程的列表查询排队等它(2026-08-27 Codex review)
     path: std::path::PathBuf,
+    /// `open_read_only` 建的实例:所有连接(含 insights 的临时连接)都只读,
+    /// 写方法在运行期报 SQLITE_READONLY
+    read_only: bool,
 }
 
 impl Store {
@@ -230,7 +248,45 @@ impl Store {
             write: Mutex::new(open_conn(path)?),
             read: Mutex::new(open_conn(path)?),
             path: path.to_path_buf(),
+            read_only: false,
         })
+    }
+
+    /// 只读打开既有索引库(wake-mcp 这类旁路读者用):不建表、不迁移、不改
+    /// journal_mode;库不存在或 schema 太老直接报错——重建权只归 GUI 的
+    /// `open_or_rebuild`,旁路进程绝不能把正在被 GUI 写的库挪走重建。
+    /// WAL 下读者不阻塞 GUI 写入;只读连接要能建 -shm,同用户下目录可写即可
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        if !path.is_file() {
+            anyhow::bail!(
+                "no Wake index at {} — launch Wake once to build it",
+                path.display()
+            );
+        }
+        let read = open_conn_ro(path)?;
+        if !table_has_column(&read, NEWEST_COLUMN.0, NEWEST_COLUMN.1)? {
+            anyhow::bail!(
+                "Wake index at {} is empty or from an older version — launch Wake once to upgrade it",
+                path.display()
+            );
+        }
+        Ok(Self {
+            // Store 的形状要求有 write 连接;这里给的同样是只读句柄
+            write: Mutex::new(open_conn_ro(path)?),
+            read: Mutex::new(read),
+            path: path.to_path_buf(),
+            read_only: true,
+        })
+    }
+
+    /// 索引覆盖到的最新会话活动时间(epoch ms;空库 None)。wake-mcp 把它随
+    /// 每次工具返回带给 agent,让对方知道索引有多新——GUI 没跑时 watcher 不在,
+    /// 搜索/列表只反映到这个时刻(读会话是现场解析,不受影响)
+    pub fn latest_activity(&self) -> Result<Option<i64>> {
+        let conn = self.read.lock().unwrap();
+        let latest: Option<i64> =
+            conn.query_row("SELECT MAX(updated_at) FROM sessions", [], |r| r.get(0))?;
+        Ok(latest.filter(|t| *t > 0))
     }
 
     // ---------- 写路径(扫描器/用户操作) ----------
@@ -892,29 +948,14 @@ impl Store {
         let mut wheres: Vec<String> = Vec::new();
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
-        if !f.agents.is_empty() {
-            let ph = f.agents.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            wheres.push(format!("s.agent_id IN ({ph})"));
-            for a in &f.agents {
-                args.push(Box::new(a.as_str().to_string()));
-            }
-        }
-        if let Some(p) = &f.project_path {
-            wheres.push("s.project_path = ?".into());
-            args.push(Box::new(p.clone()));
-        }
-        if f.favorite_only {
-            wheres.push("COALESCE(u.favorite, 0) = 1".into());
-        }
-        if !f.include_archived {
-            wheres.push("s.archived = 0".into());
-        }
-        if let Some(q) = f.title_query.as_deref().filter(|q| !q.trim().is_empty()) {
-            wheres.push("(s.title LIKE ? ESCAPE '\\' OR s.project_name LIKE ? ESCAPE '\\')".into());
-            let like = format!("%{}%", escape_like(q.trim()));
-            args.push(Box::new(like.clone()));
-            args.push(Box::new(like));
-        }
+        // 根会话的"活动时间"是连子会话一起聚合的(排序、返回值都如此),since
+        // 过滤必须用同一口径——只看父行会把"父旧子新"的整棵树滤掉
+        let updated_col = match (f.roots_only, f.include_archived) {
+            (true, false) => ROOT_UPDATED_ACTIVE,
+            (true, true) => ROOT_UPDATED_ALL,
+            _ => "s.updated_at",
+        };
+        push_session_filters(f, updated_col, &mut wheres, &mut args);
         if f.roots_only {
             wheres.push(if f.include_archived {
                 ROOT_IGNORING_ARCHIVED.into()
@@ -937,6 +978,7 @@ impl Store {
             (_, SortKey::Messages, _) => "s.message_count",
         };
         let order_dir = if f.ascending { "ASC" } else { "DESC" };
+        let pin_order = pin_order(f);
 
         let conn = self.read.lock().unwrap();
         let total: i64 = conn.query_row(
@@ -959,7 +1001,7 @@ impl Store {
         let sql = format!(
             "SELECT {selected_cols} FROM sessions s LEFT JOIN user_data u ON u.session_key = s.key
              {where_sql}
-             ORDER BY COALESCE(u.pinned,0) DESC, {order_col} {order_dir}, s.key ASC LIMIT ? OFFSET ?"
+             ORDER BY {pin_order}{order_col} {order_dir}, s.key ASC LIMIT ? OFFSET ?"
         );
         let mut stmt = conn.prepare_cached(&sql)?;
         let limit = if f.limit > 0 { f.limit } else { 500 };
@@ -1009,12 +1051,13 @@ impl Store {
             SortKey::Messages => "s.message_count",
         };
         let order_dir = if f.ascending { "ASC" } else { "DESC" };
+        let pin_order = pin_order(f);
         let conn = self.read.lock().unwrap();
         let sql = format!(
             "SELECT {SESSION_COLS}
              FROM sessions s LEFT JOIN user_data u ON u.session_key = s.key
              {where_sql}
-             ORDER BY COALESCE(u.pinned,0) DESC, {order_col} {order_dir}, s.key ASC"
+             ORDER BY {pin_order}{order_col} {order_dir}, s.key ASC"
         );
         let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(
@@ -1066,20 +1109,39 @@ impl Store {
         Ok(conn.query_row(&sql, params![key], row_to_meta).optional()?)
     }
 
-    pub fn list_projects(&self) -> Result<Vec<ProjectInfo>> {
+    /// 按原生 id 反查(wake-mcp 的 key 兜底:对方常只拿到 resume 用的那个 id)。
+    /// 同 UUID 在多台 host 各续跑过会多于一行,由调用方裁决
+    pub fn find_by_native_id(&self, native_id: &str) -> Result<Vec<SessionMeta>> {
         let conn = self.read.lock().unwrap();
-        let mut stmt = conn.prepare_cached(
-            "SELECT s.project_path, s.project_name, COUNT(*),
-                    MAX(MAX(s.updated_at, COALESCE((
-                      SELECT MAX(c.updated_at) FROM sessions c
-                      WHERE c.parent_key = s.key AND c.archived = 0
-                    ), 0))) AS activity
+        let sql = format!(
+            "SELECT {SESSION_COLS} FROM sessions s LEFT JOIN user_data u ON u.session_key = s.key
+             WHERE s.native_id = ?1 ORDER BY s.key"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params![native_id], row_to_meta)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// 项目清单(根会话按 project_path 聚合)。GUI 侧栏与 wake_list_projects 传
+    /// false 只算未归档;wake-mcp 解析 `project` 参数时传 true——搜索本身覆盖
+    /// 归档会话,只剩归档会话的项目不能在解析这一步就被挡掉
+    pub fn list_projects(&self, include_archived: bool) -> Result<Vec<ProjectInfo>> {
+        let (root_updated, root_cond, archived) = if include_archived {
+            (ROOT_UPDATED_ALL, ROOT_IGNORING_ARCHIVED, "")
+        } else {
+            (
+                ROOT_UPDATED_ACTIVE,
+                ROOT_WHEN_HIDING_ARCHIVED,
+                "s.archived = 0 AND ",
+            )
+        };
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT s.project_path, s.project_name, COUNT(*), MAX({root_updated}) AS activity
              FROM sessions s
-             WHERE s.archived = 0 AND (s.parent_key = '' OR NOT EXISTS (
-               SELECT 1 FROM sessions p WHERE p.key = s.parent_key AND p.archived = 0
-             ))
-             GROUP BY s.project_path ORDER BY activity DESC",
-        )?;
+             WHERE {archived}{root_cond}
+             GROUP BY s.project_path ORDER BY activity DESC"
+        ))?;
         let rows = stmt.query_map([], |r| {
             Ok(ProjectInfo {
                 path: r.get(0)?,
@@ -1169,7 +1231,11 @@ impl Store {
 
         // 临时连接,不与 UI 的 read 连接抢锁:WAL 多读并发,几十毫秒的
         // 统计扫描不该让导航点击的列表查询排队(2026-08-27 Codex review)
-        let conn = open_conn(&self.path)?;
+        let conn = if self.read_only {
+            open_conn_ro(&self.path)?
+        } else {
+            open_conn(&self.path)?
+        };
         let mut data = InsightsData {
             as_of: today,
             ..Default::default()
@@ -1356,24 +1422,52 @@ impl Store {
         project_path: Option<&str>,
         limit: i64,
     ) -> Result<(Vec<SearchHit>, bool)> {
+        self.search_with(
+            q,
+            &SearchFilter {
+                agents: agents.to_vec(),
+                project_paths: project_path
+                    .map(|p| vec![p.to_string()])
+                    .unwrap_or_default(),
+                updated_since: None,
+                limit,
+            },
+        )
+    }
+
+    /// 全文搜索的完整筛选形态(多项目并集 + 时间下界);`search` 是它的便捷壳。
+    /// 命中按 bm25 排序、消息级一行一条;archived 会话不排除(meta.archived 标出)
+    pub fn search_with(&self, q: &str, f: &SearchFilter) -> Result<(Vec<SearchHit>, bool)> {
         let segs: Vec<&str> = q.split_whitespace().filter(|s| !s.is_empty()).collect();
         if segs.is_empty() {
             return Ok((Vec::new(), false));
         }
         let degraded = segs.iter().any(|s| s.chars().count() < 3);
+        let limit = if f.limit > 0 { f.limit } else { 60 };
 
         let mut filter_sql = String::new();
         let mut filter_args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        if !agents.is_empty() {
-            let ph = agents.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            filter_sql.push_str(&format!(" AND s.agent_id IN ({ph})"));
-            for a in agents {
+        if !f.agents.is_empty() {
+            filter_sql.push_str(&format!(
+                " AND s.agent_id IN ({})",
+                placeholders(f.agents.len())
+            ));
+            for a in &f.agents {
                 filter_args.push(Box::new(a.as_str().to_string()));
             }
         }
-        if let Some(p) = project_path {
-            filter_sql.push_str(" AND s.project_path = ?");
-            filter_args.push(Box::new(p.to_string()));
+        if !f.project_paths.is_empty() {
+            filter_sql.push_str(&format!(
+                " AND s.project_path IN ({})",
+                placeholders(f.project_paths.len())
+            ));
+            for p in &f.project_paths {
+                filter_args.push(Box::new(p.clone()));
+            }
+        }
+        if let Some(t) = f.updated_since {
+            filter_sql.push_str(" AND s.updated_at >= ?");
+            filter_args.push(Box::new(t));
         }
 
         let conn = self.read.lock().unwrap();
@@ -1463,13 +1557,23 @@ impl Store {
             }
         }
 
-        // 补齐 session meta
+        // 补齐 session meta:按会话只查一次(一个会话常占几十行命中),语句走
+        // prepare_cached——Connection::query_row 每次都是裸 prepare
         let mut hits = Vec::new();
+        let mut metas: HashMap<String, Option<SessionMeta>> = HashMap::new();
         let sql = format!(
             "SELECT {SESSION_COLS} FROM sessions s LEFT JOIN user_data u ON u.session_key = s.key WHERE s.key = ?1"
         );
+        let mut stmt = conn.prepare_cached(&sql)?;
         for (key, seq, sidechain_id, role, ts, snippet) in raw {
-            if let Some(session) = conn.query_row(&sql, params![key], row_to_meta).optional()? {
+            let session = if let Some(cached) = metas.get(&key) {
+                cached.clone()
+            } else {
+                let meta = stmt.query_row(params![key], row_to_meta).optional()?;
+                metas.insert(key.clone(), meta.clone());
+                meta
+            };
+            if let Some(session) = session {
                 hits.push(SearchHit {
                     session,
                     seq,
@@ -1538,40 +1642,71 @@ fn child_filter_sql(
         }
         None => wheres.push("s.parent_key != ''".to_string()),
     }
-    if !filter.agents.is_empty() {
-        let placeholders = filter
-            .agents
-            .iter()
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(",");
-        wheres.push(format!("s.agent_id IN ({placeholders})"));
-        for agent in &filter.agents {
-            args.push(Box::new(agent.as_str().to_string()));
+    push_session_filters(filter, "s.updated_at", &mut wheres, &mut args);
+    (format!("WHERE {}", wheres.join(" AND ")), args)
+}
+
+/// ORDER BY 里置顶优先的那一段;`ignore_pins` 时为空,纯按排序键
+fn pin_order(f: &SessionFilter) -> &'static str {
+    if f.ignore_pins {
+        ""
+    } else {
+        "COALESCE(u.pinned,0) DESC, "
+    }
+}
+
+/// `?,?,?` 占位串
+fn placeholders(n: usize) -> String {
+    vec!["?"; n].join(",")
+}
+
+/// SessionFilter 里作用于会话行本身的谓词(agents / 项目并集 / 时间下界 /
+/// 收藏 / 归档 / 标题词)。list_sessions 与 child_filter_sql 共用这一份,
+/// roots_only 与 parent 谓词由各自追加——新增筛选字段只改这里(再教会
+/// workbench 的两面镜子,见 models.rs SessionFilter 注释)。
+/// `updated_col` 是时间下界作用的表达式:根会话列表传聚合后的活动时间
+fn push_session_filters(
+    f: &SessionFilter,
+    updated_col: &str,
+    wheres: &mut Vec<String>,
+    args: &mut Vec<Box<dyn rusqlite::ToSql>>,
+) {
+    if !f.agents.is_empty() {
+        wheres.push(format!("s.agent_id IN ({})", placeholders(f.agents.len())));
+        for a in &f.agents {
+            args.push(Box::new(a.as_str().to_string()));
         }
     }
-    if let Some(project) = &filter.project_path {
-        wheres.push("s.project_path = ?".to_string());
-        args.push(Box::new(project.clone()));
+    if !f.project_paths.is_empty() {
+        wheres.push(format!(
+            "s.project_path IN ({})",
+            placeholders(f.project_paths.len())
+        ));
+        for p in &f.project_paths {
+            args.push(Box::new(p.clone()));
+        }
     }
-    if filter.favorite_only {
-        wheres.push("COALESCE(u.favorite, 0) = 1".to_string());
+    if let Some(t) = f.updated_since {
+        wheres.push(format!("{updated_col} >= ?"));
+        args.push(Box::new(t));
     }
-    if !filter.include_archived {
-        wheres.push("s.archived = 0".to_string());
+    if f.favorite_only {
+        wheres.push("COALESCE(u.favorite, 0) = 1".into());
     }
-    if let Some(query) = filter
+    if !f.include_archived {
+        wheres.push("s.archived = 0".into());
+    }
+    if let Some(q) = f
         .title_query
         .as_deref()
         .map(str::trim)
-        .filter(|query| !query.is_empty())
+        .filter(|q| !q.is_empty())
     {
         wheres.push("(s.title LIKE ? ESCAPE '\\' OR s.project_name LIKE ? ESCAPE '\\')".into());
-        let like = format!("%{}%", escape_like(query));
+        let like = format!("%{}%", escape_like(q));
         args.push(Box::new(like.clone()));
         args.push(Box::new(like));
     }
-    (format!("WHERE {}", wheres.join(" AND ")), args)
 }
 
 fn row_to_meta(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {

@@ -119,17 +119,7 @@ fn remote_pipeline_end_to_end() {
     );
     // 本地 roster 指向一个空 home:库里出现的只能是远程行,也不会读到这台
     // 开发机的真实数据;env 根覆盖一并清掉
-    std::env::set_var("WAKE_HOME", &local_home);
-    std::env::set_var("HOME", &local_home);
-    for var in [
-        "XDG_DATA_HOME",
-        "CODEX_HOME",
-        "QODER_CONFIG_DIR",
-        "HERMES_HOME",
-        "OPENCLAW_STATE_DIR",
-    ] {
-        std::env::remove_var(var);
-    }
+    common::isolate_home(&local_home);
     build_remote_home(&home);
 
     let store = Arc::new(Store::open(&tmp.path().join("wake.db")).unwrap());
@@ -322,15 +312,7 @@ fn live_remote_host() {
     fs::create_dir_all(&local_home).unwrap();
     // 本地 roster 指向空 home(HOME 保留,ssh 要读 ~/.ssh)
     std::env::set_var("WAKE_HOME", &local_home);
-    for var in [
-        "XDG_DATA_HOME",
-        "CODEX_HOME",
-        "QODER_CONFIG_DIR",
-        "HERMES_HOME",
-        "OPENCLAW_STATE_DIR",
-    ] {
-        std::env::remove_var(var);
-    }
+    common::clear_agent_env_overrides();
     let store = Arc::new(Store::open(&tmp.path().join("wake.db")).unwrap());
     store.add_remote_host(&host).unwrap();
     let cache = wake_core::remote::host_cache_dir(&store.db_dir().unwrap(), &host);

@@ -35,24 +35,37 @@ iconutil -c icns "$ICONSET" -o dist/wake.icns
 
 # 2. release 构建。Universal 模式在同一 macOS SDK 上交叉编译两个 Rust
 # target，再用 lipo 合并；目标标准库由调用方预先通过 rustup 安装。
+# 发行二进制清单:主程序 Wake + 并排的辅助可执行文件(只读 MCP server
+# wake-mcp,Settings → Connect 按同目录找它)。两者 cargo 包不同,构建各写一行;
+# lipo / 拷贝 / 签名 / 架构核对按清单循环,再加一个辅助 bin 只改 SIDE_BINS
+SIDE_BINS=(wake-mcp)
+BINS=(Wake "${SIDE_BINS[@]}")
+build_bins() {
+  cargo build --release -p wake "$@"
+  cargo build --release -p wake-core --bin wake-mcp "$@"
+}
 if $UNIVERSAL; then
   ARM_TARGET=aarch64-apple-darwin
   INTEL_TARGET=x86_64-apple-darwin
-  cargo build --release -p wake --target "$ARM_TARGET"
-  cargo build --release -p wake --target "$INTEL_TARGET"
+  build_bins --target "$ARM_TARGET"
+  build_bins --target "$INTEL_TARGET"
   mkdir -p "$BUILD"
-  lipo -create \
-    "$TARGET_DIR/$ARM_TARGET/release/Wake" \
-    "$TARGET_DIR/$INTEL_TARGET/release/Wake" \
-    -output "$BUILD/Wake"
+  for bin in "${BINS[@]}"; do
+    lipo -create \
+      "$TARGET_DIR/$ARM_TARGET/release/$bin" \
+      "$TARGET_DIR/$INTEL_TARGET/release/$bin" \
+      -output "$BUILD/$bin"
+  done
 else
-  cargo build --release -p wake
+  build_bins
 fi
 
 # 3. bundle 组装
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BUILD/Wake" "$APP/Contents/MacOS/Wake"
+for bin in "${BINS[@]}"; do
+  cp "$BUILD/$bin" "$APP/Contents/MacOS/$bin"
+done
 cp dist/wake.icns "$APP/Contents/Resources/wake.icns"
 # 版本号从 workspace Cargo.toml 单一来源读取,勿在此硬编码
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
@@ -81,17 +94,27 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# 4. ad-hoc 签名(本机运行足够;分发需开发者证书 + notarize)
+# 4. ad-hoc 签名(本机运行足够;分发需开发者证书 + notarize)。--deep 只递归
+# 标准嵌套位置(Frameworks/PlugIns/XPCServices…),MacOS/ 里并排的辅助可执行
+# 文件不算,先单独签它们,否则 Gatekeeper 会拦 MCP 客户端起的 wake-mcp
+for bin in "${SIDE_BINS[@]}"; do
+  codesign --force -s - "$APP/Contents/MacOS/$bin"
+done
 codesign --force --deep -s - "$APP"
 codesign --verify --deep --strict "$APP"
+for bin in "${SIDE_BINS[@]}"; do
+  codesign --verify --strict "$APP/Contents/MacOS/$bin"
+done
 
 if $UNIVERSAL; then
-  ARCHS=$(lipo -archs "$APP/Contents/MacOS/Wake")
-  if [[ "$ARCHS" != *arm64* || "$ARCHS" != *x86_64* ]]; then
-    echo "Universal build is missing an architecture: $ARCHS" >&2
-    exit 1
-  fi
-  echo "✓ architectures: $ARCHS"
+  for bin in "${BINS[@]}"; do
+    ARCHS=$(lipo -archs "$APP/Contents/MacOS/$bin")
+    if [[ "$ARCHS" != *arm64* || "$ARCHS" != *x86_64* ]]; then
+      echo "Universal build of $bin is missing an architecture: $ARCHS" >&2
+      exit 1
+    fi
+    echo "✓ $bin architectures: $ARCHS"
+  done
 fi
 
 echo "✓ $APP"

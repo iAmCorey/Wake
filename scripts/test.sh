@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-echo "── cargo test -p wake-core(adapter 契约 / seq 一致性 / FTS / 扫描终态)"
+echo "── cargo test -p wake-core(adapter 契约 / seq 一致性 / FTS / 扫描终态 / wake-mcp stdio)"
 cargo test -p wake-core --quiet
 
 echo "── cargo test -p wake(UI 单元逻辑；联网测试默认忽略)"

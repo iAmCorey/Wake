@@ -251,6 +251,15 @@ pub enum Role {
 }
 
 impl Role {
+    /// 人读标题(导出与 wake-mcp 的消息头共用;`as_str` 是落库/传输用的小写)
+    pub fn title(&self) -> &'static str {
+        match self {
+            Role::User => "User",
+            Role::Assistant => "Assistant",
+            Role::System => "System",
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Role::User => "user",
@@ -355,7 +364,6 @@ pub struct ParsedSession {
 #[derive(Debug, Clone, Default)]
 pub struct SessionFilter {
     pub agents: Vec<AgentId>,
-    pub project_path: Option<String>,
     pub favorite_only: bool,
     pub include_archived: bool,
     /// 只返回会话树的可见根节点。父节点不存在或被当前归档口径隐藏时，
@@ -367,6 +375,16 @@ pub struct SessionFilter {
     pub ascending: bool,
     pub limit: i64,
     pub offset: i64,
+    /// 只要 updated_at ≥ 此刻(epoch ms)的会话;None = 不限(wake-mcp 的 since)
+    pub updated_since: Option<i64>,
+    /// 项目路径并集;空 = 不限。UI 的单选项目给一个元素,wake-mcp 的 monorepo
+    /// 匹配给多个——只此一个字段,别再加"单个项目"的孪生。
+    /// 新增筛选字段要同时教会 db.rs `push_session_filters` 与 workbench 的两面
+    /// 镜子(`same_session_query` / `session_matches_filter`)
+    pub project_paths: Vec<String>,
+    /// true = 排序不把置顶提前(wake-mcp 的"最近会话"要的是真按时间;GUI 列表
+    /// 保持置顶优先,默认 false)
+    pub ignore_pins: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -393,6 +411,19 @@ pub struct SearchHit {
     pub role: String,
     pub snippet: String,
     pub timestamp: Option<i64>,
+}
+
+/// 全文搜索的筛选面(`Store::search_with`)。`Store::search(q, agents, project,
+/// limit)` 是它的便捷形态,UI 用;wake-mcp 需要多项目并集与时间下界
+#[derive(Debug, Clone, Default)]
+pub struct SearchFilter {
+    pub agents: Vec<AgentId>,
+    /// 项目路径并集;空 = 不限
+    pub project_paths: Vec<String>,
+    /// 只要 updated_at ≥ 此刻(epoch ms)的会话
+    pub updated_since: Option<i64>,
+    /// 命中行上限(消息级);0 = 默认 60
+    pub limit: i64,
 }
 
 /// Insights 页统计快照(`Store::insights` 一次算好)。口径与主 UI 一致:

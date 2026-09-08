@@ -20,6 +20,8 @@ $targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "target
 
 cargo build --release -p wake
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+cargo build --release -p wake-core --bin wake-mcp
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # 二进制名 Wake.exe 来自 [[bin]](macOS 菜单栏取进程名所需);Windows 惯例
 # 首字母大写正好同形,不再改名
@@ -27,6 +29,8 @@ $stage = Join-Path ([System.IO.Path]::GetTempPath()) "wake-stage\wake-$version-w
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
 Copy-Item (Join-Path $targetDir "release/Wake.exe") (Join-Path $stage "Wake.exe")
+# 只读 MCP server,与主程序并排(Settings → Connect 按同目录找它)
+Copy-Item (Join-Path $targetDir "release/wake-mcp.exe") (Join-Path $stage "wake-mcp.exe")
 
 New-Item -ItemType Directory -Path dist -Force | Out-Null
 $zip = "dist/wake-$version-windows-$arch.zip"

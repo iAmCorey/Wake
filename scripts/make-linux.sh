@@ -14,10 +14,13 @@ ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
 # 1. release 构建(二进制名 Wake 来自 [[bin]],macOS 菜单栏需要;
 #    Linux 装成小写 wake,CLI 惯例)
 cargo build --release -p wake
+cargo build --release -p wake-core --bin wake-mcp
 
 STAGE=$(mktemp -d)/wake-${VERSION}-linux-${ARCH}
 mkdir -p "$STAGE"
 cp "$TARGET_DIR/release/Wake" "$STAGE/wake"
+# 只读 MCP server,装在主程序旁边(Settings → Connect 按同目录找它)
+cp "$TARGET_DIR/release/wake-mcp" "$STAGE/wake-mcp"
 cp "$ASSETS/icon.svg" "$STAGE/wake.svg"
 
 # 2. .desktop(StartupWMClass 对齐 main.rs 的 app_id = "wake")
@@ -39,6 +42,7 @@ cat > "$STAGE/install.sh" <<'INSTALL'
 set -euo pipefail
 cd "$(dirname "$0")"
 install -Dm755 wake "$HOME/.local/bin/wake"
+install -Dm755 wake-mcp "$HOME/.local/bin/wake-mcp"
 # 桌面项写绝对路径:~/.local/bin 若是本次新建的,图形会话的 PATH 里还没有它,
 # Exec=wake 会找不到程序直到重新登录(deb 装 /usr/bin 不受此累,保持裸名)
 sed "s|^Exec=wake$|Exec=\"$HOME/.local/bin/wake\"|" wake.desktop \
@@ -59,6 +63,7 @@ if command -v dpkg-deb >/dev/null; then
   DEB=$(mktemp -d)/wake_deb
   mkdir -p "$DEB/DEBIAN"
   install -Dm755 "$STAGE/wake"         "$DEB/usr/bin/wake"
+  install -Dm755 "$STAGE/wake-mcp"     "$DEB/usr/bin/wake-mcp"
   install -Dm644 "$STAGE/wake.desktop" "$DEB/usr/share/applications/wake.desktop"
   install -Dm644 "$STAGE/wake.svg"     "$DEB/usr/share/icons/hicolor/scalable/apps/wake.svg"
   cat > "$DEB/DEBIAN/control" <<CONTROL

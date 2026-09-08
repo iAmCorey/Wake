@@ -434,3 +434,27 @@ pub fn build_antigravity_db(path: &Path) {
     )
     .expect("populate antigravity fixture db");
 }
+
+/// 让本进程(及其子进程)的全部 adapter 只看这个假 HOME:WAKE_HOME 是 adapter
+/// 侧的统一改道开关,三端一致;HOME 仍设一份供其他 POSIX 依赖(Windows 上 dirs
+/// 不看 HOME,单设它等于没设)。再清掉各家的 env 根覆盖——开发机或 CI 上设了
+/// CODEX_HOME / XDG_DATA_HOME 之类,adapter 就会绕过 fixture 去读真实库(实测
+/// opencode 的两个契约测试会因此挂掉)。新增带 env 根的 agent 只改这里
+pub fn isolate_home(home: &Path) {
+    std::env::set_var("WAKE_HOME", home);
+    std::env::set_var("HOME", home);
+    clear_agent_env_overrides();
+}
+
+/// 只清 env 根覆盖、不动 HOME(live 远程用例要保留 ~/.ssh)
+pub fn clear_agent_env_overrides() {
+    for var in [
+        "XDG_DATA_HOME",
+        "CODEX_HOME",
+        "QODER_CONFIG_DIR",
+        "HERMES_HOME",
+        "OPENCLAW_STATE_DIR",
+    ] {
+        std::env::remove_var(var);
+    }
+}

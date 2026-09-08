@@ -109,6 +109,7 @@ icons!(
     "plus",
     "info",
     "chart-column",
+    "plug",
 );
 
 impl AssetSource for Assets {

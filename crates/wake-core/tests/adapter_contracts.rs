@@ -63,18 +63,7 @@ fn setup() -> &'static TestEnv {
         // home 复用同一份,两边不会各自漂移)
         let sc = common::stage_sidecars(home.path());
 
-        // WAKE_HOME 是 adapter 侧的统一改道开关,三端一致;HOME 仍设一份供
-        // 其他 POSIX 依赖使用(Windows 上 dirs 不看 HOME,单设它等于没设)
-        std::env::set_var("WAKE_HOME", home.path());
-        std::env::set_var("HOME", home.path());
-        // 测试只受这个假 HOME 支配:opencode 认 XDG_DATA_HOME、codex 认
-        // CODEX_HOME,开发者或 CI 机器上设了它们,adapter 就会绕过 fixture
-        // 去读真实库(实测 opencode 的两个契约测试会因此挂掉)
-        std::env::remove_var("XDG_DATA_HOME");
-        std::env::remove_var("CODEX_HOME");
-        std::env::remove_var("QODER_CONFIG_DIR");
-        std::env::remove_var("HERMES_HOME");
-        std::env::remove_var("OPENCLAW_STATE_DIR");
+        common::isolate_home(home.path());
         TestEnv {
             copilot_db: sc.copilot_db,
             opencode_db: sc.opencode_db,
