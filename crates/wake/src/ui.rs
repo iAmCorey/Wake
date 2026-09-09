@@ -34,44 +34,72 @@ pub const FONT_MSG_THINKING: Pixels = px(11.5);
 
 // ---------------- 平台文案 ----------------
 // 同一处 UI 在不同平台叫不同名字/键(Finder vs File Explorer vs 文件管理器、
-// ⌘ vs Ctrl),文案引用这里的常量,别在 render 里散落字面量。cfg! 表达式让
-// 各支在任一平台都过类型检查(名词与 wake-core terminal 的平台实现对应:
-// macos=Finder,windows=资源管理器官方英文名 File Explorer)。
+// ⌘ vs Ctrl),文案走这里的函数,别在 render 里散落字面量。名词与 wake-core
+// terminal 的平台实现对应:macos=Finder,windows=资源管理器官方英文名
+// File Explorer。这里用 `#[cfg]` 而非别处惯用的 `cfg!` 表达式:展开物只是
+// `concat!` 出的字面量与同形函数体,没有会在另一平台上失配的类型。
+//
+// 两个宏的形状相同:给一个平台名词 → `concat!` 派生若干**整句** key(整句
+// 即英文文案本身),并直接 emit 取用函数。中间不留 const:那层只是把字面量
+// 从宏内递到宏外,而 `t()` 要到运行时才知道译文,常量存不下它。
+//
+// 整句而非「动词 + {名词}」是有意的——zh-Hans 包里三条 "Show in …" 各自带着
+// 平台正确的中文产品名(访达 / 文件资源管理器 / 文件管理器),名词替换式的
+// 设计产不出这个。
 
-pub const SHOW_IN_FM: &str = if cfg!(target_os = "macos") {
-    "Show in Finder"
-} else if cfg!(target_os = "windows") {
-    "Show in File Explorer"
-} else {
-    "Show in File Manager"
-};
-pub const REVEAL_IN_FM: &str = if cfg!(target_os = "macos") {
-    "Reveal in Finder"
-} else if cfg!(target_os = "windows") {
-    "Reveal in File Explorer"
-} else {
-    "Reveal in File Manager"
-};
+/// 文件管理器的平台名(macos=Finder,windows=官方英文名 File Explorer)
+macro_rules! file_manager_copy {
+    ($app:literal) => {
+        /// 详情页 / 设置页的「在文件管理器中显示」
+        pub fn show_in_fm() -> &'static str {
+            crate::i18n::t(concat!("Show in ", $app))
+        }
+        /// 更多菜单里的同一动作(措辞不同,是两条 key)
+        pub fn reveal_in_fm() -> &'static str {
+            crate::i18n::t(concat!("Reveal in ", $app))
+        }
+    };
+}
+#[cfg(target_os = "macos")]
+file_manager_copy!("Finder");
+#[cfg(target_os = "windows")]
+file_manager_copy!("File Explorer");
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+file_manager_copy!("File Manager");
 
 // 系统回收站的平台名词(macOS 与 freedesktop 都叫 Trash,Windows 是
-// Recycle Bin)与由它派生的三句删除文案。名词只写一次、整句由 concat!
-// 拼出:三处分别手写 cfg! 链的话,没有任何东西能拦住它们说不同的词
+// Recycle Bin)与由它派生的五句删除文案。名词只写一次、整句由 concat!
+// 拼出:五处分别手写 cfg! 链的话,没有任何东西能拦住它们说不同的词
 // ——与 wake-core 各平台 trash_existing 的失败文案也得是同一个词。
 //
-// 全部是 &'static str 而非调用点 format!:确认框内容活在 **dialog builder
-// 闭包**里,对话框开着时每帧重跑,留 format! 在里面就是每帧堆分配。
+// 确认框内容活在 **dialog builder 闭包**里、对话框开着时每帧重跑,`t()` 是
+// 一次哈希查表,和从前读常量一样不分配。
 macro_rules! trash_copy {
     ($noun:literal, $body:literal) => {
         /// 删除确认框主按钮 / 更多菜单项
-        pub const MOVE_TO_TRASH: &str = concat!("Move to ", $noun);
-        /// 删除成功通知
-        pub const SESSION_TRASHED: &str = concat!("Session moved to ", $noun);
-        /// 删除确认框正文首句(冠词随名词变,故整句单列)
-        pub const TRASH_CONFIRM_BODY: &str = concat!(
-            "The session file will be moved to ",
-            $body,
-            ". You can restore it anytime:"
-        );
+        pub fn move_to_trash() -> &'static str {
+            crate::i18n::t(concat!("Move to ", $noun))
+        }
+        // 删除成功的通知。单/复数两支都返回 **key** 而非译文:调用点用
+        // `i18n::tp` 按条数选支,选支这一步必须发生在查表之前
+        pub fn session_trashed_key() -> &'static str {
+            concat!("Session moved to ", $noun)
+        }
+        pub fn sessions_trashed_key() -> &'static str {
+            concat!("{} sessions moved to ", $noun)
+        }
+        /// 确认框正文里嵌的名词(冠词随名词变,故与 $noun 分开)
+        pub fn trash_body() -> &'static str {
+            crate::i18n::t($body)
+        }
+        /// 删除确认框正文首句
+        pub fn trash_confirm_body() -> &'static str {
+            crate::i18n::t(concat!(
+                "The session file will be moved to ",
+                $body,
+                ". You can restore it anytime:"
+            ))
+        }
     };
 }
 #[cfg(target_os = "windows")]

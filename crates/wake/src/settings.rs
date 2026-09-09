@@ -1,3 +1,4 @@
+use crate::i18n::t;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
@@ -13,7 +14,7 @@ use wake_core::models::AgentId;
 use crate::format::tilde_path;
 use crate::ui::{
     overlay_layers, BUTTON_SM_H, FONT_BODY, FONT_CAPTION, FONT_DISPLAY, FONT_HEADING, FONT_LABEL,
-    FONT_TITLE, RADIUS_BUTTON, SHOW_IN_FM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS,
+    FONT_TITLE, RADIUS_BUTTON, show_in_fm, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS,
     SPACE_XXL,
 };
 use crate::update::{self, UpdateStatus};
@@ -124,6 +125,7 @@ fn settings_info_card(
     primary: &'static str,
     details: Vec<AnyElement>,
     trailing: AnyElement,
+    min_h: Pixels,
     cx: &App,
 ) -> Div {
     let theme = cx.theme();
@@ -139,7 +141,7 @@ fn settings_info_card(
         .bg(theme.popover)
         .child(
             h_flex()
-                .min_h(px(84.))
+                .min_h(min_h)
                 .px(SPACE_LG)
                 .gap(SPACE_LG)
                 .items_center()
@@ -286,7 +288,7 @@ impl SettingsView {
                     .text_size(FONT_HEADING)
                     .font_semibold()
                     .text_color(theme.sidebar_foreground)
-                    .child("Settings"),
+                    .child(t("Settings")),
             )
             .child(
                 v_flex()
@@ -295,35 +297,35 @@ impl SettingsView {
                     .gap(px(2.))
                     .child(self.render_nav_item(
                         "settings-general-nav",
-                        "General",
+                        t("General"),
                         "icons/settings.svg",
                         SettingsPage::General,
                         cx,
                     ))
                     .child(self.render_nav_item(
                         "settings-locations-nav",
-                        "Locations",
+                        t("Locations"),
                         "icons/hard-drive.svg",
                         SettingsPage::Locations,
                         cx,
                     ))
                     .child(self.render_nav_item(
                         "settings-remotes-nav",
-                        "Remote hosts",
+                        t("Remote hosts"),
                         "icons/server.svg",
                         SettingsPage::Remotes,
                         cx,
                     ))
                     .child(self.render_nav_item(
                         "settings-connect-nav",
-                        "Connect",
+                        t("Connect"),
                         "icons/plug.svg",
                         SettingsPage::Connect,
                         cx,
                     ))
                     .child(self.render_nav_item(
                         "settings-data-nav",
-                        "Data",
+                        t("Data"),
                         "icons/database.svg",
                         SettingsPage::Data,
                         cx,
@@ -336,19 +338,89 @@ impl SettingsView {
                     .gap(px(2.))
                     .child(self.render_nav_item(
                         "settings-updates-nav",
-                        "Updates",
+                        t("Updates"),
                         "icons/download.svg",
                         SettingsPage::Updates,
                         cx,
                     ))
                     .child(self.render_nav_item(
                         "settings-about-nav",
-                        "About",
+                        t("About"),
                         "icons/info.svg",
                         SettingsPage::About,
                         cx,
                     )),
             )
+            .into_any_element()
+    }
+
+    /// General 页的设置行:与 Data/Connect 的信息卡同一张卡,只是矮一档
+    /// (72 是 Appearance 行的用户定稿值),副行是 caption 级说明
+    fn setting_row(
+        title: &'static str,
+        subtitle: &'static str,
+        control: impl IntoElement,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let caption = div()
+            .text_size(FONT_CAPTION)
+            .text_color(cx.theme().muted_foreground)
+            .child(subtitle)
+            .into_any_element();
+        settings_info_card(
+            title,
+            vec![caption],
+            control.into_any_element(),
+            px(72.),
+            cx,
+        )
+        .into_any_element()
+    }
+
+    /// 语言选择:System + English + 装好的语言包。选项数量随语言包增减,
+    /// 所以是下拉而不是 Appearance 那样的分段控件
+    fn language_control(&self) -> AnyElement {
+        // 直接读全局:镜像成字段就要在每个切换点写回,而 `apply_language`
+        // 改的是全局(appearance 那个字段正是这么漂的)
+        let current = crate::i18n::preference().map(|locale| locale.tag);
+        Button::new("settings-language")
+            .outline()
+            .small()
+            .rounded(RADIUS_BUTTON)
+            .label(current.map_or(t("System"), |tag| {
+                crate::i18n::available()
+                    .iter()
+                    .find(|locale| locale.tag == tag)
+                    .map_or(t("System"), |locale| locale.name)
+            }))
+            .icon(icon("icons/chevron-down.svg").with_size(px(14.)))
+            .dropdown_menu(move |mut menu, _, _| {
+                // 选项只在菜单打开时才需要,`available()` 又是 'static 切片
+                // ——留在闭包里就不必每帧建一个 Vec 再 clone 一份进来
+                menu = menu.min_w(px(160.));
+                let options = std::iter::once((None, t("System"))).chain(
+                    crate::i18n::available()
+                        .iter()
+                        .map(|locale| (Some(locale.tag), locale.name)),
+                );
+                for (tag, name) in options {
+                    menu = menu.item(
+                        PopupMenuItem::new(name)
+                            .checked(tag == current)
+                            .on_click(move |_, window, cx| {
+                                if let Err(error) = crate::i18n::set_language(tag, cx) {
+                                    window.push_notification(
+                                        gpui_component::notification::Notification::error(
+                                            crate::tf!("Couldn't save language: {}", error),
+                                        ),
+                                        cx,
+                                    );
+                                }
+                            }),
+                    );
+                }
+                menu
+            })
             .into_any_element()
     }
 
@@ -386,9 +458,7 @@ impl SettingsView {
                         cx.notify();
                     }
                     Err(error) => window.push_notification(
-                        gpui_component::notification::Notification::error(format!(
-                            "Couldn't save appearance: {error}"
-                        )),
+                        gpui_component::notification::Notification::error(crate::tf!("Couldn't save appearance: {}", error)),
                         cx,
                     ),
                 }
@@ -414,73 +484,55 @@ impl SettingsView {
                             .text_size(FONT_TITLE)
                             .font_semibold()
                             .text_color(theme.foreground)
-                            .child("General"),
+                            .child(t("General")),
                     )
                     .child(
                         div()
                             .text_size(FONT_CAPTION)
                             .text_color(theme.muted_foreground)
-                            .child("Customize how Wake looks."),
+                            .child(t("Customize how Wake looks and reads.")),
                     ),
             )
             .child(
-                v_flex().px(SPACE_XXL).child(
-                    h_flex()
-                        .min_h(px(72.))
-                        .w_full()
-                        .px(SPACE_LG)
-                        .gap(SPACE_LG)
-                        .items_center()
-                        .rounded(theme.radius_lg)
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.popover)
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap(px(3.))
-                                .child(
-                                    div()
-                                        .text_size(FONT_BODY)
-                                        .text_color(theme.foreground)
-                                        .child("Appearance"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(FONT_CAPTION)
-                                        .text_color(theme.muted_foreground)
-                                        .child("Follow the system or keep Wake light or dark."),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .h(BUTTON_SM_H + px(4.))
-                                .p(px(2.))
-                                .rounded(theme.radius)
-                                .border_1()
-                                .border_color(theme.border)
-                                .bg(theme.secondary)
-                                .child(self.appearance_button(
-                                    "appearance-system",
-                                    "System",
-                                    AppearancePreference::System,
-                                    cx,
-                                ))
-                                .child(self.appearance_button(
-                                    "appearance-light",
-                                    "Light",
-                                    AppearancePreference::Light,
-                                    cx,
-                                ))
-                                .child(self.appearance_button(
-                                    "appearance-dark",
-                                    "Dark",
-                                    AppearancePreference::Dark,
-                                    cx,
-                                )),
-                        ),
-                ),
+                v_flex()
+                    .px(SPACE_XXL)
+                    .gap(SPACE_MD)
+                    .child(Self::setting_row(
+                        t("Appearance"),
+                        t("Follow the system or keep Wake light or dark."),
+                        h_flex()
+                            .h(BUTTON_SM_H + px(4.))
+                            .p(px(2.))
+                            .rounded(theme.radius)
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.secondary)
+                            .child(self.appearance_button(
+                                "appearance-system",
+                                t("System"),
+                                AppearancePreference::System,
+                                cx,
+                            ))
+                            .child(self.appearance_button(
+                                "appearance-light",
+                                t("Light"),
+                                AppearancePreference::Light,
+                                cx,
+                            ))
+                            .child(self.appearance_button(
+                                "appearance-dark",
+                                t("Dark"),
+                                AppearancePreference::Dark,
+                                cx,
+                            )),
+                        cx,
+                    ))
+                    .child(Self::setting_row(
+                        t("Language"),
+                        t("Follow the system language, or pick one."),
+                        self.language_control(),
+                        cx,
+                    )),
             )
             .into_any_element()
     }
@@ -488,10 +540,11 @@ impl SettingsView {
     fn render_data(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let snapshot = self.workbench.read(cx).data_settings_snapshot();
+        // 会话计数的措辞单点在 workbench 的 session_tally(Locations 与
+        // Remote hosts 也用它);这里只补分隔符,不再复制一遍句子
         let summary: SharedString = format!(
-            "{} session{} · {}",
-            snapshot.session_count,
-            wake_core::text::plural(snapshot.session_count),
+            "{} · {}",
+            crate::workbench::session_tally(snapshot.session_count),
             format_storage_size(snapshot.size_bytes)
         )
         .into();
@@ -499,7 +552,7 @@ impl SettingsView {
         let show_in_finder = settings_button(
             Button::new("settings-show-data")
                 .icon(icon("icons/folder.svg").with_size(px(13.)))
-                .label(SHOW_IN_FM),
+                .label(show_in_fm()),
             cx,
         )
         .on_click(move |_, _, _| {
@@ -526,8 +579,8 @@ impl SettingsView {
             .h_full()
             .bg(theme.background)
             .child(settings_page_header(
-                "Data",
-                "See where Wake stores local data. Sessions refresh automatically.",
+                t("Data"),
+                t("See where Wake stores local data. Sessions refresh automatically."),
                 cx,
             ))
             .child(
@@ -539,12 +592,13 @@ impl SettingsView {
                             .text_size(FONT_CAPTION)
                             .font_semibold()
                             .text_color(theme.foreground)
-                            .child("Storage"),
+                            .child(t("Storage")),
                     )
                     .child(settings_info_card(
-                        "Wake data",
+                        t("Wake data"),
                         details,
                         show_in_finder.into_any_element(),
+                        px(84.),
                         cx,
                     )),
             )
@@ -571,7 +625,7 @@ impl SettingsView {
                     })
                     .with_size(px(13.)),
                 )
-                .label(if copied { "Copied" } else { label }),
+                .label(if copied { t("Copied") } else { label }),
             cx,
         )
         .on_click(cx.listener(move |this, _, _, cx| {
@@ -643,7 +697,7 @@ impl SettingsView {
                         })
                         .with_size(px(13.)),
                     )
-                    .label(if shown { "Hide" } else { "Show" })
+                    .label(if shown { t("Hide") } else { t("Show") })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.connect_shown.remove(&ix) {
                             this.connect_shown.insert(ix);
@@ -713,7 +767,7 @@ impl SettingsView {
 
         let copy_path = self.copy_button(
             "connect-copy-path".into(),
-            "Copy path",
+            t("Copy path"),
             info.bin_path.clone(),
             cx,
         );
@@ -730,7 +784,7 @@ impl SettingsView {
                 div()
                     .text_size(FONT_CAPTION)
                     .text_color(theme.danger)
-                    .child("Not found next to the Wake app — reinstall Wake, or build it with `cargo build -p wake-core --bin wake-mcp`")
+                    .child(t("Not found next to the Wake app — reinstall Wake, or build it with `cargo build -p wake-core --bin wake-mcp`"))
                     .into_any_element(),
             );
         }
@@ -750,7 +804,7 @@ impl SettingsView {
             .text_size(FONT_CAPTION)
             .text_color(theme.primary)
             .on_click(|_, _, cx| cx.open_url(CONNECT_GUIDE_URL))
-            .child("Setup guide");
+            .child(t("Setup guide"));
 
         v_flex()
             .flex_1()
@@ -758,8 +812,8 @@ impl SettingsView {
             .h_full()
             .bg(theme.background)
             .child(settings_page_header(
-                "Connect",
-                "Let your coding agents look up your past sessions from Wake.",
+                t("Connect"),
+                t("Let your coding agents look up your past sessions from Wake."),
                 cx,
             ))
             .child(
@@ -771,14 +825,15 @@ impl SettingsView {
                     .px(SPACE_XXL)
                     .pb(SPACE_XXL)
                     .gap(SPACE_SM)
-                    .child(section("MCP server"))
+                    .child(section(t("MCP server")))
                     .child(settings_info_card(
                         "wake-mcp",
                         details,
                         copy_path.into_any_element(),
+                        px(84.),
                         cx,
                     ))
-                    .child(section("Agents").pt(SPACE_LG))
+                    .child(section(t("Agents")).pt(SPACE_LG))
                     .child(
                         v_flex()
                             .w_full()
@@ -802,7 +857,7 @@ impl SettingsView {
                                     .min_w_0()
                                     .text_size(FONT_CAPTION)
                                     .text_color(theme.muted_foreground)
-                                    .child("Agents get four read-only tools: search, recent sessions, transcripts, projects."),
+                                    .child(t("Agents get four read-only tools: search, recent sessions, transcripts, projects.")),
                             )
                             .child(guide),
                     ),
@@ -835,7 +890,7 @@ impl SettingsView {
     fn render_about(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let faint = theme.muted_foreground.opacity(0.72);
-        let version: SharedString = format!("Version {}", env!("CARGO_PKG_VERSION")).into();
+        let version: SharedString = crate::tf!("Version {}", env!("CARGO_PKG_VERSION")).into();
 
         v_flex()
             .flex_1()
@@ -874,7 +929,7 @@ impl SettingsView {
                             .mt(SPACE_MD)
                             .text_size(FONT_CAPTION)
                             .text_color(theme.muted_foreground)
-                            .child("All your AI agent sessions, in one place."),
+                            .child(t("All your AI agent sessions, in one place.")),
                     )
                     .child(div().mt(px(14.)).child(self.about_link(
                         "about-github",
@@ -888,7 +943,7 @@ impl SettingsView {
                             .text_size(FONT_LABEL)
                             .font_family(theme.mono_font_family.clone())
                             .text_color(faint)
-                            .child("© 2026 Corey Chiu · MIT License"),
+                            .child(t("© 2026 Corey Chiu · MIT License")),
                     )
                     .child(
                         h_flex()
@@ -896,7 +951,7 @@ impl SettingsView {
                             .text_size(FONT_LABEL)
                             .font_family(theme.mono_font_family.clone())
                             .text_color(faint)
-                            .child("Built with ❤️ by ")
+                            .child(t("Built with ❤️ by "))
                             .child(self.about_link(
                                 "about-author",
                                 "Corey Chiu",
@@ -914,24 +969,24 @@ impl SettingsView {
         let checking = matches!(status, UpdateStatus::Checking);
         let update_available = matches!(status, UpdateStatus::Available { .. });
         let status_message: SharedString = match &status {
-            UpdateStatus::Idle => "Check GitHub Releases for a newer version.".into(),
-            UpdateStatus::Checking => "Checking GitHub Releases…".into(),
+            UpdateStatus::Idle => t("Check GitHub Releases for a newer version.").into(),
+            UpdateStatus::Checking => t("Checking GitHub Releases…").into(),
             UpdateStatus::UpToDate { latest } => {
-                format!("No newer release is available (latest: {latest}).").into()
+                crate::tf!("No newer release is available (latest: {}).", latest).into()
             }
             UpdateStatus::Available { latest } => {
-                format!("Wake {latest} is available. Open the release page to download it.").into()
+                crate::tf!("Wake {} is available. Open the release page to download it.", latest).into()
             }
             UpdateStatus::Failed => {
-                "Couldn't check for updates. Check your connection and try again.".into()
+                t("Couldn't check for updates. Check your connection and try again.").into()
             }
         };
         let button_label = match status {
-            UpdateStatus::Idle => "Check for Updates",
-            UpdateStatus::Checking => "Checking…",
-            UpdateStatus::UpToDate { .. } => "Check Again",
-            UpdateStatus::Available { .. } => "View Update",
-            UpdateStatus::Failed => "Try Again",
+            UpdateStatus::Idle => t("Check for Updates"),
+            UpdateStatus::Checking => t("Checking…"),
+            UpdateStatus::UpToDate { .. } => t("Check Again"),
+            UpdateStatus::Available { .. } => t("View Update"),
+            UpdateStatus::Failed => t("Try Again"),
         };
         let button = Button::new("settings-check-updates")
             .label(button_label)
@@ -967,13 +1022,13 @@ impl SettingsView {
                             .text_size(FONT_TITLE)
                             .font_semibold()
                             .text_color(theme.foreground)
-                            .child("Updates"),
+                            .child(t("Updates")),
                     )
                     .child(
                         div()
                             .text_size(FONT_CAPTION)
                             .text_color(theme.muted_foreground)
-                            .child("Keep Wake up to date."),
+                            .child(t("Keep Wake up to date.")),
                     ),
             )
             .child(
@@ -1037,20 +1092,20 @@ impl SettingsView {
                 let edit_row = edit_row.clone();
                 let mut menu = menu
                     .min_w(px(180.))
-                    .item(PopupMenuItem::new("Edit…").on_click(move |_, window, cx| {
+                    .item(PopupMenuItem::new(t("Edit…")).on_click(move |_, window, cx| {
                         let row = edit_row.clone();
                         workbench
                             .update(cx, |this, cx| this.open_edit_location_form(row, window, cx));
                     }));
                 if exists {
                     let path = reveal_path.clone();
-                    menu = menu.item(PopupMenuItem::new(SHOW_IN_FM).on_click(move |_, _, _| {
+                    menu = menu.item(PopupMenuItem::new(show_in_fm()).on_click(move |_, _, _| {
                         wake_core::services::terminal::open_in_file_manager(path.as_ref())
                     }));
                 }
                 if let Some(stored) = remove_target.clone() {
                     let workbench = edit_workbench.clone();
-                    menu = menu.separator().item(PopupMenuItem::new("Remove").on_click(
+                    menu = menu.separator().item(PopupMenuItem::new(t("Remove")).on_click(
                         move |_, window, cx| {
                             let stored = stored.clone();
                             workbench.update(cx, |this, cx| {
@@ -1106,9 +1161,9 @@ impl SettingsView {
                     .checked(enabled)
                     .small()
                     .tooltip(if enabled {
-                        "Disable location"
+                        t("Disable location")
                     } else {
-                        "Enable location"
+                        t("Enable location")
                     })
                     .on_click(move |enabled, window, cx| {
                         let path = toggle_path.clone();
@@ -1226,20 +1281,20 @@ impl SettingsView {
                                     .text_size(FONT_TITLE)
                                     .font_semibold()
                                     .text_color(theme.foreground)
-                                    .child("Session locations"),
+                                    .child(t("Session locations")),
                             )
                             .child(
                                 div()
                                     .text_size(FONT_CAPTION)
                                     .text_color(theme.muted_foreground)
-                                    .child("Choose where Wake looks for local agent sessions."),
+                                    .child(t("Choose where Wake looks for local agent sessions.")),
                             ),
                     )
                     .child(
                         settings_button(
                             Button::new("settings-add-location")
                                 .icon(icon("icons/plus.svg").with_size(px(13.)))
-                                .label("Add location"),
+                                .label(t("Add location")),
                             cx,
                         )
                         .on_click(move |_, window, cx| {
@@ -1256,7 +1311,7 @@ impl SettingsView {
                             .dropdown_menu(move |menu, _, _| {
                                 let workbench = restore_workbench.clone();
                                 menu.min_w(px(180.)).item(
-                                    PopupMenuItem::new("Restore defaults")
+                                    PopupMenuItem::new(t("Restore defaults"))
                                         .disabled(!diverged)
                                         .on_click(move |_, window, cx| {
                                             workbench.update(cx, |this, cx| {
@@ -1318,7 +1373,7 @@ impl SettingsView {
                                                 .flex_1()
                                                 .text_size(FONT_CAPTION)
                                                 .font_medium()
-                                                .child("Not detected"),
+                                                .child(t("Not detected")),
                                         )
                                         .child(
                                             div()
@@ -1366,7 +1421,7 @@ impl SettingsView {
                         let remove_name = menu_name.clone();
                         menu.min_w(px(180.))
                             .item(
-                                PopupMenuItem::new("Sync now")
+                                PopupMenuItem::new(t("Sync now"))
                                     .disabled(syncing || !enabled)
                                     .on_click(move |_, _, cx| {
                                         let name = sync_name.to_string();
@@ -1376,7 +1431,7 @@ impl SettingsView {
                                     }),
                             )
                             .separator()
-                            .item(PopupMenuItem::new("Remove").on_click(move |_, window, cx| {
+                            .item(PopupMenuItem::new(t("Remove")).on_click(move |_, window, cx| {
                                 let name = remove_name.clone();
                                 remove_workbench.update(cx, |this, cx| {
                                     this.confirm_remove_remote_host(name, window, cx)
@@ -1430,9 +1485,9 @@ impl SettingsView {
                                     .checked(enabled)
                                     .small()
                                     .tooltip(if enabled {
-                                        "Disable host"
+                                        t("Disable host")
                                     } else {
-                                        "Enable host"
+                                        t("Enable host")
                                     })
                                     .on_click(move |checked, window, cx| {
                                         let enabled = *checked;
@@ -1474,7 +1529,7 @@ impl SettingsView {
                                     .text_size(FONT_TITLE)
                                     .font_semibold()
                                     .text_color(theme.foreground)
-                                    .child("Remote hosts"),
+                                    .child(t("Remote hosts")),
                             )
                             .child(
                                 div()
@@ -1491,7 +1546,7 @@ impl SettingsView {
                             settings_button(
                                 Button::new("settings-sync-remotes")
                                     .icon(icon("icons/refresh-cw.svg").with_size(px(13.)))
-                                    .label(if syncing { "Syncing…" } else { "Sync now" }),
+                                    .label(if syncing { t("Syncing…") } else { t("Sync now") }),
                                 cx,
                             )
                             .disabled(syncing)
@@ -1505,7 +1560,7 @@ impl SettingsView {
                         settings_button(
                             Button::new("settings-add-remote-host")
                                 .icon(icon("icons/plus.svg").with_size(px(13.)))
-                                .label("Add host"),
+                                .label(t("Add host")),
                             cx,
                         )
                         .on_click(move |_, window, cx| {
@@ -1543,7 +1598,7 @@ impl SettingsView {
                             div()
                                 .text_size(FONT_CAPTION)
                                 .text_color(theme.muted_foreground)
-                                .child("No remote hosts yet. Add one to mirror its sessions into Wake."),
+                                .child(t("No remote hosts yet. Add one to mirror its sessions into Wake.")),
                         )
                     }),
             )

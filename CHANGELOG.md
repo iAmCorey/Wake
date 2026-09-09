@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## [0.5.2] — 2026-09-10
+
+- New: Wake speaks your language — Simplified Chinese included, and the UI follows your system language on first launch; pick a fixed language under Settings → General
+- New: adding a language takes one JSON file — drop it in Wake's config folder to use it right away, or send it as a pull request; anything left untranslated stays English (see crates/wake/locales/README.md)
+
 ## [0.5.1] — 2026-09-08
 
 - Update: the MCP tools now tell agents when to use Wake — earlier conversations, decisions, where work stopped, "have we seen this error" — so a fresh session reaches for session history instead of answering from git log

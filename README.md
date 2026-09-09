@@ -100,6 +100,17 @@ A few things worth knowing:
 
 The full reference — every parameter, output formats, key and reference formats, error semantics, troubleshooting — is in [docs/mcp.md](docs/mcp.md).
 
+## Language
+
+Wake's interface follows your system language on first launch and falls back to
+English. Simplified Chinese ships with the app; pick a fixed language under
+**Settings → General → Language**.
+
+Adding a language is one flat JSON file mapping the English text to your
+translation — drop it in Wake's config folder to use it immediately, or send it
+as a pull request. Untranslated strings simply stay English, so a partial pack is
+welcome. See [crates/wake/locales/README.md](crates/wake/locales/README.md).
+
 ## Privacy stance
 
 - Agent data directories are opened **read-only**; Wake never writes to another tool's files or databases

@@ -8,6 +8,7 @@
 
 mod assets;
 mod format;
+mod i18n;
 mod main_window;
 mod prefs;
 mod settings;
@@ -19,6 +20,7 @@ mod workbench;
 use assets::Assets;
 use gpui::*;
 use gpui_component::Root;
+use i18n::t;
 use main_window::MainWindow;
 use workbench::{
     OpenAbout, OpenSettings, OpenUpdates, PaletteDown, PaletteUp, RefreshSessions, ToggleSearch,
@@ -109,12 +111,14 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
 /// 可去,用户看到的就是任务栏闪一下然后什么都没有(GPU/驱动起不来、RDP 会话
 /// 等都会走到这)。show_fatal_alert 会弹系统对话框,并始终先往 stderr 落一份
 ///(2026-08-25 review)。`what` 是 "open"/"reopen",拼进提示语
-fn open_main_window_or_exit(cx: &mut App, what: &str) -> WindowHandle<Root> {
+fn open_main_window_or_exit(cx: &mut App, what: &'static str) -> WindowHandle<Root> {
     match open_main_window(cx) {
         Ok(handle) => handle,
         Err(e) => {
-            wake_core::services::terminal::show_fatal_alert(&format!(
-                "Wake couldn't {what} its window: {e}"
+            wake_core::services::terminal::show_fatal_alert(&crate::tf!(
+                "Wake couldn't {} its window: {}",
+                t(what),
+                e
             ));
             std::process::exit(1);
         }
@@ -219,59 +223,63 @@ fn key_bindings() -> Vec<KeyBinding> {
 
 /// 菜单栏。gpui 只按这里给的生成,不补任何标准项——Edit/Window/Hide 一族在
 /// macOS 上必须自己给,否则对应快捷键全是死键
-fn app_menus() -> Vec<Menu> {
+pub(crate) fn app_menus() -> Vec<Menu> {
     let mac = cfg!(target_os = "macos");
     let wake: Vec<MenuItem> = [
-        Some(MenuItem::action("About Wake", OpenAbout)),
-        mac.then(|| MenuItem::action("Check for Updates…", OpenUpdates)),
+        Some(MenuItem::action(t("About Wake"), OpenAbout)),
+        mac.then(|| MenuItem::action(t("Check for Updates…"), OpenUpdates)),
         Some(MenuItem::separator()),
-        Some(MenuItem::action("Settings…", OpenSettings)),
+        Some(MenuItem::action(t("Settings…"), OpenSettings)),
         Some(MenuItem::separator()),
-        mac.then(|| MenuItem::action("Hide Wake", Hide)),
-        mac.then(|| MenuItem::action("Hide Others", HideOthers)),
-        mac.then(|| MenuItem::action("Show All", ShowAll)),
+        mac.then(|| MenuItem::action(t("Hide Wake"), Hide)),
+        mac.then(|| MenuItem::action(t("Hide Others"), HideOthers)),
+        mac.then(|| MenuItem::action(t("Show All"), ShowAll)),
         mac.then(MenuItem::separator),
-        Some(MenuItem::action("Quit Wake", Quit)),
+        Some(MenuItem::action(t("Quit Wake"), Quit)),
     ]
     .into_iter()
     .flatten()
     .collect();
     let file = vec![
-        MenuItem::action("Refresh Sessions", RefreshSessions),
+        MenuItem::action(t("Refresh Sessions"), RefreshSessions),
         MenuItem::separator(),
-        MenuItem::action("Close Window", CloseWindow),
+        MenuItem::action(t("Close Window"), CloseWindow),
     ];
     // os_action:菜单项挂原生 cut:/copy:/paste:/selectAll: 选择器。gpui 窗口
     // 在前时由 gpui 接住、派发成右侧的 action(输入框消费);系统面板(目录
     // 选择器)在前时走原生响应链——没有这组菜单项,面板里的 ⌘C/⌘V 无人应答
     let edit = mac.then(|| Menu {
-        name: "Edit".into(),
+        name: t("Edit").into(),
         items: vec![
-            MenuItem::os_action("Undo", gpui_component::input::Undo, OsAction::Undo),
-            MenuItem::os_action("Redo", gpui_component::input::Redo, OsAction::Redo),
+            MenuItem::os_action(t("Undo"), gpui_component::input::Undo, OsAction::Undo),
+            MenuItem::os_action(t("Redo"), gpui_component::input::Redo, OsAction::Redo),
             MenuItem::separator(),
-            MenuItem::os_action("Cut", gpui_component::input::Cut, OsAction::Cut),
-            MenuItem::os_action("Copy", gpui_component::input::Copy, OsAction::Copy),
-            MenuItem::os_action("Paste", gpui_component::input::Paste, OsAction::Paste),
+            MenuItem::os_action(t("Cut"), gpui_component::input::Cut, OsAction::Cut),
+            MenuItem::os_action(t("Copy"), gpui_component::input::Copy, OsAction::Copy),
+            MenuItem::os_action(t("Paste"), gpui_component::input::Paste, OsAction::Paste),
             MenuItem::os_action(
-                "Select All",
+                t("Select All"),
                 gpui_component::input::SelectAll,
                 OsAction::SelectAll,
             ),
         ],
         disabled: false,
     });
-    // 名字必须是 "Window":gpui 据此把它登记为系统 windows menu,窗口列表由
-    // AppKit 自动追加在后面。只剩 Settings 时 Dock 点击不会触发 on_reopen
-    //(系统认为还有可见窗口),Main Window 是拉回主窗的唯一入口
+    // 名字必须**逐字**是 "Window",不能翻译:gpui_macos 的 create_menu_bar
+    // 里是 `if menu_config.name == "Window"` 才调 `setWindowsMenu_`,译成
+    // 「窗口」后 AppKit 就不再把它当系统窗口菜单,自动维护的已打开窗口列表
+    // 随之消失。gpui 没有「菜单标识 + 显示标题」分开的 API,所以中文界面里
+    // 这一个菜单名保持英文是当前依赖下的唯一选择(2026-09-10 Codex review;
+    // 上游给出标识位之前别动它)。只剩 Settings 时 Dock 点击不会触发
+    // on_reopen(系统认为还有可见窗口),Main Window 是拉回主窗的唯一入口
     let window = mac.then(|| Menu {
         name: "Window".into(),
         items: vec![
-            MenuItem::action("Minimize", Minimize),
-            MenuItem::action("Zoom", Zoom),
-            MenuItem::action("Toggle Full Screen", ToggleFullScreen),
+            MenuItem::action(t("Minimize"), Minimize),
+            MenuItem::action(t("Zoom"), Zoom),
+            MenuItem::action(t("Toggle Full Screen"), ToggleFullScreen),
             MenuItem::separator(),
-            MenuItem::action("Main Window", ShowMainWindow),
+            MenuItem::action(t("Main Window"), ShowMainWindow),
         ],
         disabled: false,
     });
@@ -282,7 +290,7 @@ fn app_menus() -> Vec<Menu> {
             disabled: false,
         }),
         Some(Menu {
-            name: "File".into(),
+            name: t("File").into(),
             items: file,
             disabled: false,
         }),
@@ -302,7 +310,8 @@ fn main() {
     app.on_reopen(|cx| show_main_window(cx, |_, _| {}));
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
-        gpui_component::set_locale("en");
+        // 必须在 set_menus 与开任何窗之前:两者的文案都在构造那一刻求值
+        i18n::init();
         theme::sync_appearance(None, cx);
 
         cx.on_action(|_: &Quit, cx| cx.quit());

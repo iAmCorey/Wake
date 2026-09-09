@@ -24,6 +24,9 @@ semver.workspace = true
 reqwest.workspace = true
 image.workspace = true
 unicode-width = "0.2"
+# 系统语言探测(i18n 的 System 档):macOS 走 CFLocale、Windows 走
+# GetUserDefaultLocaleName、Linux 读 LC_ALL/LANG,三平台一份接口
+sys-locale = "0.3"
 unicode-segmentation = "1.13"
 
 [dev-dependencies]

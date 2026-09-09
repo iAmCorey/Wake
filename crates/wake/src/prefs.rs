@@ -2,13 +2,16 @@
 //! Store)建立之前就要用,都等不了库。统一目录、统一原子写法
 use std::path::PathBuf;
 
-/// `<config dir>/wake/<name>`
-fn path(name: &str) -> PathBuf {
+/// `<config dir>/wake/`——语言包目录等也挂在它下面
+pub fn dir() -> Option<PathBuf> {
     dirs::config_dir()
         .or_else(dirs::data_dir)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("wake")
-        .join(name)
+        .map(|dir| dir.join("wake"))
+}
+
+/// `<config dir>/wake/<name>`
+fn path(name: &str) -> PathBuf {
+    dir().unwrap_or_else(|| PathBuf::from(".")).join(name)
 }
 
 /// 读整个文件并去掉首尾空白;不存在、读不到或为空 = None

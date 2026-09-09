@@ -1,3 +1,4 @@
+use crate::i18n::t;
 use chrono::{DateTime, Datelike, Duration, Local, TimeZone};
 use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthStr as _;
@@ -48,17 +49,17 @@ fn smart_time_from(ts: i64, now: &DateTime<Local>) -> String {
     let diff = now.timestamp_millis() - ts;
     const MIN: i64 = 60_000;
     if (0..MIN).contains(&diff) {
-        "Just now".to_string()
+        t("Just now").to_string()
     } else if (MIN..60 * MIN).contains(&diff) {
-        format!("{} min ago", diff / MIN)
+        crate::tf!("{} min ago", diff / MIN)
     } else if dt.date_naive() == now.date_naive() {
-        dt.format("%-I:%M %p").to_string()
+        dt.format(t("%-I:%M %p")).to_string()
     } else if dt.date_naive() == now.date_naive() - Duration::days(1) {
-        "Yesterday".to_string()
+        t("Yesterday").to_string()
     } else if dt.year() == now.year() {
-        dt.format("%b %-d").to_string()
+        dt.format(t("%b %-d")).to_string()
     } else {
-        dt.format("%b %-d, %Y").to_string()
+        dt.format(t("%b %-d, %Y")).to_string()
     }
 }
 
@@ -83,7 +84,7 @@ pub fn month_year(ts: i64) -> String {
     Local
         .timestamp_millis_opt(ts)
         .single()
-        .map(|dt| dt.format("%b %Y").to_string())
+        .map(|dt| dt.format(t("%b %Y")).to_string())
         .unwrap_or_default()
 }
 
