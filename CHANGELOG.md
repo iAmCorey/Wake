@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.6.0] — 2026-09-11
 
 - New: `wake-cli` — search your session history, list what you worked on in a project and read a transcript straight from the terminal, so any agent that can run a shell command gets the same answers a connected MCP client does; run `wake-cli setup` for the path and how to point an agent at it (see docs/cli.md)
 - New: a Wake skill, so agents reach for your session history on their own — `npx skills add iAmCorey/Wake` teaches Claude Code, Codex and anything else that reads skills when to look back at earlier conversations, decisions and errors instead of guessing from git
