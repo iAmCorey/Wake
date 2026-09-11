@@ -23,8 +23,9 @@ use crate::{theme, theme::AppearancePreference};
 
 const SETTINGS_SIDEBAR_W: Pixels = px(180.);
 const SETTINGS_PAGE_TOP: Pixels = px(38.);
-/// Settings → Connect 页尾 Setup guide 的去处:仓库里的 MCP 完整文档
+/// Connect 页两条 Setup guide 的去处:MCP 面与命令行面各自的完整文档
 const CONNECT_GUIDE_URL: &str = "https://github.com/iAmCorey/Wake/blob/main/docs/mcp.md";
+const CONNECT_CLI_GUIDE_URL: &str = "https://github.com/iAmCorey/Wake/blob/main/docs/cli.md";
 
 fn icon(path: &'static str) -> Icon {
     Icon::empty().path(path)
@@ -162,27 +163,51 @@ fn settings_info_card(
         )
 }
 
-/// Connect 页展示的 wake-mcp 事实,开窗时算一次:current_exe/stat/片段拼装都
-/// 不该跑在每帧的 render 里(CLAUDE.md:render 里的路径探测必须缓存)
+/// 一个并排辅助二进制的三件事。两张卡同构,所以探测也只写一遍
+struct BinaryFacts {
+    path: String,
+    display: SharedString,
+    exists: bool,
+}
+
+impl BinaryFacts {
+    fn probe(stem: &str) -> Self {
+        let found = wake_core::mcp::sibling_named(stem);
+        let exists = found.as_ref().is_some_and(|p| p.is_file());
+        // 找不到就退回裸名,展示时至少还是个可辨认的东西
+        let path = found
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| stem.to_string());
+        Self {
+            display: tilde_path(&path).into(),
+            exists,
+            path,
+        }
+    }
+}
+
+/// Connect 页展示的事实,开窗时算一次:current_exe/stat/片段拼装都不该跑在
+/// 每帧的 render 里(CLAUDE.md:render 里的路径探测必须缓存)
 struct ConnectInfo {
-    bin_path: String,
-    bin_display: SharedString,
-    bin_exists: bool,
+    mcp: BinaryFacts,
+    cli: BinaryFacts,
+    /// 把 wake-cli 放进 PATH 的那条命令;deb/tar 已在 `…/bin` 里、或 Windows
+    /// 上没有一行命令能说清时为 None,那时就不给这个按钮
+    cli_path_command: Option<String>,
+    /// MCP clients 卡的三行:文案与片段来自 wake-core,与 `wake-mcp setup`
+    /// 同源;GUI 只展示与复制,不代写别家配置
     snippets: Vec<wake_core::mcp::SetupSnippet>,
 }
 
 impl ConnectInfo {
     fn probe() -> Self {
-        let bin = wake_core::mcp::sibling_binary();
-        let bin_exists = bin.as_ref().is_some_and(|p| p.is_file());
-        let bin_path = bin
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| "wake-mcp".to_string());
+        let mcp = BinaryFacts::probe("wake-mcp");
+        let cli = BinaryFacts::probe("wake-cli");
         Self {
-            bin_display: tilde_path(&bin_path).into(),
-            bin_exists,
-            snippets: wake_core::mcp::setup_snippets(std::path::Path::new(&bin_path)),
-            bin_path,
+            snippets: wake_core::mcp::setup_snippets(std::path::Path::new(&mcp.path)),
+            cli_path_command: wake_core::cli::path_command(std::path::Path::new(&cli.path)),
+            mcp,
+            cli,
         }
     }
 }
@@ -674,7 +699,7 @@ impl SettingsView {
                 let shown = self.connect_shown.contains(&ix);
                 let copy = self.copy_button(
                     format!("connect-copy-{ix}").into(),
-                    s.copy_label,
+                    t(s.copy_label),
                     s.text.clone(),
                     cx,
                 );
@@ -704,11 +729,6 @@ impl SettingsView {
                         }
                         cx.notify();
                     }));
-                let lines: Vec<AnyElement> = s
-                    .text
-                    .lines()
-                    .map(|l| div().child(l.to_string()).into_any_element())
-                    .collect();
                 v_flex()
                     .w_full()
                     .when(ix + 1 < count, |this| {
@@ -738,13 +758,18 @@ impl SettingsView {
                                         div()
                                             .text_size(FONT_CAPTION)
                                             .text_color(theme.muted_foreground)
-                                            .child(s.hint),
+                                            .child(t(s.hint)),
                                     ),
                             )
                             .child(toggle)
                             .child(copy),
                     )
                     .when(shown, |this| {
+                        // 默认收起,所以行元素只在展开时才建
+                        let lines = s
+                            .text
+                            .lines()
+                            .map(|l| div().child(l.to_string()).into_any_element());
                         this.child(
                             // 左缘对齐到文字轴:行内边距 + 图标 17 + 间距 12
                             v_flex()
@@ -765,29 +790,69 @@ impl SettingsView {
             })
             .collect();
 
-        let copy_path = self.copy_button(
-            "connect-copy-path".into(),
-            t("Copy path"),
-            info.bin_path.clone(),
+        // 信息卡里那条 mono 副信息;exists=false 再补一句红字
+        let mono_details = |display: SharedString, exists: bool| {
+            let mut out = vec![div()
+                .w_full()
+                .truncate()
+                .text_size(FONT_CAPTION)
+                .font_family(mono.clone())
+                .text_color(theme.muted_foreground)
+                .child(display)
+                .into_any_element()];
+            if !exists {
+                out.push(
+                    div()
+                        .text_size(FONT_CAPTION)
+                        .text_color(theme.danger)
+                        .child(t("Not found next to the Wake app — reinstall Wake"))
+                        .into_any_element(),
+                );
+            }
+            out
+        };
+        // wake-mcp 与 wake-cli 的卡完全同构,只差名字、路径与按钮 id
+        let binary_card = |primary: &'static str,
+                           id: &'static str,
+                           f: &BinaryFacts,
+                           extra: Option<AnyElement>| {
+            settings_info_card(
+                primary,
+                mono_details(f.display.clone(), f.exists),
+                // Copy path 恒在最右,两张卡的同名动作才对得齐;附加动作放它左边
+                h_flex()
+                    .flex_shrink_0()
+                    .gap(SPACE_SM)
+                    .items_center()
+                    .children(extra)
+                    .child(self.copy_button(id.into(), t("Copy path"), f.path.clone(), cx))
+                    .into_any_element(),
+                px(84.),
+                cx,
+            )
+        };
+        let copy_cli_command = info.cli_path_command.clone().map(|cmd| {
+            self.copy_button(
+                "connect-copy-cli-command".into(),
+                t("Copy command"),
+                cmd,
+                cx,
+            )
+            .into_any_element()
+        });
+        let skill_card = settings_info_card(
+            t("Wake skill"),
+            mono_details(wake_core::cli::SKILL_INSTALL.into(), true),
+            self.copy_button(
+                "connect-copy-skill".into(),
+                t("Copy command"),
+                wake_core::cli::SKILL_INSTALL.to_string(),
+                cx,
+            )
+            .into_any_element(),
+            px(84.),
             cx,
         );
-        let mut details = vec![div()
-            .w_full()
-            .truncate()
-            .text_size(FONT_CAPTION)
-            .font_family(mono.clone())
-            .text_color(theme.muted_foreground)
-            .child(info.bin_display.clone())
-            .into_any_element()];
-        if !info.bin_exists {
-            details.push(
-                div()
-                    .text_size(FONT_CAPTION)
-                    .text_color(theme.danger)
-                    .child(t("Not found next to the Wake app — reinstall Wake, or build it with `cargo build -p wake-core --bin wake-mcp`"))
-                    .into_any_element(),
-            );
-        }
 
         let section = |label: &'static str| {
             div()
@@ -797,14 +862,26 @@ impl SettingsView {
                 .text_color(theme.foreground)
                 .child(label)
         };
-        let guide = div()
-            .id("connect-setup-guide")
-            .cursor_pointer()
-            .flex_shrink_0()
-            .text_size(FONT_CAPTION)
-            .text_color(theme.primary)
-            .on_click(|_, _, cx| cx.open_url(CONNECT_GUIDE_URL))
-            .child(t("Setup guide"));
+        // 区块标题右侧的文档链接:MCP 面与命令行面各链自己那份,页尾只放一条
+        // 会让读 CLI 那半页的人点进 MCP 的参考里。设置窗里不放文档,所以这页
+        // 只有状态、动作与这两个去处,没有解释性的散文(用户 2026-09-11 定)
+        let titled = |label: &'static str, guide: Option<(&'static str, &'static str)>| {
+            h_flex()
+                .flex_shrink_0()
+                .gap(SPACE_SM)
+                .items_center()
+                .child(section(label).flex_1())
+                .children(guide.map(|(id, url)| {
+                    div()
+                        .id(id)
+                        .cursor_pointer()
+                        .flex_shrink_0()
+                        .text_size(FONT_CAPTION)
+                        .text_color(theme.primary)
+                        .on_click(move |_, _, cx| cx.open_url(url))
+                        .child(t("Setup guide"))
+                }))
+        };
 
         v_flex()
             .flex_1()
@@ -825,15 +902,22 @@ impl SettingsView {
                     .px(SPACE_XXL)
                     .pb(SPACE_XXL)
                     .gap(SPACE_SM)
-                    .child(section(t("MCP server")))
-                    .child(settings_info_card(
-                        "wake-mcp",
-                        details,
-                        copy_path.into_any_element(),
-                        px(84.),
-                        cx,
+                    // 四个区块同一种写法,有没有文档链接写在参数里,不靠两种拼法
+                    // 区分。规则一句话:**每个面的第一个区块挂自己的文档**——
+                    // MCP 面 = MCP server + MCP clients,命令行面 = Command line
+                    // + Skill,所以链接落在第一、第三块上。第五个区块该不该有
+                    // 链接,照这条判就行,不用再拍脑袋
+                    .child(titled(
+                        t("MCP server"),
+                        Some(("connect-setup-guide", CONNECT_GUIDE_URL)),
                     ))
-                    .child(section(t("Agents")).pt(SPACE_LG))
+                    .child(binary_card(
+                        "wake-mcp",
+                        "connect-copy-path",
+                        &info.mcp,
+                        None,
+                    ))
+                    .child(titled(t("MCP clients"), None).pt(SPACE_LG))
                     .child(
                         v_flex()
                             .w_full()
@@ -846,21 +930,20 @@ impl SettingsView {
                             .children(agent_rows),
                     )
                     .child(
-                        h_flex()
-                            .flex_shrink_0()
-                            .pt(SPACE_SM)
-                            .gap(SPACE_SM)
-                            .items_center()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(FONT_CAPTION)
-                                    .text_color(theme.muted_foreground)
-                                    .child(t("Agents get four read-only tools: search, recent sessions, transcripts, projects.")),
-                            )
-                            .child(guide),
-                    ),
+                        titled(
+                            t("Command line"),
+                            Some(("connect-cli-setup-guide", CONNECT_CLI_GUIDE_URL)),
+                        )
+                        .pt(SPACE_LG),
+                    )
+                    .child(binary_card(
+                        "wake-cli",
+                        "connect-copy-cli-path",
+                        &info.cli,
+                        copy_cli_command,
+                    ))
+                    .child(titled(t("Skill"), None).pt(SPACE_LG))
+                    .child(skill_card),
             )
             .into_any_element()
     }

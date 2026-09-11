@@ -250,6 +250,10 @@ wake-mcp --version
 - Wake's read-only rules apply: other agents' directories and databases are opened read-only and credential files are never read.
 - Because an agent's own session is also indexed by Wake, a `wake_search` call it makes today (the tool name and query) will show up in tomorrow's search results for the same term. Tool outputs are not indexed, so the results themselves do not.
 
+## See also
+
+[docs/cli.md](cli.md) — `wake-cli`, the same index from a shell, for agents that run commands rather than call tools. It prints the identical text.
+
 ## Troubleshooting
 
 - **The client reports the server failed to start.** Run the binary in a terminal: `no Wake index at … — launch Wake once to build it` means Wake has never run on this machine (or `--db` points to the wrong place). `… is empty or from an older version` means the index predates this Wake version; launching Wake once upgrades it.

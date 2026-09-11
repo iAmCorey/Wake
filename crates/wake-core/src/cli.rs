@@ -638,8 +638,20 @@ whether an error has been seen before — git history does not hold that.
 Everything is read-only.";
 
 /// 一行装好 skill。`owner/repo` 形式由 vercel-labs 的 skills CLI 认,仓库里
-/// 有 `skills/` 目录即可被发现
-const SKILL_INSTALL: &str = "npx skills add iAmCorey/Wake";
+/// 有 `skills/` 目录即可被发现。Settings → Connect 的 Skill 卡展示的就是它,
+/// 与 `wake-cli setup` 同一个来源
+pub const SKILL_INSTALL: &str = "npx skills add iAmCorey/Wake";
+
+/// 把 CLI 放进 PATH 的那一条**可粘命令**,给 GUI 的 Copy 按钮用。与
+/// `wake-cli setup` 打印的是同一个来源。返回 None 的两种情况都不该给按钮:
+/// 已经装在 `…/bin` 里(deb / tar)、以及 Windows——那边 path_hint 给的是
+/// "把这个目录加进 PATH" 的说明,不是能粘进终端跑的东西
+pub fn path_command(cli_bin: &Path) -> Option<String> {
+    if cfg!(target_os = "windows") {
+        return None;
+    }
+    path_hint(cli_bin)
+}
 
 /// `wake-cli setup` 要说的事实(由 bin 查好传进来,函数本身仍是纯的)
 pub struct SetupFacts<'a> {
@@ -1063,6 +1075,23 @@ mod tests {
         });
         assert!(!t.contains("claude mcp add"), "没有 wake-mcp 就不该给 MCP 片段");
         assert!(t.trim_end().ends_with("Note: no Wake index at /tmp/wake.db"));
+    }
+
+    #[test]
+    fn path_command_is_pasteable_or_absent() {
+        let bundled = PathBuf::from("/Apps/Wake.app/Contents/MacOS/wake-cli");
+        if cfg!(target_os = "windows") {
+            // Windows 的 path_hint 是散文,绝不能进剪贴板
+            assert_eq!(path_command(&bundled), None);
+        } else {
+            let c = path_command(&bundled).expect("bundle 里要给命令");
+            assert!(c.contains("wake-cli"), "{c}");
+            assert_eq!(c.lines().count(), 1, "要能一行粘进终端: {c}");
+        }
+        // 已经在 …/bin 里就不必说了
+        assert_eq!(path_command(Path::new("/usr/bin/wake-cli")), None);
+        // current_exe 失败时的裸名兜底,没有目录可言
+        assert_eq!(path_command(Path::new("wake-cli")), None);
     }
 
     #[test]

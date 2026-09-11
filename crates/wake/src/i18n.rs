@@ -591,7 +591,7 @@ mod tests {
         ];
         for (tag, _, text) in BUNDLED {
             for key in parse(text).into_keys() {
-                if key == NAME_KEY || assembled_elsewhere(&key) {
+                if key == NAME_KEY || assembled_elsewhere(&key) || from_wake_core(&key) {
                     continue;
                 }
                 // 源码里是字面量形式,反斜杠与引号都带着转义
@@ -602,6 +602,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Settings → Connect 把 wake-core 的接入片段在显示边界上过一道 `t()`
+    /// (`t(s.hint)` / `t(s.copy_label)`),所以这些 key 的英文原文不在 UI 源码里,
+    /// 而在 `setup_snippets` 里。**不要把它们塞进 `assembled_elsewhere`**——
+    /// wake-core 不参与 i18n,可以随时改这些字面量,恰恰最需要棘轮看着;
+    /// 这里直接问那个 API,改了名就在这里红,而不是变成一条静默的死译文
+    fn from_wake_core(key: &str) -> bool {
+        wake_core::mcp::setup_snippets(std::path::Path::new("x"))
+            .iter()
+            .any(|s| s.hint == key || s.copy_label == key)
     }
 
     /// 文本扫描找不到的 key:ui.rs 由 `concat!` 拼出整句(平台名词只写一次),

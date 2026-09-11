@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- New: Settings → Connect now covers all three ways in — the MCP server, the `wake-cli` command line and the Wake skill each get their own block, with the path to copy, the command that puts `wake-cli` on your PATH, and the one-liner that installs the skill; the MCP and command-line blocks link straight to their reference docs
+
 ## [0.6.0] — 2026-09-11
 
 - New: `wake-cli` — search your session history, list what you worked on in a project and read a transcript straight from the terminal, so any agent that can run a shell command gets the same answers a connected MCP client does; run `wake-cli setup` for the path and how to point an agent at it (see docs/cli.md)

@@ -17,7 +17,7 @@ pub mod tools;
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 
@@ -230,21 +230,17 @@ pub fn open_index(db: &Path) -> Result<(Arc<Store>, Vec<Box<dyn AgentAdapter>>),
     Ok((store, adapters))
 }
 
-/// 与本进程同目录的 wake-mcp 可执行文件(GUI 的 Settings → Connect 展示用;
-/// 打包时 bin 与 Wake 主程序并排:macOS 在 Contents/MacOS,Linux/Windows 同目录)。
-/// current_exe 进程内不变,算一次缓存住——调用方可能在 render 里问
-pub fn sibling_binary() -> Option<PathBuf> {
-    static BIN: OnceLock<Option<PathBuf>> = OnceLock::new();
-    BIN.get_or_init(|| {
-        let exe = std::env::current_exe().ok()?;
-        let name = if cfg!(target_os = "windows") {
-            "wake-mcp.exe"
-        } else {
-            "wake-mcp"
-        };
-        Some(exe.parent()?.join(name))
-    })
-    .clone()
+/// 与本进程同目录的某个辅助可执行文件(Windows 补 .exe)。打包时辅助 bin 与
+/// Wake 主程序并排:macOS 在 Contents/MacOS,Linux/Windows 同目录。
+/// current_exe 是系统调用,**别在 render 里问**——GUI 一律开窗时算一次
+pub fn sibling_named(stem: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let name = if cfg!(target_os = "windows") {
+        format!("{stem}.exe")
+    } else {
+        stem.to_string()
+    };
+    Some(exe.parent()?.join(name))
 }
 
 /// 一段可复制的接入配置
