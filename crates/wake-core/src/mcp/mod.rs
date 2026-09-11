@@ -196,13 +196,7 @@ impl McpServer {
                 "`arguments` must be an object".to_string(),
             ));
         }
-        let ctx = tools::ToolContext {
-            store: &self.store,
-            adapters: &self.adapters,
-            now_ms: crate::db::now_ms(),
-            cache: &self.transcripts,
-        };
-        match tools::call(&ctx, name, args) {
+        match tools::invoke(&self.store, &self.adapters, &self.transcripts, name, args) {
             Ok(text) => Ok(tool_result(text, false)),
             // 参数形状错(含未知工具名)是协议错误;执行失败(坏 key、解析失败)
             // 是给 LLM 看的结果
@@ -225,6 +219,16 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
 }
 
 // ---------------------------------------------------------------- 安装辅助
+
+/// 只读打开索引,并按库里的 location / remote host 配置建 roster(不变量
+/// 8⑥:否则自定义根与远程缓存里的会话找不到能读它的 adapter)。旁路进程
+/// (wake-mcp / wake-cli)共用这一条——**绝不 open_or_rebuild**,那会把 GUI
+/// 正在写的库挪走重建
+pub fn open_index(db: &Path) -> Result<(Arc<Store>, Vec<Box<dyn AgentAdapter>>), String> {
+    let store = Arc::new(Store::open_read_only(db).map_err(|e| format!("{e:#}"))?);
+    let adapters = crate::adapters::create_adapters_for(&store);
+    Ok((store, adapters))
+}
 
 /// 与本进程同目录的 wake-mcp 可执行文件(GUI 的 Settings → Connect 展示用;
 /// 打包时 bin 与 Wake 主程序并排:macOS 在 Contents/MacOS,Linux/Windows 同目录)。

@@ -50,3 +50,8 @@ path = "src/bin/scan.rs"
 [[bin]]
 name = "wake-mcp"
 path = "src/bin/wake_mcp.rs"
+
+# 会话查询 CLI(只读),随 Wake 一起打包、与主程序并排;解析层见 src/cli.rs
+[[bin]]
+name = "wake-cli"
+path = "src/bin/wake_cli.rs"

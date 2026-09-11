@@ -116,7 +116,7 @@ Search and lists come from Wake's index. Wake keeps the index current while it i
 Index covers activity up to 2026-09-08 09:41:37 (local time); Wake keeps it fresh while it is running.
 ```
 
-so an agent can tell how recent the data is. Reading a transcript with `wake_get_session` parses the agent's own files live, so it is always current regardless of the index.
+so an agent can tell how recent the data is. Reading a transcript with `wake_get_session` parses the agent's own files rather than the index, so it does not depend on when Wake last scanned. Sessions mirrored from a remote host are read from their local mirror, so they are current as of the last successful sync.
 
 ## Tools
 

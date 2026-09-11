@@ -2,7 +2,7 @@ use crate::models::*;
 use anyhow::{Context as _, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub type LocationOverrides = (
@@ -1875,6 +1875,12 @@ fn compute_streaks(daily: &[(chrono::NaiveDate, i64)], today: chrono::NaiveDate)
 
 pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+/// `--db` 给了就用它,否则取 GUI 那份。调用点一律**惰性**求值:
+/// `default_db_path` 首次调用会把旧 vibex 库拷过来,`--help` 不该触发它
+pub fn path_or_default(db: Option<&Path>) -> PathBuf {
+    db.map(Path::to_path_buf).unwrap_or_else(default_db_path)
 }
 
 /// 索引库路径:macOS 为 ~/Library/Application Support/wake,Linux 为

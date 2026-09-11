@@ -10,9 +10,7 @@
 use std::io::{self, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
 
-use wake_core::adapters::create_adapters_for;
 use wake_core::db::Store;
 use wake_core::mcp::{self, McpServer};
 
@@ -60,15 +58,11 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn db_path(db: &Option<PathBuf>) -> PathBuf {
-    db.clone().unwrap_or_else(wake_core::db::default_db_path)
+    wake_core::db::path_or_default(db.as_deref())
 }
 
 fn open(db: &Option<PathBuf>) -> Result<McpServer, String> {
-    let store = Store::open_read_only(&db_path(db)).map_err(|e| format!("{e:#}"))?;
-    let store = Arc::new(store);
-    // 必须带上库里的 location / remote host 配置(不变量 8⑥),否则自定义根
-    // 与远程缓存里的会话找不到能读它的 adapter
-    let adapters = create_adapters_for(&store);
+    let (store, adapters) = mcp::open_index(&db_path(db))?;
     Ok(McpServer::new(store, adapters))
 }
 

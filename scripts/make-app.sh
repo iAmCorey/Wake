@@ -36,13 +36,14 @@ iconutil -c icns "$ICONSET" -o dist/wake.icns
 # 2. release 构建。Universal 模式在同一 macOS SDK 上交叉编译两个 Rust
 # target，再用 lipo 合并；目标标准库由调用方预先通过 rustup 安装。
 # 发行二进制清单:主程序 Wake + 并排的辅助可执行文件(只读 MCP server
-# wake-mcp,Settings → Connect 按同目录找它)。两者 cargo 包不同,构建各写一行;
-# lipo / 拷贝 / 签名 / 架构核对按清单循环,再加一个辅助 bin 只改 SIDE_BINS
-SIDE_BINS=(wake-mcp)
+# wake-mcp,Settings → Connect 按同目录找它;会话查询 CLI wake-cli)。辅助 bin
+# 与主程序 cargo 包不同,构建各写一行;lipo / 拷贝 / 签名 / 架构核对、以及
+# cargo 的 --bin 清单全部由 SIDE_BINS 派生,再加一个辅助 bin 只改这一个数组
+SIDE_BINS=(wake-mcp wake-cli)
 BINS=(Wake "${SIDE_BINS[@]}")
 build_bins() {
   cargo build --release -p wake "$@"
-  cargo build --release -p wake-core --bin wake-mcp "$@"
+  cargo build --release -p wake-core "${SIDE_BINS[@]/#/--bin=}" "$@"
 }
 if $UNIVERSAL; then
   ARM_TARGET=aarch64-apple-darwin
@@ -96,7 +97,7 @@ PLIST
 
 # 4. ad-hoc 签名(本机运行足够;分发需开发者证书 + notarize)。--deep 只递归
 # 标准嵌套位置(Frameworks/PlugIns/XPCServices…),MacOS/ 里并排的辅助可执行
-# 文件不算,先单独签它们,否则 Gatekeeper 会拦 MCP 客户端起的 wake-mcp
+# 文件不算,先单独签它们,否则 Gatekeeper 会拦下别人起的 wake-mcp / wake-cli
 for bin in "${SIDE_BINS[@]}"; do
   codesign --force -s - "$APP/Contents/MacOS/$bin"
 done

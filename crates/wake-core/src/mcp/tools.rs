@@ -17,11 +17,11 @@ use crate::services::context::{parse_since, resolve_project_paths};
 use crate::services::exporter::{fmt_time, render_compact, CompactOptions};
 use crate::text::{one_line, plural};
 
-pub struct ToolContext<'a> {
-    pub store: &'a Store,
-    pub adapters: &'a [Box<dyn AgentAdapter>],
-    pub now_ms: i64,
-    pub cache: &'a TranscriptCache,
+struct ToolContext<'a> {
+    store: &'a Store,
+    adapters: &'a [Box<dyn AgentAdapter>],
+    now_ms: i64,
+    cache: &'a TranscriptCache,
 }
 
 /// 单槽转录缓存:分页读同一会话时不必每页整文件重解析(默认 20k 字符一页,
@@ -184,7 +184,7 @@ pub fn definitions() -> Vec<Value> {
     ]
 }
 
-pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> ToolResult {
+fn call(ctx: &ToolContext, name: &str, args: &Value) -> ToolResult {
     match name {
         SEARCH => search(ctx, args),
         LIST_SESSIONS => list_sessions(ctx, args),
@@ -192,6 +192,25 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> ToolResult {
         LIST_PROJECTS => list_projects(ctx, args),
         other => Err(ToolError::InvalidParams(format!("Unknown tool: {other}"))),
     }
+}
+
+/// 用当前时刻构造 ToolContext 并跑一次工具。**MCP server 与 wake-cli 共用这
+/// 一条**——now_ms 是两条路唯一可能各算各的东西(它只喂 parse_since),只留一
+/// 个构造点就没有漂移的余地
+pub fn invoke(
+    store: &Store,
+    adapters: &[Box<dyn AgentAdapter>],
+    cache: &TranscriptCache,
+    name: &str,
+    args: &Value,
+) -> ToolResult {
+    let ctx = ToolContext {
+        store,
+        adapters,
+        now_ms: crate::db::now_ms(),
+        cache,
+    };
+    call(&ctx, name, args)
 }
 
 // ---------------------------------------------------------------- 参数读取
