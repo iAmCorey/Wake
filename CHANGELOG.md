@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.6.1] — 2026-09-11
 
 - New: Settings → Connect now covers all three ways in — the MCP server, the `wake-cli` command line and the Wake skill each get their own block, with the path to copy, the command that puts `wake-cli` on your PATH, and the one-liner that installs the skill; the MCP and command-line blocks link straight to their reference docs
 
