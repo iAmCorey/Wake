@@ -116,7 +116,7 @@ Search and lists come from Wake's index. Wake keeps the index current while it i
 Index covers activity up to 2026-09-08 09:41:37 (local time); Wake keeps it fresh while it is running.
 ```
 
-so an agent can tell how recent the data is. Reading a transcript with `wake_get_session` parses the agent's own files rather than the index, so it does not depend on when Wake last scanned. Sessions mirrored from a remote host are read from their local mirror, so they are current as of the last successful sync.
+so an agent can tell how recent the data is. Two replies carry no freshness line: an unrecognised `project`, which returns early with the list of known projects, and an empty index, which says so instead. Reading a transcript with `wake_get_session` parses the agent's own files rather than the index, so it does not depend on when Wake last scanned. Sessions mirrored from a remote host are read from their local mirror, so they are current as of the last successful sync.
 
 ## Tools
 
@@ -247,7 +247,7 @@ wake-mcp --version
 
 - Everything runs on this machine. The server makes no network requests.
 - Agents see the same session files Wake indexes — local agents' data directories plus the local mirrors of any remote hosts you configured in Wake. Nothing leaves the machine.
-- Wake's read-only rules apply: other agents' directories and databases are opened read-only and credential files are never read.
+- Wake's read-only rules apply: other agents' directories and databases are opened read-only and credential files are never read. The server writes nothing to the index; the one thing it can write is Wake's own data directory, which resolving the default index path creates and, on a first run after the old `vibex` builds, migrates the old database into (`--db` skips that).
 - Because an agent's own session is also indexed by Wake, a `wake_search` call it makes today (the tool name and query) will show up in tomorrow's search results for the same term. Tool outputs are not indexed, so the results themselves do not.
 
 ## See also

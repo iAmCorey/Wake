@@ -79,10 +79,14 @@ with `--from <that number>` to continue.
 
 - Exit code `0` means it ran — **including "no matches" and "no such project"**. Do not
   treat an empty result as a failure; report that nothing was found.
-- Exit `1` means a session could not be read; exit `2` means the command line was wrong
-  or there is no index yet. Both print an explanation to stderr.
-- Every listing ends with the index freshness (`Index covers activity up to …`). If it
-  looks stale, Wake has not been running. `show` does not depend on that line — it reads
+- Exit `1` means it ran and failed — an unknown or ambiguous key, or a transcript that
+  would not parse. Exit `2` means the command line was wrong, or there is no readable index
+  yet. Both print an explanation to stderr.
+- Listings usually end with the index freshness (`Index covers activity up to …`) — the
+  newest activity Wake has indexed, not the current time. A stale-looking value usually means
+  Wake is not running, but some agents (Copilot, OpenCode, Antigravity, Hermes, OpenClaw) are
+  stored in SQLite and only refresh when Wake launches, so say what the line shows rather than
+  concluding the user did nothing. `show` does not depend on that line — it reads
   the agent's own file rather than the index. The exception is a session from a remote
   host (`<agent>:<host>:<id>`): that file is a local mirror, current as of Wake's last
   successful sync. Say so rather than reporting it as the other machine's latest state.

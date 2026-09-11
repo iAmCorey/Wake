@@ -2,7 +2,8 @@
 
 ## [0.6.1] — 2026-09-11
 
-- New: Settings → Connect now covers all three ways in — the MCP server, the `wake-cli` command line and the Wake skill each get their own block, with the path to copy, the command that puts `wake-cli` on your PATH, and the one-liner that installs the skill; the MCP and command-line blocks link straight to their reference docs
+- New: Settings → Connect now covers all three ways in — the MCP server, the `wake-cli` command line and the Wake skill each get their own block, with the path to copy, the command that puts `wake-cli` on your PATH (where one applies — not on Windows, and not when an installer already put it there), and the one-liner that installs the skill; the MCP and command-line blocks link straight to their reference docs
+- Fix: Settings → Connect is fully translated — the per-client hints and the Copy buttons were showing English next to Chinese headings, and a Copy button flipped back to English after confirming
 
 ## [0.6.0] — 2026-09-11
 

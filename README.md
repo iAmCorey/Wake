@@ -23,7 +23,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and a dozen othe
 - **Insights** — a stats page for your whole library: GitHub-style activity heatmap with streaks, hour / weekday / month breakdowns, and Agents / Projects / Models leaderboards switchable between sessions, tokens, and prompts
 - **Remote hosts** — mirror the sessions on your other machines over SSH (Settings → Remote hosts); they show up next to local ones with an `@host` badge, searchable like everything else, and resume through a copied `ssh -t` command
 - **Connect your agents (MCP)** — a bundled read-only MCP server, `wake-mcp`, lets Claude Code, Codex, Cursor or any MCP client search your whole history, list recent sessions per project and read transcripts page by page, so a new agent can pick up where another one left off; Settings → Connect has copy-paste setup snippets
-- **Command line** — `wake-cli` gives the same four answers to anything that can run a shell command: `wake-cli sessions --project "$PWD"`, `wake-cli search "…"`, `wake-cli show <key>`; its output is byte-identical to what an MCP client sees; `npx skills add iAmCorey/Wake` installs a skill so agents reach for it on their own
+- **Command line** — `wake-cli` gives the same four answers to anything that can run a shell command: `wake-cli sessions --project "$PWD"`, `wake-cli search "…"`, `wake-cli show <key>`; it prints the same text an MCP client sees; `npx skills add iAmCorey/Wake` installs a skill so agents reach for it on their own
 
 ![Full-text search across every agent's sessions](imgs/screenshot-2.webp)
 
@@ -94,7 +94,7 @@ command = "/Applications/Wake.app/Contents/MacOS/wake-mcp"
 
 A few things worth knowing:
 
-- Everything is read-only: the server opens Wake's index without write access and never scans or modifies anything; there are no delete or star tools
+- Everything is read-only: the server opens Wake's index without write access and never scans or rebuilds it; there are no delete or star tools (the one thing it can write is Wake's own data directory, which resolving the default index path creates)
 - Search and lists come from Wake's index, so keep Wake running for fresh results — every reply says how recent the index is. Reading a transcript parses the agent's files rather than the index, so it does not depend on the last scan (remote-host sessions are read from their local mirror)
 - Agents see the same session files Wake indexes, on this machine only (remote-host mirrors included); nothing leaves the machine
 - `wake-mcp call wake_search '{"query":"useEffect("}'` runs a single tool from the terminal, handy for checking what an agent would see
@@ -112,7 +112,7 @@ wake-cli show 'claude-code:1b2c3d4e-…'            # read that transcript
 wake-cli setup                                    # path, PATH setup, and a block to paste into CLAUDE.md
 ```
 
-It prints exactly what the MCP tools return — the two are asserted byte for byte — so an agent driving it through a shell sees what a connected one does. Full reference in [docs/cli.md](docs/cli.md).
+It prints what the MCP tools return, asserted byte for byte in the test suite apart from a trailing newline the CLI adds, so an agent driving it through a shell sees what a connected one does. Full reference in [docs/cli.md](docs/cli.md).
 
 To make an agent reach for it without being told, install the bundled skill with `npx skills add iAmCorey/Wake` (or copy `skills/wake/` into `~/.claude/skills/wake/`).
 
@@ -133,7 +133,7 @@ welcome. See [crates/wake/locales/README.md](crates/wake/locales/README.md).
 - Credential files (`auth.json` and friends) are never read
 - Remote hosts are mirrored read-only with `rsync` over your existing SSH setup: only session data and its sidecar files come across (never credentials), nothing on the remote machine is ever written, and the mirror lives inside Wake's own data directory (`remotes/<host>/`), so removing the host removes it
 - No background network requests — the only network actions are a user-initiated update check against Wake's public GitHub Release metadata and, if you configure remote hosts, SSH/rsync to those hosts on launch, refresh, and Sync now; session data is never sent anywhere else
-- Wake's own index lives at `~/Library/Application Support/wake/wake.db` (Linux: `~/.local/share/wake`, Windows: `%LOCALAPPDATA%\wake`) and can be rebuilt from scratch at any time (stars/pins live in a separate table and survive rebuilds). Two small preference files (`appearance`, `window.json`) sit beside it on macOS, under `~/.config/wake` on Linux and `%APPDATA%\wake` on Windows; Open In and export-folder choices live in the index database's `prefs` table
+- Wake's own index lives at `~/Library/Application Support/wake/wake.db` (Linux: `~/.local/share/wake`, Windows: `%LOCALAPPDATA%\wake`) and can be rebuilt from scratch at any time (stars/pins live in a separate table and survive rebuilds). Three small preference files (`appearance`, `language`, `window.json`) sit beside it on macOS, under `~/.config/wake` on Linux and `%APPDATA%\wake` on Windows; Open In and export-folder choices live in the index database's `prefs` table
 
 ## Performance
 
@@ -213,7 +213,7 @@ crates/
 │   ├── watcher.rs   #   notify-based file watching → per-file incremental updates
 │   ├── db.rs        #   rusqlite (WAL): sessions / messages / messages_fts / user_data / tombstones (+ location, remote_hosts & schema meta tables)
 │   ├── mcp/         #   wake-mcp: read-only MCP server over stdio (hand-written JSON-RPC, four tools)
-│   ├── cli.rs       #   wake-cli: argv → the same four tools, output byte-identical to MCP
+│   ├── cli.rs       #   wake-cli: argv → the same four tools, same text out as MCP
 │   └── services/    #   terminal resume (per-platform: AppleScript / argv / Win32) / export / trash / agent context helpers
 └── wake             # GPUI app (three-pane workbench + ⌘K / Ctrl+K palette)
 ```

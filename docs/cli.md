@@ -2,7 +2,7 @@
 
 `wake-cli` is a small, read-only command-line tool that ships with Wake. It answers the same three questions the [MCP server](mcp.md) answers — what did I discuss, what did I work on here, what happened in that session — from a terminal, a script, or any agent that can run a shell command.
 
-It prints exactly what an MCP client is given: the two surfaces call the same code and their output is asserted byte for byte in the test suite. So a `wake-cli show …` transcript and a `wake_get_session` reply are the same text, and this page and [docs/mcp.md](mcp.md) describe one format, not two.
+It prints what an MCP client is given: the two surfaces call the same code, and the test suite asserts their output byte for byte apart from a trailing newline the CLI adds (see [Output](#output)). So a `wake-cli show …` transcript and a `wake_get_session` reply are the same text, and this page and [docs/mcp.md](mcp.md) describe one format, not two.
 
 Nothing here can modify a session. The CLI opens Wake's index without write access, never scans or rebuilds it, and never touches the agents' own files except to read a transcript.
 
@@ -75,12 +75,14 @@ One session's transcript, parsed live from the agent's own files, as compact Mar
 
 | Option | Value | Notes |
 |---|---|---|
-| `--from` | SEQ | start at this message; a `wake://…#N` reference sets it too |
-| `--messages` | N | messages per page, default 60, max 200 |
-| `--chars` | N | character budget per page, default 20000, max 100000 |
-| `--message-chars` | N | truncate each message, default 4000, max 50000 |
+| `--from` | SEQ | start at this message (min 0); a `wake://…#N` reference sets it too, and an explicit `--from` wins over the reference's seq |
+| `--messages` | N | messages per page, default 60, range 1–200 |
+| `--chars` | N | character budget per page, default 20000, range 200–100000 |
+| `--message-chars` | N | truncate each message, default 4000, range 100–50000 |
 | `--tools` | — | include tool inputs and outputs (verbose) |
 | `--thinking` | — | include the assistant's thinking where the agent recorded it |
+
+`show` also accepts a bare native id (the one the agent's own `--resume` wants) and falls back to looking it up. When the same id exists on more than one host it lists the candidates instead of guessing.
 
 Long transcripts are paginated: when the reply ends with a `from_seq` hint, run it again with `--from <that number>`.
 
@@ -96,7 +98,7 @@ Working directories that have session history, most recently active first, with 
 
 ### `setup`
 
-Prints this binary's path, the index path, how to put it on your `PATH`, a paste-able block that tells an agent when and how to use it, and — when `wake-mcp` sits next to it — the one-line MCP setup for Claude Code. It writes nothing and installs nothing — Wake never edits another tool's config files.
+Prints this binary's path, the index path, how to put it on your `PATH`, a paste-able block that tells an agent when and how to use it, and — when `wake-mcp` sits next to it — the one-line MCP setup for Claude Code. It installs nothing and never edits another tool's config files. The one thing it can write is Wake's own: resolving the default index path creates Wake's data directory and migrates an index left by the old `vibex` builds (`--db` skips that).
 
 To make this automatic instead of per-project, install the skill (next section).
 
@@ -143,7 +145,7 @@ The native id is the one the agent's own `--resume` flag expects.
 
 The text is Markdown, written for an agent to read, and identical to what the MCP tools return. One consequence is visible: the closing hint in a listing names the MCP tool (`wake_get_session`) rather than `wake-cli show`, because the same string serves both surfaces. Read it as "the command that reads a session".
 
-`search`, `sessions` and `projects` end with a line saying how fresh the index is (`Index covers activity up to …`); keep Wake running and it stays current. `show` has no such line because it reads the agent's file rather than the index. For a session mirrored from a remote host that file is the local mirror, current as of the last successful sync — Settings → Remote hosts shows whether the last one succeeded.
+`search`, `sessions` and `projects` normally end with a line saying how fresh the index is (`Index covers activity up to …`) — that is the newest activity Wake has indexed, so a stale-looking time usually means Wake has not been running, though agents stored in SQLite (Copilot, OpenCode, Antigravity, Hermes, OpenClaw) only refresh on launch or Refresh either way. Two replies skip the line: an unrecognised `--project`, which returns early with the list of known projects, and an empty index, which says so instead. `show` never has one because it reads the agent's file rather than the index. For a session mirrored from a remote host that file is the local mirror, current as of the last successful sync — Settings → Remote hosts shows whether the last one succeeded.
 
 Exactly one trailing newline is added when the text does not already end with one — nothing else is added or removed. Piping is safe: `wake-cli show <key> --tools | head -3` prints three lines and exits 0.
 
@@ -152,12 +154,12 @@ Exactly one trailing newline is added when the text does not already end with on
 | Code | Meaning |
 |---|---|
 | `0` | it ran — **including** "no matches", "no such project" and "no sessions" |
-| `1` | a session could not be read — unknown key, or a transcript that would not parse |
+| `1` | it ran and failed — unknown or ambiguous key, a transcript that would not parse, a query that errored, or a failed write to stdout |
 | `2` | the command line was wrong, or the index is missing / unreadable / too old |
 
-Empty results are never an error, so `wake-cli search x \|\| fallback` does not fire just because nothing was ever discussed about `x`. Diagnostics always go to stderr, prefixed `wake-cli: `, so `wake-cli show <key> > out.md` cannot capture one.
+Empty results are never an error, so `wake-cli search x || fallback` does not fire just because nothing was ever discussed about `x`. Diagnostics go to stderr, prefixed `wake-cli: `, so `wake-cli show <key> > out.md` cannot capture one. `setup` is the exception in both directions: it always exits `0`, even with no index, and reports a missing one as a `Note:` line on stdout — "not set up yet" is the normal state for someone running it.
 
-Both a mistyped option (`--sinse 7d`) and a value the tools reject (`--since 7dd`) exit `2` — from a user's seat they are the same mistake, and the layer that caught it is not visible. This is a deliberate difference from `wake-mcp call`, which collapses every failure to `1` because its JSON-RPC envelope already carries the classification.
+Both a mistyped option (`--sinse 7d`) and a value the tools reject (`--since 7dd`) exit `2` — from a user's seat they are the same mistake, and the layer that caught it is not visible. This is a deliberate difference from `wake-mcp call`, which exits `1` for anything the tool layer rejects — its JSON-RPC envelope already carries the classification, so the exit code never had to. (`wake-mcp` still uses `2` for its own argv problems: a missing tool name, unparsable JSON, or an index it cannot open.)
 
 ## Privacy and scope
 
