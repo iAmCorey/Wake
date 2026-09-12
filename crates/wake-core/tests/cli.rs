@@ -493,10 +493,33 @@ fn index_builds_one_from_scratch_then_defers() {
         .1;
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("fresh.db");
+    // 主库不在、边车还躺着(主库被手删,或 open_or_rebuild 崩在挪库与删边车
+    // 之间):留下任何一个,新库都会接着读旧日志
+    for suffix in ["-wal", "-shm"] {
+        std::fs::write(format!("{}{suffix}", db.display()), b"stale").unwrap();
+    }
 
     let (stdout, stderr, code) = cli_raw(&["--db", db.to_str().unwrap(), "index"]);
     assert_eq!(code, Some(0), "{stderr}");
     assert!(db.is_file(), "应当真的建出库来");
+    // 扫描落在 <db>.build-<pid>;占位成功后那个名字必须收干净,不然一次运行就
+    // 在用户的索引目录里留下几百 MB
+    let names: Vec<String> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !names.iter().any(|n| n.contains(".build-")),
+        "临时库没收干净:{names:?}"
+    );
+    // 孤儿边车必须被清掉。之后的只读连接会自己再建一个 -shm,所以判据是
+    // "还在不在" 之外那一条:planted 的内容不许活下来
+    for suffix in ["-wal", "-shm"] {
+        let p = format!("{}{suffix}", db.display());
+        if let Ok(bytes) = std::fs::read(&p) {
+            assert_ne!(bytes, b"stale", "{p} 还是那份孤儿日志");
+        }
+    }
     // 这个功能的主张就是这一句:CLI 自己建的索引 == GUI 从同一棵树建的那个
     assert!(
         stdout.starts_with(&format!("Indexed {want} session")),

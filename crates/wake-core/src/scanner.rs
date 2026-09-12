@@ -2,6 +2,7 @@ use crate::adapters::AgentAdapter;
 use crate::db::Store;
 use crate::models::*;
 use anyhow::Result;
+use std::path::Path;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
@@ -60,27 +61,77 @@ impl Drop for ScanFinale<'_> {
 static SCAN_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 从零建一次索引:**只在索引文件不存在时**建,已经有库就原样留给 GUI
-/// (`Ok(None)`)。这是 "重建权只归 GUI 的 `open_or_rebuild`"(db.rs)唯一的
-/// 例外,场景是"装了 Wake 但从没启动过"——此时库根本不存在,没有任何写入方
-/// 可冲突,这就是全部的安全论证。**别据此加 --force**:上面那把 `SCAN_GATE`
-/// 只是**进程级**互斥,对"GUI 正在写这个库"毫无办法。
-/// 放在 scanner 而不是某个 bin 里:这条规矩是扫描侧的,`wake-mcp` 与
-/// `wake-cli` 的只读那一半仍归 `mcp::open_index`
-pub fn build_index(path: &std::path::Path, events: &dyn ScanEvents) -> Result<Option<Arc<Store>>> {
+/// (`Ok(None)`)。这是"重建权只归 GUI 的 `open_or_rebuild`"(db.rs)唯一的
+/// 例外,场景是"装了 Wake 但从没启动过"。
+///
+/// 扫描落在旁边的 `<db>.build-<pid>`,扫完才用 `hard_link` 占位——**先拿到
+/// 名字,再动任何东西**:
+/// ① 中途报错 / panic / 被 agent 超时杀掉,目标路径一个字节都没出现过,下次
+///    还能重试(不然半截索引会被开头那道 exists 当成"已经有了"永久挡住,而
+///    只读查询会把它当正常结果);
+/// ② GUI 在我们扫的这几秒里首次启动并建了库,hard_link 直接 AlreadyExists,
+///    我们丢掉自己那份退让,绝不往对方的库里写、也不碰对方的日志文件;
+/// ③ 用 hard_link 不用 rename:rename 无条件覆盖,给不出"已存在即失败"这条
+///    语义,而它正是这里唯一的仲裁(POSIX 与 Windows 都保证)。
+///
+/// 残留:占位成功到清扫孤儿边车之间还有几十微秒窗口。真要抹平得让 GUI 与
+/// CLI 共用一把跨进程锁——`SCAN_GATE` 自己那段注释就承认它只管进程内,
+/// 同样的理由 **别加 --force**
+pub fn build_index(path: &Path, events: &dyn ScanEvents) -> Result<Option<Arc<Store>>> {
     if path.exists() {
         return Ok(None);
     }
-    // 主库不在、WAL/SHM 还躺着:留下任何一个,新库都会接着读旧日志
-    // (与 `open_or_rebuild` 挪走三件套同一条理由)
+    let staging = Staging::new(path);
+    {
+        let store = Arc::new(Store::open(&staging.0)?);
+        // 不变量 8⑥:按库里的 location 配置建 roster(新库即内置全家)
+        let adapters = crate::adapters::create_adapters_for(&store);
+        run_scan(&adapters, &store, events, true)?;
+    } // 关掉最后一个连接即 checkpoint,-wal/-shm 消失,临时库自成一体
+    match std::fs::hard_link(&staging.0, path) {
+        Ok(()) => {}
+        // 有人抢先了(GUI 首扫 / 另一个 wake-cli index)。他的库归他,退让
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
+        // 个别文件系统不给硬链接:退回 rename,但只在目标确实还空着时
+        Err(_) if !path.exists() => std::fs::rename(&staging.0, path)?,
+        Err(_) => return Ok(None),
+    }
+    // 名字到手了才清孤儿边车:目标刚才还不存在,躺在那儿的 -wal/-shm 只可能
+    // 是孤儿(主库被手删,或 open_or_rebuild 挪库与删边车之间崩过)。留着任何
+    // 一个,新库都会接着读旧日志——与 open_or_rebuild 挪走三件套同一条理由
     for suffix in ["-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
-    // Store::open 会 create_dir_all 父目录并跑迁移,不必在调用方先建一遍
-    let store = Arc::new(Store::open(path)?);
-    // 不变量 8⑥:按库里的 location 配置建 roster(新库即内置全家)
-    let adapters = crate::adapters::create_adapters_for(&store);
-    run_scan(&adapters, &store, events, true)?;
-    Ok(Some(store))
+    Ok(Some(Arc::new(Store::open_read_only(path)?)))
+}
+
+/// 临时库的清场:正常收尾、`?` 提前返回、panic unwind 三条路都要把它连同边车
+/// 删干净,不然一次失败就在用户的索引目录里留下几百 MB。占位成功后这一删只是
+/// 去掉临时那个名字,inode 已经挂在目标名下
+struct Staging(std::path::PathBuf);
+
+impl Staging {
+    fn new(target: &Path) -> Self {
+        let me = Staging(std::path::PathBuf::from(format!(
+            "{}.build-{}",
+            target.display(),
+            std::process::id()
+        )));
+        me.clear(); // pid 会重用:上一次被 SIGKILL 留下的同名残骸先扫掉
+        me
+    }
+
+    fn clear(&self) {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", self.0.display()));
+        }
+    }
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        self.clear();
+    }
 }
 
 /// 全量/增量扫描。quickMeta 先行秒出列表,然后按 mtime 降序逐文件解析。
