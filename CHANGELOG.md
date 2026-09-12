@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.6.3] — 2026-09-13
 
 - New: `wake-cli index` builds Wake's index from the terminal, so an agent that finds Wake installed but never launched can get itself working instead of stopping to ask you — it only ever builds a missing index, never touches one the app is already keeping current
 
