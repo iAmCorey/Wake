@@ -5570,6 +5570,7 @@ impl Workbench {
                         ix,
                         m.seq,
                         &m.text,
+                        &detail.meta,
                         &shots,
                         FONT_MSG_USER,
                         gpui::rems(0.5),
@@ -5607,6 +5608,7 @@ impl Workbench {
                         ix,
                         m.seq,
                         &m.text,
+                        &detail.meta,
                         &shots,
                         FONT_MSG_BODY,
                         gpui::rems(0.6),
@@ -7667,6 +7669,7 @@ fn message_content(
     message_index: usize,
     seq: i64,
     text: &str,
+    session: &SessionMeta,
     slots: &[ImageSlot],
     base: Pixels,
     paragraph_gap: gpui::Rems,
@@ -7695,6 +7698,7 @@ fn message_content(
                 markdown_body(
                     format!("dmsg-{seq}-part-{part}").into(),
                     segment,
+                    session,
                     base,
                     paragraph_gap,
                     dark,
@@ -7870,10 +7874,11 @@ fn centered_pill(text: impl Into<SharedString>, cx: &App) -> Div {
 }
 
 /// 对话正文共用的 Markdown 视图。表格、引用块与分隔线由组件原生解析；
-/// Wake 只覆写标题层级、代码块表面、语法配色和代码操作区。
+/// Wake 覆写样式、代码操作区,并按会话所属主机处理 macOS 正文链接。
 fn markdown_body(
     id: SharedString,
     text: &str,
+    session: &SessionMeta,
     base: Pixels,
     paragraph_gap: gpui::Rems,
     dark: bool,
@@ -7887,7 +7892,7 @@ fn markdown_body(
     // 首次解析路径，避免代码块短暂保留上一种模式的颜色。
     let themed_id: SharedString = format!("{id}-{}", if dark { "dark" } else { "light" }).into();
 
-    TextView::markdown(themed_id, text)
+    let view = TextView::markdown(themed_id, text)
         .style(
             TextViewStyle {
                 heading_base_font_size: base,
@@ -7946,7 +7951,8 @@ fn markdown_body(
                         .child(icon("icons/copy.svg").with_size(px(12.))),
                 )
         })
-        .selectable(true)
+        .selectable(true);
+    crate::markdown_links::with_session_links(view, &session.host, &session.project_path)
 }
 
 /// Thinking 折叠面板：收起是一行摘要，展开后显示完整原文。

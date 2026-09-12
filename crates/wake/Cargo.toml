@@ -28,6 +28,8 @@ unicode-width = "0.2"
 # GetUserDefaultLocaleName、Linux 读 LC_ALL/LANG,三平台一份接口
 sys-locale = "0.3"
 unicode-segmentation = "1.13"
+percent-encoding = "2.3"
+url = "2.5"
 
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", features = ["test-support"] }

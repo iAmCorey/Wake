@@ -247,6 +247,7 @@
   "Syncing {}…": "正在同步 {}…",
   "Syncing…": "正在同步…",
   "System": "跟随系统",
+  "The linked path is unavailable on this Mac.": "此链接的路径在这台 Mac 上不存在或无法访问。",
   "The session file will be moved to Trash. You can restore it anytime:": "会话文件将被移到废纸篓,随时可以还原:",
   "The session file will be moved to the Recycle Bin. You can restore it anytime:": "会话文件将被移到回收站,随时可以还原:",
   "Thinking": "思考",

@@ -10,6 +10,7 @@ mod assets;
 mod format;
 mod i18n;
 mod main_window;
+mod markdown_links;
 mod prefs;
 mod settings;
 mod theme;
