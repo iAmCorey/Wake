@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.6.2] — 2026-09-12
 
 - Fix: On macOS, conversation file links open in Finder instead of showing an application error. Directories open directly, files are selected, and unavailable or remote paths show an in-app notice (#28, #29).
 - Fix: Bare relative file links with line numbers, such as `main.rs:11`, resolve against the session project and respect remote-session restrictions.
