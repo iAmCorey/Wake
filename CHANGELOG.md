@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- New: `wake-cli index` builds Wake's index from the terminal, so an agent that finds Wake installed but never launched can get itself working instead of stopping to ask you — it only ever builds a missing index, never touches one the app is already keeping current
+
 ## [0.6.2] — 2026-09-12
 
 - Fix: On macOS, conversation file links open in Finder instead of showing an application error. Directories open directly, files are selected, and unavailable or remote paths show an in-app notice (#28, #29).

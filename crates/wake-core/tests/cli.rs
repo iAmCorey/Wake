@@ -58,7 +58,10 @@ fn env() -> &'static TestEnv {
                     ..Default::default()
                 })
                 .unwrap();
-            assert!(total > 10, "fixture home should index many sessions ({total})");
+            assert!(
+                total > 10,
+                "fixture home should index many sessions ({total})"
+            );
         } // 块尾关写连接:最后一个连接 checkpoint,-wal/-shm 消失,之后
           // open_read_only 与字节快照才稳定
         TestEnv { db, _home: tmp }
@@ -137,8 +140,18 @@ fn cases() -> Vec<(Vec<String>, &'static str, Value)> {
             json!({"query":"二维码","limit":3}),
         ),
         (
-            argv(&["search", "二维码", "--project", CLAUDE_PROJECT, "--agent", "claude",
-                   "--since", ALWAYS, "--limit", "2"]),
+            argv(&[
+                "search",
+                "二维码",
+                "--project",
+                CLAUDE_PROJECT,
+                "--agent",
+                "claude",
+                "--since",
+                ALWAYS,
+                "--limit",
+                "2",
+            ]),
             tools::SEARCH,
             json!({"query":"二维码","project":CLAUDE_PROJECT,"agents":["claude"],"since":ALWAYS,"limit":2}),
         ),
@@ -148,15 +161,37 @@ fn cases() -> Vec<(Vec<String>, &'static str, Value)> {
             json!({"limit":5}),
         ),
         (
-            argv(&["sessions", "--project", CLAUDE_PROJECT, "--agent", "claude,codex",
-                   "--starred", "--since", ALWAYS, "--limit", "3"]),
+            argv(&[
+                "sessions",
+                "--project",
+                CLAUDE_PROJECT,
+                "--agent",
+                "claude,codex",
+                "--starred",
+                "--since",
+                ALWAYS,
+                "--limit",
+                "3",
+            ]),
             tools::LIST_SESSIONS,
             json!({"project":CLAUDE_PROJECT,"agents":["claude","codex"],"starred":true,
                    "since":ALWAYS,"limit":3}),
         ),
         (
-            argv(&["show", CLAUDE_KEY, "--from", "1", "--messages", "2", "--chars", "5000",
-                   "--message-chars", "500", "--tools", "--thinking"]),
+            argv(&[
+                "show",
+                CLAUDE_KEY,
+                "--from",
+                "1",
+                "--messages",
+                "2",
+                "--chars",
+                "5000",
+                "--message-chars",
+                "500",
+                "--tools",
+                "--thinking",
+            ]),
             tools::GET_SESSION,
             json!({"key":CLAUDE_KEY,"from_seq":1,"max_messages":2,"max_chars":5000,
                    "max_message_chars":500,"include_tools":true,"include_thinking":true}),
@@ -210,7 +245,10 @@ fn every_command_and_flag_is_exercised_end_to_end() {
 #[test]
 fn bad_arguments_exit_two_and_name_the_problem() {
     for (argv, needle) in [
-        (vec!["sessions", "--since", "yesterday"], "`since` not understood"),
+        (
+            vec!["sessions", "--since", "yesterday"],
+            "`since` not understood",
+        ),
         (vec!["sessions", "--agent", "chatgpt"], "unknown agent"),
         (vec!["sessions", "--limit", "abc"], "must be an integer"),
         (vec!["nope"], "unknown command"),
@@ -218,7 +256,10 @@ fn bad_arguments_exit_two_and_name_the_problem() {
         (vec!["sessions", "--starred=false"], "takes no value"),
         (vec!["search"], "needs a QUERY"),
         (vec!["show"], "needs a KEY"),
-        (vec!["search", "x", "--starred"], "only valid for `sessions`"),
+        (
+            vec!["search", "x", "--starred"],
+            "only valid for `sessions`",
+        ),
         (vec!["sessions", "--project", "."], "$PWD"),
         (vec!["sessions", "myproj"], "takes no arguments"),
     ] {
@@ -241,7 +282,12 @@ fn bad_arguments_exit_two_and_name_the_problem() {
 #[test]
 fn unreadable_session_exits_one() {
     let (store, adapters) = store_and_roster();
-    let want = match call(&store, &adapters, tools::GET_SESSION, &json!({"key":"claude-code:nope"})) {
+    let want = match call(
+        &store,
+        &adapters,
+        tools::GET_SESSION,
+        &json!({"key":"claude-code:nope"}),
+    ) {
         Err(tools::ToolError::Failed(m)) => m,
         other => panic!("坏 key 应当是 ToolError::Failed,实际 {other:?}"),
     };
@@ -256,7 +302,10 @@ fn unreadable_session_exits_one() {
 fn no_results_is_success() {
     for (argv, prefix) in [
         (vec!["search", "zzqqxx-no-such-term"], "No matches for"),
-        (vec!["sessions", "--project", "/nope/nope"], "No indexed project matches"),
+        (
+            vec!["sessions", "--project", "/nope/nope"],
+            "No indexed project matches",
+        ),
         (vec!["sessions", "--since", NEVER], "No sessions"),
         (vec!["projects", "--since", NEVER], "No projects"),
     ] {
@@ -266,16 +315,28 @@ fn no_results_is_success() {
     }
     let (stdout, _, code) = cli_run(&["show", CLAUDE_KEY, "--from", "9999"]);
     assert_eq!(code, Some(0));
-    assert!(stdout.contains("No messages at or after seq 9999"), "{stdout}");
+    assert!(
+        stdout.contains("No messages at or after seq 9999"),
+        "{stdout}"
+    );
 }
 
 /// 超范围的数字由 int_arg 裁剪,不是 CLI 拒绝——CLI 若自己校验就会与 MCP 分家
 #[test]
 fn out_of_range_limits_are_clamped_not_rejected() {
     let reference = store_and_roster();
-    same(&reference, &["sessions", "--limit", "999"], tools::LIST_SESSIONS, json!({"limit":100}));
-    same(&reference, &["search", "二维码", "--limit", "0"], tools::SEARCH,
-         json!({"query":"二维码","limit":1}));
+    same(
+        &reference,
+        &["sessions", "--limit", "999"],
+        tools::LIST_SESSIONS,
+        json!({"limit":100}),
+    );
+    same(
+        &reference,
+        &["search", "二维码", "--limit", "0"],
+        tools::SEARCH,
+        json!({"query":"二维码","limit":1}),
+    );
 }
 
 /// 这三条不碰 fixture home,与别的用例并行也安全:--help/--version 根本不开库,
@@ -313,7 +374,10 @@ fn setup_reports_the_binary_and_never_fails() {
     let missing = tmp.path().join("nope.db");
     let (stdout, _, code) = cli_raw(&["--db", missing.to_str().unwrap(), "setup"]);
     assert_eq!(code, Some(0));
-    assert!(stdout.trim_end().ends_with("launch Wake once to build it"), "{stdout}");
+    assert!(
+        stdout.trim_end().ends_with("launch Wake once to build it"),
+        "{stdout}"
+    );
 }
 
 /// Linux 上目录名可以不是 UTF-8,而 `--project "$PWD"` 正是主用法:
@@ -332,7 +396,10 @@ fn non_utf8_arguments_exit_two_instead_of_panicking() {
         .expect("spawn wake-cli");
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.starts_with("wake-cli: argument is not valid UTF-8"), "{stderr}");
+    assert!(
+        stderr.starts_with("wake-cli: argument is not valid UTF-8"),
+        "{stderr}"
+    );
 }
 
 /// SKILL.md 是 CLI 的第二张脸:CLI 改了而它没跟上,agent 就会照着过时的说明
@@ -350,7 +417,11 @@ fn the_skill_stays_in_sync_with_the_cli() {
     // Windows CI 按 core.autocrlf=true 检出的 SKILL.md 是 CRLF,硬比 "---\n"
     // 会让这条测试在三平台里只红一个
     let mut lines = md.lines();
-    assert_eq!(lines.next(), Some("---"), "SKILL.md 要以 YAML frontmatter 开头");
+    assert_eq!(
+        lines.next(),
+        Some("---"),
+        "SKILL.md 要以 YAML frontmatter 开头"
+    );
     let front: Vec<&str> = lines.by_ref().take_while(|l| *l != "---").collect();
     assert!(lines.next().is_some(), "frontmatter 要闭合,后面还要有正文");
     assert!(front.contains(&"name: wake"), "frontmatter 缺 name");
@@ -359,7 +430,10 @@ fn the_skill_stays_in_sync_with_the_cli() {
         .find_map(|l| l.strip_prefix("description: "))
         .expect("frontmatter 缺单行的 `description: …`");
     // description 是触发条件,不是名词解释——没有 "Use when" 就等于没有触发器
-    assert!(desc.contains("Use when"), "description 要写成触发条件: {desc}");
+    assert!(
+        desc.contains("Use when"),
+        "description 要写成触发条件: {desc}"
+    );
 
     for c in cli::COMMANDS {
         assert!(
@@ -369,7 +443,10 @@ fn the_skill_stays_in_sync_with_the_cli() {
         );
     }
     // 最容易被误读的两条约定
-    assert!(md.contains("--project \"$PWD\""), "SKILL.md 要交代 --project 的约定");
+    assert!(
+        md.contains("--project \"$PWD\""),
+        "SKILL.md 要交代 --project 的约定"
+    );
     assert!(md.contains("wake://session/"), "SKILL.md 要交代引用格式");
     assert!(md.contains("read-only"), "SKILL.md 要声明只读");
 }
@@ -384,12 +461,39 @@ fn the_cli_never_writes_the_index() {
         vec!["search", "二维码"],
         vec!["show", CLAUDE_KEY],
         vec!["projects"],
+        // index 对**已存在**的库同样不许动一个字节——那道口子只开给"库不存在"
+        vec!["index"],
     ] {
         let (_, stderr, code) = cli_run(&argv);
         assert_eq!(code, Some(0), "{stderr}");
     }
     assert!(
         before == std::fs::read(db).unwrap(),
-        "wake-cli must never write the index"
+        "wake-cli must never write an index that already exists"
     );
+}
+
+/// 这条口子存在的唯一理由:装了 Wake 但从没启动过。库不存在时建一次,
+/// 建完立刻可查;库已存在就退让给 GUI(上面那条测试卡字节不变)
+#[test]
+fn index_builds_one_from_scratch_then_defers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("fresh.db");
+
+    let (stdout, stderr, code) = cli_raw(&["--db", db.to_str().unwrap(), "index"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(db.is_file(), "应当真的建出库来");
+    assert!(stdout.starts_with("Indexed "), "{stdout}");
+
+    // 建完就能查,不必先启动 GUI
+    let (stdout, _, code) = cli_raw(&["--db", db.to_str().unwrap(), "projects"]);
+    assert_eq!(code, Some(0));
+    assert!(stdout.contains("project"), "{stdout}");
+
+    // 第二次是退让,不是重建
+    let bytes = std::fs::read(&db).unwrap();
+    let (stdout, _, code) = cli_raw(&["--db", db.to_str().unwrap(), "index"]);
+    assert_eq!(code, Some(0));
+    assert!(stdout.starts_with("An index already exists"), "{stdout}");
+    assert_eq!(bytes, std::fs::read(&db).unwrap(), "退让时不得改动库");
 }

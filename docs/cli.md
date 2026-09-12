@@ -34,6 +34,7 @@ wake-cli sessions [OPTIONS]
 wake-cli show KEY [OPTIONS]
 wake-cli projects [OPTIONS]
 wake-cli setup
+wake-cli index
 wake-cli --help | --version
 ```
 
@@ -122,6 +123,20 @@ into that project's `CLAUDE.md` or `AGENTS.md`. Use this when you would rather n
 install anything, or want the guidance to live in the repository.
 
 Neither writes to another tool's configuration; Wake only ever prints.
+
+### `index`
+
+Builds the index once, for the case where Wake is installed but has never been launched:
+
+```bash
+wake-cli index
+```
+
+It scans the agents' files and writes Wake's index, then tells you what it found. It only
+does this when there is **no index yet** — if one already exists it says so and changes
+nothing, because keeping the index current is the app's job (it watches the files while it
+runs, and Refresh forces a pass). There is deliberately no `--force`: a second full scan
+from outside the app would race the one inside it.
 
 ## When
 

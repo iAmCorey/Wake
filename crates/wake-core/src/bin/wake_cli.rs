@@ -17,14 +17,22 @@ use std::io::{self, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use wake_core::adapters::create_adapters_for;
 use wake_core::cli::{self, Action, CliError, Report, Stream};
 use wake_core::db::{self, Store};
 use wake_core::mcp::{self, tools};
+use wake_core::models::SessionFilter;
+use wake_core::scanner::{run_scan, NullEvents};
+use wake_core::text::plural;
 
 fn main() -> ExitCode {
     // args()(而非 args_os)对非 UTF-8 参数是 panic,退出码 101 —— Linux 上
     // 目录名可以不是 UTF-8,而 `--project "$PWD"` 正是主用法,不能崩
-    let argv: Vec<String> = match std::env::args_os().skip(1).map(|a| a.into_string()).collect() {
+    let argv: Vec<String> = match std::env::args_os()
+        .skip(1)
+        .map(|a| a.into_string())
+        .collect()
+    {
         Ok(v) => v,
         Err(bad) => {
             return write(
@@ -44,6 +52,7 @@ fn main() -> ExitCode {
         Action::Help => write(ok(cli::help())),
         Action::Version => write(ok(format!("wake-cli {}", mcp::SERVER_VERSION))),
         Action::Setup => write(ok(setup(&inv.db))),
+        Action::Index => write(index(&inv.db)),
         Action::Tool { tool, args } => run(&inv.db, tool, &args),
     }
 }
@@ -79,6 +88,59 @@ fn run(db: &Option<PathBuf>, tool: &str, args: &serde_json::Value) -> ExitCode {
     write(cli::report(tools::invoke(
         &store, &adapters, &cache, tool, args,
     )))
+}
+
+/// 从零建一次索引。**只在索引文件不存在时**建:已存在的库归 GUI 管。
+/// "旁路进程绝不 open_or_rebuild" 是为了不和 GUI 正在写的库打架,而
+/// `SCAN_GATE` 只是**进程级**互斥、跨进程不管用——库根本不存在的那一刻
+/// 没有任何写入方可冲突,所以这道口子只开这么宽,**别加 --force**。
+/// 场景是"装了 Wake 但从没启动过":skill 让 agent 跑这一条就能自救
+fn index(db: &Option<PathBuf>) -> Report {
+    let path = db_path(db);
+    if path.exists() {
+        return ok(format!(
+            "An index already exists at {}. Launch Wake to update or rebuild it.",
+            path.display()
+        ));
+    }
+    if let Some(dir) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            return fail(format!("could not create {}: {e}", dir.display()));
+        }
+    }
+    let store = match Store::open(&path) {
+        Ok(s) => std::sync::Arc::new(s),
+        Err(e) => return fail(format!("{e:#}")),
+    };
+    // 不变量 8⑥:按库里的 location 配置建 roster(新库即内置十六家)
+    let adapters = create_adapters_for(&store);
+    if let Err(e) = run_scan(&adapters, &store, &NullEvents, true) {
+        return fail(format!("{e:#}"));
+    }
+    let sessions = store
+        .list_sessions(&SessionFilter {
+            limit: 1,
+            ..Default::default()
+        })
+        .map(|(_, total)| total)
+        .unwrap_or(0);
+    let agents = store.agent_counts().map(|c| c.len() as i64).unwrap_or(0);
+    ok(format!(
+        "Indexed {sessions} session{} from {agents} agent{} into {}.\n\
+         Launch Wake to keep it current — it watches the agents' files while it runs.",
+        plural(sessions),
+        plural(agents),
+        path.display()
+    ))
+}
+
+/// 跑起来了然后失败 → 退 1(与 `cli::report` 对 Failed/Internal 同档)
+fn fail(message: String) -> Report {
+    Report {
+        stream: Stream::Stderr,
+        text: format!("wake-cli: {message}"),
+        code: 1,
+    }
 }
 
 fn setup(db: &Option<PathBuf>) -> String {

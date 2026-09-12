@@ -57,7 +57,14 @@ impl FlagSpec {
         placeholder: &'static str,
         help: &'static str,
     ) -> Self {
-        Self { long, key, arity, placeholder, help, validate: None }
+        Self {
+            long,
+            key,
+            arity,
+            placeholder,
+            help,
+            validate: None,
+        }
     }
 
     const fn validated(mut self, v: Validator) -> Self {
@@ -77,51 +84,95 @@ pub struct CommandSpec {
     pub summary: &'static str,
 }
 
-/// 不是工具调用,单独一条路
-const SETUP: &str = "setup";
+/// 不走 `mcp::tools` 的子命令:不收位置参数、不收旗标,因此也不参与
+/// COMMANDS 与 `tools::definitions()` 的双射。加一个只在这里加一行
+const PLAIN: &[(&str, &str)] = &[
+    (
+        "setup",
+        "print this binary's path and how to point an agent at it",
+    ),
+    (
+        "index",
+        "build the index once, when Wake has never run here",
+    ),
+];
 
 const F_PROJECT: FlagSpec = FlagSpec::new(
-    "--project", "project", Arity::Value, "PATH",
+    "--project",
+    "project",
+    Arity::Value,
+    "PATH",
     "one project: an absolute path (use \"$PWD\") or a project name",
-).validated(check_project);
+)
+.validated(check_project);
 const F_AGENT: FlagSpec = FlagSpec::new(
-    "--agent", "agents", Arity::Repeated, "ID",
+    "--agent",
+    "agents",
+    Arity::Repeated,
+    "ID",
     "only this agent; repeat the flag or comma-separate",
 );
 const F_SINCE: FlagSpec = FlagSpec::new(
-    "--since", "since", Arity::Value, "WHEN",
+    "--since",
+    "since",
+    Arity::Value,
+    "WHEN",
     "only what was updated at or after WHEN",
 );
 const F_LIMIT: FlagSpec = FlagSpec::new(
-    "--limit", "limit", Arity::Value, "N",
+    "--limit",
+    "limit",
+    Arity::Value,
+    "N",
     "maximum rows to return",
 );
 const F_STARRED: FlagSpec = FlagSpec::new(
-    "--starred", "starred", Arity::Switch, "",
+    "--starred",
+    "starred",
+    Arity::Switch,
+    "",
     "only sessions starred in Wake",
 );
 const F_FROM: FlagSpec = FlagSpec::new(
-    "--from", "from_seq", Arity::Value, "SEQ",
+    "--from",
+    "from_seq",
+    Arity::Value,
+    "SEQ",
     "start at this message seq (a wake://…#N reference sets it too)",
 );
 const F_MESSAGES: FlagSpec = FlagSpec::new(
-    "--messages", "max_messages", Arity::Value, "N",
+    "--messages",
+    "max_messages",
+    Arity::Value,
+    "N",
     "messages per page",
 );
 const F_CHARS: FlagSpec = FlagSpec::new(
-    "--chars", "max_chars", Arity::Value, "N",
+    "--chars",
+    "max_chars",
+    Arity::Value,
+    "N",
     "character budget for the page",
 );
 const F_MESSAGE_CHARS: FlagSpec = FlagSpec::new(
-    "--message-chars", "max_message_chars", Arity::Value, "N",
+    "--message-chars",
+    "max_message_chars",
+    Arity::Value,
+    "N",
     "truncate each message to this many characters",
 );
 const F_TOOLS: FlagSpec = FlagSpec::new(
-    "--tools", "include_tools", Arity::Switch, "",
+    "--tools",
+    "include_tools",
+    Arity::Switch,
+    "",
     "include tool inputs and outputs",
 );
 const F_THINKING: FlagSpec = FlagSpec::new(
-    "--thinking", "include_thinking", Arity::Switch, "",
+    "--thinking",
+    "include_thinking",
+    Arity::Switch,
+    "",
     "include the assistant's thinking where the agent recorded it",
 );
 
@@ -176,9 +227,14 @@ pub enum Action {
     Help,
     Version,
     Setup,
+    /// 从零建一次索引。**只在索引不存在时**——已存在的库归 GUI 管
+    Index,
     /// 一次工具调用。`args` **恒为 JSON object**——mcp/mod.rs 那道
     /// `arguments` 形状检查在这条路上不可达,别再补一遍
-    Tool { tool: &'static str, args: Value },
+    Tool {
+        tool: &'static str,
+        args: Value,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -275,7 +331,9 @@ fn err(message: String, with_usage: bool) -> CliError {
 
 /// 缺值的错**不附 USAGE**(与 wake_mcp.rs 的 `--db needs a path` 同款)
 fn next_value(it: &mut std::slice::Iter<'_, String>, msg: &str) -> Result<String, CliError> {
-    it.next().cloned().ok_or_else(|| err(msg.to_string(), false))
+    it.next()
+        .cloned()
+        .ok_or_else(|| err(msg.to_string(), false))
 }
 
 /// 这个 long 归哪些命令(给 "只对 sessions 有效" / "要放在命令之后" 用)
@@ -318,7 +376,8 @@ fn check_project(v: &str) -> Result<(), String> {
 #[derive(Clone, Copy)]
 enum Seen {
     Nothing,
-    Setup,
+    /// PLAIN 表里的子命令,按名字记
+    Plain(&'static str),
     Command(&'static CommandSpec),
 }
 
@@ -346,10 +405,16 @@ pub fn parse(argv: &[String]) -> Result<Invocation, CliError> {
                 continue;
             }
             if s == "--help" || s == "-h" {
-                return Ok(Invocation { db, action: Action::Help });
+                return Ok(Invocation {
+                    db,
+                    action: Action::Help,
+                });
             }
             if s == "--version" || s == "-V" {
-                return Ok(Invocation { db, action: Action::Version });
+                return Ok(Invocation {
+                    db,
+                    action: Action::Version,
+                });
             }
             if s == "--" {
                 only_positional = true;
@@ -363,8 +428,8 @@ pub fn parse(argv: &[String]) -> Result<Invocation, CliError> {
                 // 2) 子命令 flag。命令还没出现 ⇒ 位置写反了,直说
                 let cmd = match seen {
                     Seen::Command(c) => c,
-                    Seen::Setup => {
-                        return Err(err(format!("setup takes no options (got {name})"), true))
+                    Seen::Plain(p) => {
+                        return Err(err(format!("{p} takes no options (got {name})"), true))
                     }
                     Seen::Nothing => return Err(misplaced(name, false)),
                 };
@@ -401,7 +466,9 @@ pub fn parse(argv: &[String]) -> Result<Invocation, CliError> {
         }
         // 3) 位置参数:第一个是命令名
         match seen {
-            Seen::Nothing if s == SETUP => seen = Seen::Setup,
+            Seen::Nothing if PLAIN.iter().any(|(n, _)| *n == s) => {
+                seen = Seen::Plain(PLAIN.iter().find(|(n, _)| *n == s).expect("just matched").0)
+            }
             Seen::Nothing => {
                 seen = Seen::Command(
                     COMMANDS
@@ -410,9 +477,7 @@ pub fn parse(argv: &[String]) -> Result<Invocation, CliError> {
                         .ok_or_else(|| err(format!("unknown command {s}"), true))?,
                 )
             }
-            Seen::Setup => {
-                return Err(err(format!("setup takes no arguments (got `{s}`)"), true))
-            }
+            Seen::Plain(p) => return Err(err(format!("{p} takes no arguments (got `{s}`)"), true)),
             Seen::Command(cmd) => {
                 let Some((_, ph)) = cmd.positional else {
                     return Err(err(
@@ -434,7 +499,19 @@ pub fn parse(argv: &[String]) -> Result<Invocation, CliError> {
         }
     }
     let cmd = match seen {
-        Seen::Setup => return Ok(Invocation { db, action: Action::Setup }),
+        Seen::Plain("setup") => {
+            return Ok(Invocation {
+                db,
+                action: Action::Setup,
+            })
+        }
+        Seen::Plain("index") => {
+            return Ok(Invocation {
+                db,
+                action: Action::Index,
+            })
+        }
+        Seen::Plain(other) => unreachable!("PLAIN 表加了 {other} 但没在这里给 Action"),
         Seen::Nothing => return Err(err("needs a command".into(), true)),
         Seen::Command(c) => c,
     };
@@ -448,7 +525,10 @@ pub fn parse(argv: &[String]) -> Result<Invocation, CliError> {
     }
     Ok(Invocation {
         db,
-        action: Action::Tool { tool: cmd.tool, args: Value::Object(map) },
+        action: Action::Tool {
+            tool: cmd.tool,
+            args: Value::Object(map),
+        },
     })
 }
 
@@ -587,14 +667,19 @@ pub fn help() -> String {
     let mut out = String::from(HELP_HEAD);
     out.push('\n');
     for c in COMMANDS {
-        let arg = c.positional.map(|(_, ph)| format!(" {ph}")).unwrap_or_default();
-        out.push_str(&row(format!("  wake-cli {}{arg}", c.name), c.summary, CMD_COL));
+        let arg = c
+            .positional
+            .map(|(_, ph)| format!(" {ph}"))
+            .unwrap_or_default();
+        out.push_str(&row(
+            format!("  wake-cli {}{arg}", c.name),
+            c.summary,
+            CMD_COL,
+        ));
     }
-    out.push_str(&row(
-        format!("  wake-cli {SETUP}"),
-        "print this binary's path and how to point an agent at it",
-        CMD_COL,
-    ));
+    for (name, summary) in PLAIN {
+        out.push_str(&row(format!("  wake-cli {name}"), summary, CMD_COL));
+    }
     out.push_str(HELP_GLOBALS);
     for c in COMMANDS {
         out.push_str(&format!("\n{} OPTIONS:\n", c.name));
@@ -623,7 +708,8 @@ pub fn help() -> String {
 /// 贴进 CLAUDE.md / AGENTS.md 的那段——给不想装 skill、只想在一个项目里用的
 /// 人。与 skills/wake/SKILL.md 说的是同一件事,那份更全(找二进制、翻页、
 /// 退出码);这里只留最短的一版
-const AGENT_MEMO: &str = "Earlier sessions with every coding agent on this machine are searchable with
+const AGENT_MEMO: &str =
+    "Earlier sessions with every coding agent on this machine are searchable with
 wake-cli. Reach for it when the user asks about an earlier conversation, a past
 decision, why something was done a certain way, where previous work stopped, or
 whether an error has been seen before — git history does not hold that.
@@ -790,7 +876,11 @@ mod tests {
                     Arity::Repeated => ty == "array",
                     Arity::Value => ty == "string" || ty == "integer" || ty == "number",
                 };
-                assert!(ok, "{name}.{}: arity {:?} 配不上 schema 的 {ty}", f.key, f.arity);
+                assert!(
+                    ok,
+                    "{name}.{}: arity {:?} 配不上 schema 的 {ty}",
+                    f.key, f.arity
+                );
             }
         }
         for c in COMMANDS {
@@ -820,7 +910,7 @@ mod tests {
     #[test]
     fn no_duplicate_flag_or_command_names() {
         let mut names: Vec<&str> = COMMANDS.iter().map(|c| c.name).collect();
-        names.push(SETUP);
+        names.extend(PLAIN.iter().map(|(n, _)| *n));
         names.sort_unstable();
         let n = names.len();
         names.dedup();
@@ -837,7 +927,16 @@ mod tests {
     #[test]
     fn argv_maps_to_the_mcp_arguments_object() {
         assert_eq!(
-            args_of(&["search", "qr login", "--project", "/w", "--agent", "codex", "--limit", "3"]),
+            args_of(&[
+                "search",
+                "qr login",
+                "--project",
+                "/w",
+                "--agent",
+                "codex",
+                "--limit",
+                "3"
+            ]),
             json!({"query":"qr login","project":"/w","agents":"codex","limit":"3"})
         );
         assert_eq!(
@@ -848,11 +947,17 @@ mod tests {
         // mcp/mod.rs 那道 `arguments` 形状检查在这条路上不可达,别再补一遍
         assert_eq!(
             p(&["projects"]).unwrap().action,
-            Action::Tool { tool: tools::LIST_PROJECTS, args: json!({}) }
+            Action::Tool {
+                tool: tools::LIST_PROJECTS,
+                args: json!({})
+            }
         );
         assert_eq!(
             p(&["sessions"]).unwrap().action,
-            Action::Tool { tool: tools::LIST_SESSIONS, args: json!({}) }
+            Action::Tool {
+                tool: tools::LIST_SESSIONS,
+                args: json!({})
+            }
         );
     }
 
@@ -868,7 +973,12 @@ mod tests {
                 argv.push(f.long);
                 argv.push("7");
                 let v = args_of(&argv);
-                assert!(v[f.key].is_string(), "{} {} 应当原样传字符串", c.name, f.long);
+                assert!(
+                    v[f.key].is_string(),
+                    "{} {} 应当原样传字符串",
+                    c.name,
+                    f.long
+                );
             }
         }
     }
@@ -876,7 +986,10 @@ mod tests {
     #[test]
     fn switches_are_json_booleans() {
         assert_eq!(args_of(&["sessions", "--starred"])["starred"], json!(true));
-        assert_eq!(args_of(&["show", "k", "--thinking"])["include_thinking"], json!(true));
+        assert_eq!(
+            args_of(&["show", "k", "--thinking"])["include_thinking"],
+            json!(true)
+        );
     }
 
     #[test]
@@ -931,6 +1044,9 @@ mod tests {
         assert!(message(&["show"]).contains("needs a KEY"));
         assert!(message(&["sessions", "x"]).contains("takes no arguments"));
         assert!(message(&["setup", "x"]).contains("takes no arguments"));
+        assert!(message(&["index", "x"]).contains("takes no arguments"));
+        // PLAIN 命令不收旗标,包括全局之外的任何一个
+        assert!(message(&["index", "--limit", "5"]).contains("takes no options"));
         assert!(message(&[]).contains("needs a command"));
         assert!(message(&["nope"]).contains("unknown command"));
     }
@@ -958,6 +1074,7 @@ mod tests {
         assert_eq!(p(&["sessions", "-h"]).unwrap().action, Action::Help);
         assert_eq!(p(&["-V"]).unwrap().action, Action::Version);
         assert_eq!(p(&["setup"]).unwrap().action, Action::Setup);
+        assert_eq!(p(&["index"]).unwrap().action, Action::Index);
         assert!(USAGE.lines().count() < 15, "USAGE 不该长回参考手册");
         assert!(!USAGE.ends_with('\n'));
     }
@@ -972,17 +1089,29 @@ mod tests {
                 assert!(h.contains(f.long), "help 缺旗标 {}", f.long);
             }
         }
-        assert!(h.contains(SETUP));
+        for (name, summary) in PLAIN {
+            assert!(h.contains(name), "help 缺命令 {name}");
+            assert!(h.contains(summary), "help 缺 {name} 的说明");
+        }
         for a in AgentId::ALL {
             assert!(h.contains(a.as_str()), "help 缺 agent {}", a.as_str());
         }
         assert!(h.contains("wake://session/"));
         assert!(h.contains("EXIT CODES:"));
         // 默认值与取值区间现渲染,不是手写进散文里的
-        assert!(h.contains("default 10, 1–30"), "search --limit 的区间没渲染出来");
-        assert!(h.contains("default 60, 1–200"), "show --messages 的区间没渲染出来");
+        assert!(
+            h.contains("default 10, 1–30"),
+            "search --limit 的区间没渲染出来"
+        );
+        assert!(
+            h.contains("default 60, 1–200"),
+            "show --messages 的区间没渲染出来"
+        );
         // 下界曾经不渲染,于是 `--chars 5` 被悄悄裁到 200 而 help 里一个字都没有
-        assert!(h.contains("default 20000, 200–100000"), "show --chars 的下界没渲染出来");
+        assert!(
+            h.contains("default 20000, 200–100000"),
+            "show --chars 的下界没渲染出来"
+        );
         // AGENT IDS 必须落在 WHEN 与 KEYS 之间,不能被甩到文末
         let (when, ids, keys) = (
             h.find("\nWHEN:").expect("WHEN"),
@@ -996,14 +1125,28 @@ mod tests {
     #[test]
     fn report_splits_argument_errors_from_read_failures() {
         let r = report(Ok("body".into()));
-        assert_eq!((r.stream, r.code, r.text.as_str()), (Stream::Stdout, 0, "body"));
+        assert_eq!(
+            (r.stream, r.code, r.text.as_str()),
+            (Stream::Stdout, 0, "body")
+        );
         let r = report(Err(tools::ToolError::InvalidParams("x".into())));
-        assert_eq!((r.stream, r.code, r.text.as_str()), (Stream::Stderr, 2, "wake-cli: x"));
+        assert_eq!(
+            (r.stream, r.code, r.text.as_str()),
+            (Stream::Stderr, 2, "wake-cli: x")
+        );
         let r = report(Err(tools::ToolError::Failed("x".into())));
         assert_eq!((r.stream, r.code), (Stream::Stderr, 1));
         let r = report(Err(tools::ToolError::Internal("x".into())));
         assert_eq!((r.stream, r.code), (Stream::Stderr, 1));
-        assert_eq!(CliError { message: "m".into(), with_usage: false }.report().code, 2);
+        assert_eq!(
+            CliError {
+                message: "m".into(),
+                with_usage: false
+            }
+            .report()
+            .code,
+            2
+        );
     }
 
     #[test]
@@ -1073,8 +1216,13 @@ mod tests {
             db: &db,
             db_error: Some("no Wake index at /tmp/wake.db".into()),
         });
-        assert!(!t.contains("claude mcp add"), "没有 wake-mcp 就不该给 MCP 片段");
-        assert!(t.trim_end().ends_with("Note: no Wake index at /tmp/wake.db"));
+        assert!(
+            !t.contains("claude mcp add"),
+            "没有 wake-mcp 就不该给 MCP 片段"
+        );
+        assert!(t
+            .trim_end()
+            .ends_with("Note: no Wake index at /tmp/wake.db"));
     }
 
     #[test]
