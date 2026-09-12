@@ -59,6 +59,30 @@ impl Drop for ScanFinale<'_> {
 /// into_inner 照常放行。排在后面的照常出终态事件,UI 只是多等一会儿
 static SCAN_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// 从零建一次索引:**只在索引文件不存在时**建,已经有库就原样留给 GUI
+/// (`Ok(None)`)。这是 "重建权只归 GUI 的 `open_or_rebuild`"(db.rs)唯一的
+/// 例外,场景是"装了 Wake 但从没启动过"——此时库根本不存在,没有任何写入方
+/// 可冲突,这就是全部的安全论证。**别据此加 --force**:上面那把 `SCAN_GATE`
+/// 只是**进程级**互斥,对"GUI 正在写这个库"毫无办法。
+/// 放在 scanner 而不是某个 bin 里:这条规矩是扫描侧的,`wake-mcp` 与
+/// `wake-cli` 的只读那一半仍归 `mcp::open_index`
+pub fn build_index(path: &std::path::Path, events: &dyn ScanEvents) -> Result<Option<Arc<Store>>> {
+    if path.exists() {
+        return Ok(None);
+    }
+    // 主库不在、WAL/SHM 还躺着:留下任何一个,新库都会接着读旧日志
+    // (与 `open_or_rebuild` 挪走三件套同一条理由)
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    // Store::open 会 create_dir_all 父目录并跑迁移,不必在调用方先建一遍
+    let store = Arc::new(Store::open(path)?);
+    // 不变量 8⑥:按库里的 location 配置建 roster(新库即内置全家)
+    let adapters = crate::adapters::create_adapters_for(&store);
+    run_scan(&adapters, &store, events, true)?;
+    Ok(Some(store))
+}
+
 /// 全量/增量扫描。quickMeta 先行秒出列表,然后按 mtime 降序逐文件解析。
 /// 阻塞执行——调用方放后台线程。进度与终态一律经 `events` 上报,终态由
 /// `ScanFinale` 保证送达;返回的 `Result` 只用于调用方自己记日志。

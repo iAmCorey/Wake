@@ -5,24 +5,26 @@
 //!   wake-cli show KEY [OPTIONS]       读一份转录
 //!   wake-cli projects [OPTIONS]       有会话历史的项目
 //!   wake-cli setup                    路径、进 PATH、给 agent 的说明
+//!   wake-cli index                    库不存在时建一次(见 scanner::build_index)
 //!   wake-cli --version | --help
 //!
 //! 输出就是 MCP 工具那份文本、一字不改(tests/cli.rs 逐字节卡),所以 docs 与
 //! 将来的 Skill 只需描述一份格式。解析在 `wake_core::cli`,这里只做 I/O 与退
-//! 出码。索引库只读打开,绝不 open_or_rebuild、不扫描、不写。
+//! 出码。索引库一律只读打开(`mcp::open_index`),**绝不 open_or_rebuild**;
+//! 唯一的写是 `index` 子命令——库不存在时建一次,规矩与理由在
+//! `scanner::build_index`,别在这里复述或放宽。
 //!
 //! **结果不许走 println!**:Rust 忽略 SIGPIPE,`wake-cli show K | head` 会让
 //! println! panic 成 101。所有输出统一经 cli::emit,BrokenPipe 由 write 收场。
 use std::io::{self, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use wake_core::adapters::create_adapters_for;
 use wake_core::cli::{self, Action, CliError, Report, Stream};
 use wake_core::db::{self, Store};
 use wake_core::mcp::{self, tools};
 use wake_core::models::SessionFilter;
-use wake_core::scanner::{run_scan, NullEvents};
+use wake_core::scanner::{self, NullEvents};
 use wake_core::text::plural;
 
 fn main() -> ExitCode {
@@ -52,7 +54,7 @@ fn main() -> ExitCode {
         Action::Help => write(ok(cli::help())),
         Action::Version => write(ok(format!("wake-cli {}", mcp::SERVER_VERSION))),
         Action::Setup => write(ok(setup(&inv.db))),
-        Action::Index => write(index(&inv.db)),
+        Action::Index => write(cli::report(index(&db_path(&inv.db)))),
         Action::Tool { tool, args } => run(&inv.db, tool, &args),
     }
 }
@@ -90,57 +92,31 @@ fn run(db: &Option<PathBuf>, tool: &str, args: &serde_json::Value) -> ExitCode {
     )))
 }
 
-/// 从零建一次索引。**只在索引文件不存在时**建:已存在的库归 GUI 管。
-/// "旁路进程绝不 open_or_rebuild" 是为了不和 GUI 正在写的库打架,而
-/// `SCAN_GATE` 只是**进程级**互斥、跨进程不管用——库根本不存在的那一刻
-/// 没有任何写入方可冲突,所以这道口子只开这么宽,**别加 --force**。
-/// 场景是"装了 Wake 但从没启动过":skill 让 agent 跑这一条就能自救
-fn index(db: &Option<PathBuf>) -> Report {
-    let path = db_path(db);
-    if path.exists() {
-        return ok(format!(
+/// 建一次索引,然后说一句人话。建不建、凭什么敢建全在 `scanner::build_index`,
+/// 这里只剩措辞。场景是"装了 Wake 但从没启动过":skill 让 agent 跑这一条自救。
+/// 失败一律走 `?`(anyhow → `ToolError::Internal`)交 `cli::report` 收场——
+/// "跑起来了然后失败"退 1,与工具调用失败同一条出口,不另写一份映射
+fn index(path: &Path) -> Result<String, tools::ToolError> {
+    let Some(store) = scanner::build_index(path, &NullEvents)? else {
+        return Ok(format!(
             "An index already exists at {}. Launch Wake to update or rebuild it.",
             path.display()
         ));
-    }
-    if let Some(dir) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            return fail(format!("could not create {}: {e}", dir.display()));
-        }
-    }
-    let store = match Store::open(&path) {
-        Ok(s) => std::sync::Arc::new(s),
-        Err(e) => return fail(format!("{e:#}")),
     };
-    // 不变量 8⑥:按库里的 location 配置建 roster(新库即内置十六家)
-    let adapters = create_adapters_for(&store);
-    if let Err(e) = run_scan(&adapters, &store, &NullEvents, true) {
-        return fail(format!("{e:#}"));
-    }
     let sessions = store
         .list_sessions(&SessionFilter {
             limit: 1,
             ..Default::default()
-        })
-        .map(|(_, total)| total)
-        .unwrap_or(0);
-    let agents = store.agent_counts().map(|c| c.len() as i64).unwrap_or(0);
-    ok(format!(
+        })?
+        .1;
+    let agents = store.agent_counts()?.len() as i64;
+    Ok(format!(
         "Indexed {sessions} session{} from {agents} agent{} into {}.\n\
          Launch Wake to keep it current — it watches the agents' files while it runs.",
         plural(sessions),
         plural(agents),
         path.display()
     ))
-}
-
-/// 跑起来了然后失败 → 退 1(与 `cli::report` 对 Failed/Internal 同档)
-fn fail(message: String) -> Report {
-    Report {
-        stream: Stream::Stderr,
-        text: format!("wake-cli: {message}"),
-        code: 1,
-    }
 }
 
 fn setup(db: &Option<PathBuf>) -> String {

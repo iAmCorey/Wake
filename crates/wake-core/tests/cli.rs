@@ -451,9 +451,10 @@ fn the_skill_stays_in_sync_with_the_cli() {
     assert!(md.contains("read-only"), "SKILL.md 要声明只读");
 }
 
-/// 一旦有人把 Store::open / open_or_rebuild 摸进来,这条就红
+/// 一旦有人把 open_or_rebuild 摸进来,或者把 `index` 那道口子放宽到已存在的
+/// 库上,这条就红
 #[test]
-fn the_cli_never_writes_the_index() {
+fn the_cli_never_writes_an_index_that_exists() {
     let db = &env().db;
     let before = std::fs::read(db).unwrap();
     for argv in [
@@ -473,27 +474,42 @@ fn the_cli_never_writes_the_index() {
     );
 }
 
-/// 这条口子存在的唯一理由:装了 Wake 但从没启动过。库不存在时建一次,
-/// 建完立刻可查;库已存在就退让给 GUI(上面那条测试卡字节不变)
+/// 这条口子存在的唯一理由:装了 Wake 但从没启动过。库不存在时建一次、建完
+/// 立刻可查;库已存在就退让(字节不变那一半由上面那条卡)。
+///
+/// **先 `env()` 再 spawn**:它建 fixture home 并钉住 WAKE_HOME/HOME 给子进程
+/// 继承。不走这一步,子进程扫的就是维护者真实的家目录——本机十秒、还把真实
+/// 索引整个拷进 tempdir,而 CI 上家目录是空的,`starts_with("Indexed ")` 对
+/// "Indexed 0 sessions" 照样为真,整条用例空过
 #[test]
 fn index_builds_one_from_scratch_then_defers() {
+    let want = Store::open_read_only(&env().db)
+        .unwrap()
+        .list_sessions(&SessionFilter {
+            limit: 1,
+            ..Default::default()
+        })
+        .unwrap()
+        .1;
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("fresh.db");
 
     let (stdout, stderr, code) = cli_raw(&["--db", db.to_str().unwrap(), "index"]);
     assert_eq!(code, Some(0), "{stderr}");
     assert!(db.is_file(), "应当真的建出库来");
-    assert!(stdout.starts_with("Indexed "), "{stdout}");
+    // 这个功能的主张就是这一句:CLI 自己建的索引 == GUI 从同一棵树建的那个
+    assert!(
+        stdout.starts_with(&format!("Indexed {want} session")),
+        "应当与 fixture 库同样收录 {want} 条:{stdout}"
+    );
 
     // 建完就能查,不必先启动 GUI
     let (stdout, _, code) = cli_raw(&["--db", db.to_str().unwrap(), "projects"]);
     assert_eq!(code, Some(0));
-    assert!(stdout.contains("project"), "{stdout}");
+    assert!(stdout.contains(CLAUDE_PROJECT), "{stdout}");
 
     // 第二次是退让,不是重建
-    let bytes = std::fs::read(&db).unwrap();
     let (stdout, _, code) = cli_raw(&["--db", db.to_str().unwrap(), "index"]);
     assert_eq!(code, Some(0));
     assert!(stdout.starts_with("An index already exists"), "{stdout}");
-    assert_eq!(bytes, std::fs::read(&db).unwrap(), "退让时不得改动库");
 }

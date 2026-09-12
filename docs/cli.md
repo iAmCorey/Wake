@@ -4,7 +4,7 @@
 
 It prints what an MCP client is given: the two surfaces call the same code, and the test suite asserts their output byte for byte apart from a trailing newline the CLI adds (see [Output](#output)). So a `wake-cli show …` transcript and a `wake_get_session` reply are the same text, and this page and [docs/mcp.md](mcp.md) describe one format, not two.
 
-Nothing here can modify a session. The CLI opens Wake's index without write access, never scans or rebuilds it, and never touches the agents' own files except to read a transcript.
+Nothing here can modify a session. The CLI opens Wake's index without write access and never touches the agents' own files except to read a transcript. It has exactly one way to write: [`wake-cli index`](#index) builds an index when there is none yet. It never rebuilds one that exists — that stays the app's job.
 
 ## Where it lives
 
@@ -172,7 +172,7 @@ Exactly one trailing newline is added when the text does not already end with on
 | `1` | it ran and failed — unknown or ambiguous key, a transcript that would not parse, a query that errored, or a failed write to stdout |
 | `2` | the command line was wrong, or the index is missing / unreadable / too old |
 
-Empty results are never an error, so `wake-cli search x || fallback` does not fire just because nothing was ever discussed about `x`. Diagnostics go to stderr, prefixed `wake-cli: `, so `wake-cli show <key> > out.md` cannot capture one. `setup` is the exception in both directions: it always exits `0`, even with no index, and reports a missing one as a `Note:` line on stdout — "not set up yet" is the normal state for someone running it.
+Empty results are never an error, so `wake-cli search x || fallback` does not fire just because nothing was ever discussed about `x`. Diagnostics go to stderr, prefixed `wake-cli: `, so `wake-cli show <key> > out.md` cannot capture one. Two commands treat a missing index as normal rather than as the `2` above. `setup` always exits `0`, even with no index, and reports a missing one as a `Note:` line on stdout — "not set up yet" is the normal state for someone running it. `index` exits `0` both when it builds one and when it declines because one already exists; a build that starts and then fails exits `1`.
 
 Both a mistyped option (`--sinse 7d`) and a value the tools reject (`--since 7dd`) exit `2` — from a user's seat they are the same mistake, and the layer that caught it is not visible. This is a deliberate difference from `wake-mcp call`, which exits `1` for anything the tool layer rejects — its JSON-RPC envelope already carries the classification, so the exit code never had to. (`wake-mcp` still uses `2` for its own argv problems: a missing tool name, unparsable JSON, or an index it cannot open.)
 
@@ -180,12 +180,12 @@ Both a mistyped option (`--sinse 7d`) and a value the tools reject (`--since 7dd
 
 - Everything runs on this machine. The CLI makes no network requests.
 - It reads the same session files Wake indexes — local agents' data directories plus the local mirrors of any remote hosts you configured in Wake. Nothing leaves the machine.
-- Wake's read-only rules apply: other agents' directories and databases are opened read-only and credential files are never read. The index itself is opened without write access; a test asserts its bytes never change.
+- Wake's read-only rules apply: other agents' directories and databases are opened read-only and credential files are never read. Every command except `index` opens Wake's own index without write access too, and a test asserts that an index which already exists never changes by a byte — including when `index` itself is the command.
 - On its first run against the default database path, Wake's shared path helper migrates an index left by the old `vibex` builds. `wake-mcp` does the same; `--db` skips it entirely.
 
 ## Troubleshooting
 
-- **`no Wake index at … — launch Wake once to build it`.** Wake has never run on this machine, or `--db` points at the wrong file. `… is empty or from an older version` means the index predates this Wake version; launching Wake once upgrades it.
+- **`no Wake index at … — launch Wake once to build it`.** Wake has never run on this machine, or `--db` points at the wrong file. If Wake is installed but has never been launched, `wake-cli index` builds the index from a terminal instead. `… is empty or from an older version` means the index predates this Wake version; launching Wake once upgrades it.
 - **`No indexed project matches …`.** Pass the absolute path of the repository, or its name. `wake-cli projects` shows the paths Wake knows.
 - **Results look stale.** Keep Wake running; the freshness line at the end of every reply says what the index covers. Copilot / OpenCode / Antigravity / Hermes / OpenClaw databases refresh when Wake launches or when you click Refresh.
 - **macOS refuses to run it ("cannot be opened because the developer cannot be verified").** Wake is signed but not notarized. Clear the quarantine flag for the whole bundle once: `xattr -dr com.apple.quarantine /Applications/Wake.app`.

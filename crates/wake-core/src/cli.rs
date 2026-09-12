@@ -85,16 +85,29 @@ pub struct CommandSpec {
 }
 
 /// 不走 `mcp::tools` 的子命令:不收位置参数、不收旗标,因此也不参与
-/// COMMANDS 与 `tools::definitions()` 的双射。加一个只在这里加一行
-const PLAIN: &[(&str, &str)] = &[
-    (
-        "setup",
-        "print this binary's path and how to point an agent at it",
-    ),
-    (
-        "index",
-        "build the index once, when Wake has never run here",
-    ),
+/// COMMANDS 与 `tools::definitions()` 的双射
+#[derive(Debug)]
+struct PlainSpec {
+    name: &'static str,
+    /// **`Action` 就在表里**——所以 parse 不必在末尾按名字再认一遍,加一行
+    /// 忘了配 match 这种事从此不存在(那是运行时 panic、退 101,而这个 bin
+    /// 的两处显眼设计 args_os 与 cli::emit 都是为了永不退 101)
+    action: Action,
+    summary: &'static str,
+}
+
+/// 加一个子命令只在这里加一行
+const PLAIN: &[PlainSpec] = &[
+    PlainSpec {
+        name: "setup",
+        action: Action::Setup,
+        summary: "print this binary's path and how to point an agent at it",
+    },
+    PlainSpec {
+        name: "index",
+        action: Action::Index,
+        summary: "build the index once, when Wake has never run here",
+    },
 ];
 
 const F_PROJECT: FlagSpec = FlagSpec::new(
@@ -282,8 +295,9 @@ impl CliError {
     }
 }
 
-/// 工具结果 → 写哪条流、什么退出码。三个变体全列、不写 `_`:ToolError 加变体
-/// 时这里编译不过,正是要的
+/// 结果 → 写哪条流、什么退出码。CLI **唯一**的这份映射:工具调用与 `index`
+/// 都从这里收场,别在 bin 里另写一个 `fail()`。三个变体全列、不写 `_`:
+/// ToolError 加变体时这里编译不过,正是要的
 pub fn report(result: Result<String, tools::ToolError>) -> Report {
     match result {
         Ok(text) => Report {
@@ -376,8 +390,9 @@ fn check_project(v: &str) -> Result<(), String> {
 #[derive(Clone, Copy)]
 enum Seen {
     Nothing,
-    /// PLAIN 表里的子命令,按名字记
-    Plain(&'static str),
+    /// PLAIN 表里的子命令。与下面一行同形:**存表行、不存名字**,下游就不必
+    /// 再认一遍(`&'static` 引用恒 Copy,`Action` 不 Copy 不碍事)
+    Plain(&'static PlainSpec),
     Command(&'static CommandSpec),
 }
 
@@ -429,7 +444,10 @@ pub fn parse(argv: &[String]) -> Result<Invocation, CliError> {
                 let cmd = match seen {
                     Seen::Command(c) => c,
                     Seen::Plain(p) => {
-                        return Err(err(format!("{p} takes no options (got {name})"), true))
+                        return Err(err(
+                            format!("{} takes no options (got {name})", p.name),
+                            true,
+                        ))
                     }
                     Seen::Nothing => return Err(misplaced(name, false)),
                 };
@@ -466,18 +484,23 @@ pub fn parse(argv: &[String]) -> Result<Invocation, CliError> {
         }
         // 3) 位置参数:第一个是命令名
         match seen {
-            Seen::Nothing if PLAIN.iter().any(|(n, _)| *n == s) => {
-                seen = Seen::Plain(PLAIN.iter().find(|(n, _)| *n == s).expect("just matched").0)
-            }
             Seen::Nothing => {
-                seen = Seen::Command(
-                    COMMANDS
-                        .iter()
-                        .find(|c| c.name == s)
-                        .ok_or_else(|| err(format!("unknown command {s}"), true))?,
-                )
+                seen = match PLAIN.iter().find(|p| p.name == s) {
+                    Some(p) => Seen::Plain(p),
+                    None => Seen::Command(
+                        COMMANDS
+                            .iter()
+                            .find(|c| c.name == s)
+                            .ok_or_else(|| err(format!("unknown command {s}"), true))?,
+                    ),
+                }
             }
-            Seen::Plain(p) => return Err(err(format!("{p} takes no arguments (got `{s}`)"), true)),
+            Seen::Plain(p) => {
+                return Err(err(
+                    format!("{} takes no arguments (got `{s}`)", p.name),
+                    true,
+                ))
+            }
             Seen::Command(cmd) => {
                 let Some((_, ph)) = cmd.positional else {
                     return Err(err(
@@ -499,19 +522,12 @@ pub fn parse(argv: &[String]) -> Result<Invocation, CliError> {
         }
     }
     let cmd = match seen {
-        Seen::Plain("setup") => {
+        Seen::Plain(p) => {
             return Ok(Invocation {
                 db,
-                action: Action::Setup,
+                action: p.action.clone(),
             })
         }
-        Seen::Plain("index") => {
-            return Ok(Invocation {
-                db,
-                action: Action::Index,
-            })
-        }
-        Seen::Plain(other) => unreachable!("PLAIN 表加了 {other} 但没在这里给 Action"),
         Seen::Nothing => return Err(err("needs a command".into(), true)),
         Seen::Command(c) => c,
     };
@@ -677,8 +693,8 @@ pub fn help() -> String {
             CMD_COL,
         ));
     }
-    for (name, summary) in PLAIN {
-        out.push_str(&row(format!("  wake-cli {name}"), summary, CMD_COL));
+    for p in PLAIN {
+        out.push_str(&row(format!("  wake-cli {}", p.name), p.summary, CMD_COL));
     }
     out.push_str(HELP_GLOBALS);
     for c in COMMANDS {
@@ -910,7 +926,7 @@ mod tests {
     #[test]
     fn no_duplicate_flag_or_command_names() {
         let mut names: Vec<&str> = COMMANDS.iter().map(|c| c.name).collect();
-        names.extend(PLAIN.iter().map(|(n, _)| *n));
+        names.extend(PLAIN.iter().map(|p| p.name));
         names.sort_unstable();
         let n = names.len();
         names.dedup();
@@ -1089,9 +1105,9 @@ mod tests {
                 assert!(h.contains(f.long), "help 缺旗标 {}", f.long);
             }
         }
-        for (name, summary) in PLAIN {
-            assert!(h.contains(name), "help 缺命令 {name}");
-            assert!(h.contains(summary), "help 缺 {name} 的说明");
+        for p in PLAIN {
+            assert!(h.contains(p.name), "help 缺命令 {}", p.name);
+            assert!(h.contains(p.summary), "help 缺 {} 的说明", p.name);
         }
         for a in AgentId::ALL {
             assert!(h.contains(a.as_str()), "help 缺 agent {}", a.as_str());

@@ -254,7 +254,8 @@ impl Store {
 
     /// 只读打开既有索引库(wake-mcp 这类旁路读者用):不建表、不迁移、不改
     /// journal_mode;库不存在或 schema 太老直接报错——重建权只归 GUI 的
-    /// `open_or_rebuild`,旁路进程绝不能把正在被 GUI 写的库挪走重建。
+    /// `open_or_rebuild`,旁路进程绝不能把正在被 GUI 写的库挪走重建
+    /// (唯一的例外是**库根本不存在**时建一个:`scanner::build_index`)。
     /// WAL 下读者不阻塞 GUI 写入;只读连接要能建 -shm,同用户下目录可写即可
     pub fn open_read_only(path: &Path) -> Result<Self> {
         if !path.is_file() {
