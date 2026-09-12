@@ -74,7 +74,15 @@ fn resolve_link(
     }
     // 盘符须先于 scheme 识别,否则 C:/... 会被交给 URL 打开器。
     let windows = windows_path(href);
-    let scheme = (!windows).then(|| url_scheme(href)).flatten();
+    let scheme = (!windows)
+        .then(|| url_scheme(href))
+        .flatten()
+        .filter(|scheme| {
+            // A bare filename such as main.rs:11 also matches URL scheme syntax.
+            // Prefer file semantics for dotted names followed only by a line number,
+            // before the remote guard and without consulting the local filesystem.
+            !(scheme.contains('.') && without_line_number(href) == Some(*scheme))
+        });
     if scheme.is_some_and(|scheme| !scheme.eq_ignore_ascii_case("file")) {
         return LinkTarget::External;
     }
@@ -266,6 +274,31 @@ mod tests {
     }
 
     #[test]
+    fn bare_filename_line_links_use_the_session_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().to_str().unwrap();
+        let file = temp.path().join("main.rs");
+        fs::write(&file, "").unwrap();
+        assert_eq!(
+            resolve_link("main.rs:11", false, project, || None),
+            LinkTarget::File(file)
+        );
+        // A literal filename containing the suffix still takes precedence.
+        let literal = temp.path().join("main.rs:11");
+        fs::write(&literal, "").unwrap();
+        assert_eq!(
+            resolve_link("main.rs:11", false, project, || None),
+            LinkTarget::File(literal)
+        );
+        for (href, project) in [("missing.rs:11", project), ("main.rs:11", "")] {
+            assert_eq!(
+                resolve_link(href, false, project, || None),
+                LinkTarget::Unavailable
+            );
+        }
+    }
+
+    #[test]
     fn line_numbers_preserve_literal_names_and_require_a_file() {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("source file.rs");
@@ -349,6 +382,7 @@ mod tests {
             "~/exists.md",
             "~/exists.md:11",
             "exists.md",
+            "exists.md:11",
             "./exists.md:11",
             "file:///tmp/exists.md",
             "file:///tmp/exists.md:11",
@@ -412,6 +446,8 @@ mod tests {
                 "vscode://file/tmp/a.rs:11",
                 "https://example.com/a.rs:11",
                 "custom+app:value",
+                "custom+app:11",
+                "org.example://open/main.rs:11",
                 "x://example.com",
             ] {
                 assert_eq!(

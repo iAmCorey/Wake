@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+- Fix: On macOS, conversation file links open in Finder instead of showing an application error. Directories open directly, files are selected, and unavailable or remote paths show an in-app notice (#28, #29).
+- Fix: Bare relative file links with line numbers, such as `main.rs:11`, resolve against the session project and respect remote-session restrictions.
+
 ## [0.6.1] — 2026-09-11
 
 - New: Settings → Connect now covers all three ways in — the MCP server, the `wake-cli` command line and the Wake skill each get their own block, with the path to copy, the command that puts `wake-cli` on your PATH (where one applies — not on Windows, and not when an installer already put it there), and the one-liner that installs the skill; the MCP and command-line blocks link straight to their reference docs
