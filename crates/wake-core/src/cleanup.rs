@@ -1241,10 +1241,15 @@ mod tests {
     #[test]
     fn mixed_entries_sort_together_with_unknown_size_last_in_both_directions() {
         let (_temp, store, adapters, root) = setup();
-        insert(&store, &root, "old", 180);
-        let missing = insert(&store, &root, "middle", 90);
-        insert(&store, &root, "new", 60);
-        fs::remove_file(missing.file_path).unwrap();
+        for (id, days) in [("old", 180), ("middle", 90), ("new", 60)] {
+            let mut meta = insert(&store, &root, id, days);
+            // Distinct fixed dates: insertion can occur within one millisecond
+            // on CI, so wall-clock insertion order is not a creation-date order.
+            meta.updated_at = 1_800_000_000_000 - days * DAY;
+            meta.created_at = meta.updated_at - DAY;
+            store.write_session(&meta, meta.updated_at, &[]).unwrap();
+        }
+        fs::remove_file(root.join("middle.jsonl")).unwrap();
         let inv = inventory(&store, &adapters).unwrap();
         let mut entries: Vec<_> = inv
             .candidates
