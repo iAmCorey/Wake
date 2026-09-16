@@ -361,6 +361,106 @@ fn fts_reindex_flag_reprocesses_unchanged_rows_once() {
 }
 
 #[test]
+fn cursor_path_backfill_flag_reprocesses_unchanged_rows_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("cursor-path.db");
+    {
+        let store = Store::open(&db_path).unwrap();
+        assert!(
+            !store.needs_cursor_path_backfill(),
+            "新库本来就会全量解析,不该挂旗子"
+        );
+    }
+    // 模拟只从 slug 还原路径的旧版索引。
+    rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .execute(
+            "UPDATE schema_meta SET value = '2' WHERE key = 'cursor_path_format'",
+            [],
+        )
+        .unwrap();
+    let store = Arc::new(Store::open(&db_path).unwrap());
+    assert!(
+        store.needs_cursor_path_backfill(),
+        "旧库首开要挂 Cursor 路径回填旗子"
+    );
+
+    let path = "/tmp/cursor-path/p/s.jsonl";
+    let mut stale = seed(AgentId::Cursor, "/tmp/cursor-path", path, "s", 42);
+    stale.meta.project_path = "/Users/tester/My/Project".into();
+    stale.meta.project_name = "Project".into();
+    store.write_meta_only(&[(stale.meta.clone(), 42)]).unwrap();
+
+    let mut repaired = seed(AgentId::Cursor, "/tmp/cursor-path", path, "s", 42);
+    repaired.meta.project_path = "/Users/tester/My Project".into();
+    repaired.meta.project_name = "My Project".into();
+    run_scan(
+        &[Box::new(repaired) as Box<dyn AgentAdapter>],
+        &store,
+        &Recorder::new(),
+        false,
+    )
+    .unwrap();
+
+    let project = |store: &Store| store.get_session("cursor:s").unwrap().unwrap().project_path;
+    assert_eq!(project(&store), "/Users/tester/My Project");
+    assert!(!store.needs_cursor_path_backfill(), "成功一轮后清旗子");
+
+    // 没旗子、文件没变:后续增量扫描照常跳过。
+    let mut third = seed(AgentId::Cursor, "/tmp/cursor-path", path, "s", 42);
+    third.meta.project_path = "/should/not/replace".into();
+    run_scan(
+        &[Box::new(third) as Box<dyn AgentAdapter>],
+        &store,
+        &Recorder::new(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(project(&store), "/Users/tester/My Project");
+}
+
+#[test]
+fn cursor_path_backfill_does_not_repeat_successful_rows_after_parse_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("cursor-path-failure.db");
+    let store = Arc::new(Store::open(&db_path).unwrap());
+    let good = seed(
+        AgentId::Cursor,
+        "/tmp/cursor-good",
+        "/tmp/cursor-good/s.jsonl",
+        "good",
+        42,
+    );
+    let mut broken = seed(
+        AgentId::Cursor,
+        "/tmp/cursor-broken",
+        "/tmp/cursor-broken/s.jsonl",
+        "broken",
+        42,
+    );
+    broken.fail_parse = true;
+    store
+        .write_meta_only(&[(good.meta.clone(), 42), (broken.meta.clone(), 42)])
+        .unwrap();
+    rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .execute(
+            "INSERT INTO schema_meta(key, value) VALUES ('cursor_path_backfill', '1')",
+            [],
+        )
+        .unwrap();
+    let adapters: Vec<Box<dyn AgentAdapter>> = vec![Box::new(good), Box::new(broken)];
+    let first = Recorder::new();
+    run_scan(&adapters, &store, &first, false).unwrap();
+    assert_eq!(first.0.lock().unwrap().last().unwrap().total, 2);
+    assert!(!store.needs_cursor_path_backfill());
+
+    let second = Recorder::new();
+    run_scan(&adapters, &store, &second, false).unwrap();
+    assert_eq!(second.0.lock().unwrap().last().unwrap().total, 1);
+}
+
+#[test]
 fn migration_backfill_retries_after_parse_failure() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("retry.db");

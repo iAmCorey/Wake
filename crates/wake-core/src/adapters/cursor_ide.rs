@@ -5,16 +5,16 @@ use crate::models::*;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Cursor IDE 内的 Chat/Composer 历史:`~/Library/Application Support/Cursor/
-/// User/globalStorage/state.vscdb`(Linux/Windows 换用户数据根,见 storage_dir)。
+/// User/globalStorage/state.vscdb`(Linux/Windows 换用户数据根,见 default_db_path)。
 /// **与 cursor.rs 是同一家的两个数据源**:CLI(`cursor-agent`)把完整对话写
 /// `~/.cursor/.../agent-transcripts/*.jsonl`,IDE 面板只把回合标记
 /// (`{"type":"turn_ended"}`)写进那里、正文全留在本库——所以 IDE 会话在只读
 /// JSONL 的旧实现里是空壳。两源同 native_id 的重叠交 scanner 的副本裁决,
-/// 本源以 `dedup_rank` 排在 CLI 源之后:转录带正文时 CLI 那份胜出(它有 slug
-/// 可反推项目,本库多数会话没有工作区路径),本源那份留作解析失败的回退;
+/// 本源以 `dedup_rank` 排在 CLI 源之后:转录带正文时 CLI 那份胜出,
+/// 并可从本库补充项目路径;本源那份正文留作解析失败的回退;
 /// 只有转录缺失或只剩空壳的会话才由本源胜出。不按 mtime 定胜负——两边写盘
 /// 先后不固定,同一会话会在项目之间跳(2026-09-15 实测)。
 ///
@@ -47,13 +47,13 @@ pub struct CursorIdeAdapter {
     links_cache: MtimeCache<Vec<(String, String)>>,
 }
 
-/// `globalStorage/state.vscdb` 的宿主目录。VS Code 系三平台的用户数据根不同:
+/// `globalStorage/state.vscdb` 的默认路径。VS Code 系三平台的用户数据根不同:
 /// macOS 在 `~/Library/Application Support`,Windows 在 `%APPDATA%`,
 /// Linux 在 `$XDG_CONFIG_HOME`(缺省 `~/.config`)。这里只做路径推导、
 /// 不探测存在性——缺根由 list_session_files 降级为空(roster 契约)。
 /// 三平台都从 `home_dir()` 派生而非 `dirs::config_dir()`:后者在 Windows 上
 /// 走 SHGetKnownFolderPath,`WAKE_HOME` 改道对它无效(见 mod.rs 的 home_dir)
-fn storage_dir() -> PathBuf {
+pub(super) fn default_db_path() -> PathBuf {
     let home = super::home_dir().unwrap_or_default();
     let base = if cfg!(target_os = "macos") {
         home.join("Library").join("Application Support")
@@ -62,12 +62,38 @@ fn storage_dir() -> PathBuf {
     } else {
         super::env_dir("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"))
     };
-    base.join("Cursor").join("User").join("globalStorage")
+    base.join("Cursor")
+        .join("User")
+        .join("globalStorage")
+        .join(DB_NAME)
+}
+
+fn project_path_from_data(data: &Value) -> Option<&str> {
+    [
+        "/workspaceIdentifier/uri/fsPath",
+        "/trackedGitRepos/0/repoPath",
+    ]
+    .iter()
+    .find_map(|path| data.pointer(path)?.as_str().filter(|s| !s.is_empty()))
+}
+
+pub(super) fn project_path(db: &Path, id: &str) -> Option<String> {
+    let ro = open_sqlite_ro(db, "cursor-project")?;
+    let raw: String = ro
+        .conn
+        .query_row(
+            "SELECT CAST(value AS TEXT) FROM cursorDiskKV WHERE key = ?1",
+            [format!("{COMPOSER_PREFIX}{id}")],
+            |r| r.get(0),
+        )
+        .ok()?;
+    let data: Value = serde_json::from_str(&raw).ok()?;
+    project_path_from_data(&data).map(str::to_string)
 }
 
 impl CursorIdeAdapter {
     pub fn new() -> Self {
-        Self::at(storage_dir().join(DB_NAME))
+        Self::at(default_db_path())
     }
 
     fn at(db: PathBuf) -> Self {
@@ -417,14 +443,7 @@ impl IdeRow {
             .get("lastUpdatedAt")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
-        let cwd = data
-            .pointer("/workspaceIdentifier/uri/fsPath")
-            .and_then(|v| v.as_str())
-            .or_else(|| {
-                data.pointer("/trackedGitRepos/0/repoPath")
-                    .and_then(|v| v.as_str())
-            })
-            .unwrap_or_default();
+        let cwd = project_path_from_data(data).unwrap_or_default();
         Self {
             id: id.to_string(),
             name: data

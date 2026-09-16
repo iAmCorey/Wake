@@ -135,6 +135,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS titles_fts USING fts5(
 /// "1" = 2026-09-14 前(工具段不过滤 Wake 自指),"2" = 过滤自指回声
 pub const FTS_FORMAT: &str = "2";
 
+/// Cursor 项目路径派生版本；"3" 优先读取同一会话的完整路径元数据。
+const CURSOR_PATH_FORMAT: &str = "3";
+
 fn open_conn(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -193,6 +196,27 @@ fn open_conn(path: &Path) -> Result<Connection> {
         conn.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('fts_format', ?1)",
             params![FTS_FORMAT],
+        )?;
+    }
+    // 旧转录的 mtime/size 未变,需要强制重解析 Cursor 来更新路径。
+    // 新库首次扫描会解析全部文件,无需回填。
+    let stored_cursor_path_format: Option<String> = conn
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = 'cursor_path_format'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if stored_cursor_path_format.as_deref() != Some(CURSOR_PATH_FORMAT) {
+        if sessions_existed {
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('cursor_path_backfill', '1')",
+                [],
+            )?;
+        }
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('cursor_path_format', ?1)",
+            params![CURSOR_PATH_FORMAT],
         )?;
     }
     // host 迁移(2026-09-01 远程会话加列;空串 = 本地)。老库首扫时既有行
@@ -457,6 +481,15 @@ impl Store {
 
     pub fn finish_grok_parent_backfill(&self) -> Result<()> {
         self.clear_meta_flag("grok_parent_backfill")
+    }
+
+    /// Cursor 路径规则升级后重解析一次；扫描完成后清除标记。
+    pub fn needs_cursor_path_backfill(&self) -> bool {
+        self.has_meta_flag("cursor_path_backfill")
+    }
+
+    pub fn finish_cursor_path_backfill(&self) -> Result<()> {
+        self.clear_meta_flag("cursor_path_backfill")
     }
 
     /// FTS 派生规则换代后(见 `FTS_FORMAT`)全部文件要重解析一遍;由 scanner 在
