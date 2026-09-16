@@ -852,6 +852,24 @@ fn cursor_two_sources_route_by_path() {
         !targets.iter().any(|t| t.ends_with("globalStorage")),
         "删除目标落到 globalStorage 目录就会端掉整个 Cursor IDE 数据"
     );
+    assert!(ide.cleanup_paths(&ide_meta).is_none());
+    let cleanup_db = tempfile::tempdir().unwrap();
+    let store = wake_core::db::Store::open(&cleanup_db.path().join("cleanup.db")).unwrap();
+    store
+        .write_session(&ide_meta, ide_meta.updated_at, &[])
+        .unwrap();
+    let inventory = wake_core::cleanup::inventory(&store, &roster).unwrap();
+    assert!(
+        inventory.candidates.is_empty(),
+        "IDE 数据库会话不能进入文件清理候选"
+    );
+    assert_eq!(inventory.unavailable.len(), 1);
+    assert_eq!(inventory.unavailable[0].session.key, ide_meta.key);
+    assert_eq!(
+        inventory.unavailable[0].reason,
+        "This source does not support independent file cleanup"
+    );
+    assert!(env.cursor_ide_db.exists());
 
     // CLI 的真实文件路径 → CLI 实例
     let cli_path = fixture(
