@@ -85,6 +85,8 @@ icons!(
     "trash-2",
     "search",
     "arrow-up-down",
+    "brush-cleaning",
+    "sliders-horizontal",
     "check",
     "copy",
     "pin-filled",

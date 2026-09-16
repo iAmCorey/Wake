@@ -15,6 +15,7 @@ notify.workspace = true
 chrono.workspace = true
 zstd.workspace = true
 base64.workspace = true
+sha2 = "0.10"
 
 # Linux 废纸篓:freedesktop Trash spec 的纯库实现
 # (macOS 走 Finder/osascript,行为已验证不动)
@@ -33,14 +34,19 @@ trash = { version = "5", default-features = false, features = ["coinit_multithre
 # codepage 解码 stdin,非 ASCII 命令必乱,不走子进程管道)、进程创建旗标
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
+  "Win32_Storage_FileSystem",
   "Win32_System_DataExchange",
   "Win32_System_Memory",
   "Win32_System_Threading",
+  "Win32_System_WindowsProgramming",
   "Win32_UI_WindowsAndMessaging",
 ] }
 
 [dev-dependencies]
 tempfile = "3"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_IO", "Win32_System_Ioctl"] }
 
 [[bin]]
 name = "scan"

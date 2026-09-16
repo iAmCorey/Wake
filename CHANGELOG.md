@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.0] — Unreleased
+
+- New: clean up local session files from the sidebar. Filter creation and update dates separately, select multiple agents and projects, and sort by age, activity or disk usage. Unavailable sessions stay visible with an explanation; starred and pinned sessions can be excluded through filters.
+- New: preview sessions in the existing reader, review the complete session tree and source files, then move selected files to the system trash. Cleanup rechecks file identity and ownership before deletion and records partial failures in history.
+- New: cleanup history shows affected sessions and original file locations. Restore files through the system trash, then use Check to verify and reindex them. New cleanup records verify file contents, including sidecars; space is freed only after files are removed from the trash.
+- Update: cleanup uses the app's existing page, filter, selection and button styles, with agent icons and Simplified Chinese translations. Windows uses actual disk allocation for sparse and compressed files and explains locations that cannot safely use the Recycle Bin.
+- Fix: Claude Code sessions containing `atis-latch` or `bridge-session` metadata parse correctly. Concurrent cleanup previews and library readers no longer leave sessions loading.
+
 ## [0.6.7] — 2026-09-15
 
 - New: Cursor's IDE chats — the Chat / Composer panel — are indexed from Cursor's own database next to the CLI transcripts, so chats Wake never showed before are listed and searchable like any other session; a chat that also has a full transcript keeps being read from the transcript, so it stays under the right project. Older chats that Cursor stored without a workspace show under Unknown project (#32, thanks @junqingyongyuanbusi)

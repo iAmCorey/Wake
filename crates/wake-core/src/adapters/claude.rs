@@ -20,6 +20,9 @@ const KNOWN_SKIP_TYPES: &[&str] = &[
     "frame-link",
     "attachment",
     "summary",
+    "atis-latch",
+    // Bridge connection bookkeeping, not transcript content.
+    "bridge-session",
 ];
 
 pub struct ClaudeAdapter {
@@ -607,6 +610,10 @@ impl AgentAdapter for ClaudeAdapter {
             }
         }
         v
+    }
+
+    fn cleanup_paths(&self, meta: &SessionMeta) -> Option<Vec<String>> {
+        Some(self.session_paths(meta))
     }
 
     fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {

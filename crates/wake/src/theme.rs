@@ -244,6 +244,10 @@ pub fn apply_wake_theme(cx: &mut App) {
         theme.overlay = gpui::hsla(0., 0., 0., 0.25);
     }
 
+    // Checkbox 的边框和禁用态读取 colors.primary，选中填充读取
+    // tokens.primary；同步背景 token，避免蓝色描边包着组件默认的黑色填充。
+    theme.tokens.primary = theme.primary.into();
+
     // 系统字体与 macOS 圆角习惯。`.SystemUIFont` 是 gpui 各平台后端都认的
     // 别名(macOS 解到 .AppleSystemUIFont,Windows 的 DirectWrite 后端解到
     // 系统 UI 字体);写死 `.AppleSystemUIFont` 会让非 mac 平台每个字重都

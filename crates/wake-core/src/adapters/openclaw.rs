@@ -656,6 +656,10 @@ impl AgentAdapter for OpenclawAdapter {
         })
     }
 
+    fn cleanup_paths(&self, meta: &SessionMeta) -> Option<Vec<String>> {
+        Some(self.session_paths(meta))
+    }
+
     fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
         // 选中状态目录(~/.openclaw)或 agents 目录本身都认;目录尚不存在时按
         // 名字判:叫 agents 即是根,否则视作状态目录(远程挂载点 `.openclaw/agents`

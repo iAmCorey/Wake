@@ -13,9 +13,9 @@ use wake_core::models::AgentId;
 
 use crate::format::tilde_path;
 use crate::ui::{
-    overlay_layers, show_in_fm, BUTTON_SM_H, FONT_BODY, FONT_CAPTION, FONT_DISPLAY, FONT_HEADING,
-    FONT_LABEL, FONT_TITLE, RADIUS_BUTTON, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS,
-    SPACE_XXL,
+    action_button, overlay_layers, show_in_fm, BUTTON_SM_H, FONT_BODY, FONT_CAPTION, FONT_DISPLAY,
+    FONT_HEADING, FONT_LABEL, FONT_TITLE, RADIUS_BUTTON, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL,
+    SPACE_XS, SPACE_XXL,
 };
 use crate::update::{self, UpdateStatus};
 use crate::workbench::{DataSourceRow, OpenAbout, OpenSettings, OpenUpdates, Workbench};
@@ -79,7 +79,7 @@ pub(crate) fn settings_button(button: Button, cx: &App) -> Button {
 
 /// 设置页里真正需要用户继续完成的主操作。保持 6px 圆角，但使用中号高度、
 /// primary 填充和轻阴影，让它与普通的重试 / 再检查动作拉开层级。
-fn settings_primary_button(button: Button, cx: &App) -> Button {
+pub(crate) fn settings_primary_button(button: Button, cx: &App) -> Button {
     let theme = cx.theme();
     button
         .custom(
@@ -93,6 +93,7 @@ fn settings_primary_button(button: Button, cx: &App) -> Button {
         .border_1()
         .border_color(theme.primary)
         .rounded(RADIUS_BUTTON)
+        .map(action_button)
 }
 
 /// Settings 各页顶部的标题 + 一句说明(版式只写一次:SPACE_XXL 边距、
@@ -1084,6 +1085,11 @@ impl SettingsView {
             UpdateStatus::Failed => t("Try Again"),
         };
         let button = Button::new("settings-check-updates")
+            .icon(icon(if update_available {
+                "icons/download.svg"
+            } else {
+                "icons/refresh-cw.svg"
+            }))
             .label(button_label)
             .disabled(checking);
         let mut action = if update_available {

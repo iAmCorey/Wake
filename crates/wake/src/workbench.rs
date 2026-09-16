@@ -15,6 +15,7 @@
 //   finish review, the verdict, and DESIGN.md
 // ============================================================================
 use crate::i18n::t;
+mod cleanup;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -99,6 +100,58 @@ type SharedLocations = Arc<Vec<AdapterLocation>>;
 
 fn icon(path: &'static str) -> Icon {
     Icon::empty().path(path)
+}
+
+/// Shared identity header for library and full-page views.
+/// Each view supplies its existing horizontal inset; type, height and action alignment stay shared.
+fn library_header(
+    id: &'static str,
+    title: impl Into<SharedString>,
+    subtitle: impl Into<SharedString>,
+    inset: Pixels,
+    actions: Option<AnyElement>,
+    cx: &App,
+) -> impl IntoElement {
+    let title: SharedString = title.into();
+    let subtitle: SharedString = subtitle.into();
+    v_flex()
+        .id(id)
+        .w_full()
+        .h(LIBRARY_IDENTITY_HEIGHT)
+        .flex_shrink_0()
+        .window_control_area(WindowControlArea::Drag)
+        .px(inset)
+        .justify_center()
+        .child(
+            h_flex()
+                .w_full()
+                .items_start()
+                .justify_between()
+                .gap(SPACE_SM)
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(FONT_TITLE)
+                                .font_semibold()
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(FONT_LABEL)
+                                .text_color(cx.theme().muted_foreground)
+                                .child(subtitle),
+                        ),
+                )
+                .when_some(actions, |row, actions| {
+                    row.child(div().flex_shrink_0().pt(px(2.)).child(actions))
+                }),
+        )
 }
 
 /// 起一条后台扫描线程。启动时的自动扫描(full=false)与用户主动重扫(full=true)
@@ -1001,6 +1054,47 @@ mod session_group_tests {
     }
 
     #[test]
+    fn cleanup_preview_completes_both_loads_of_the_same_session() {
+        for preview_first in [false, true] {
+            let mut current = Some(super::DetailState::loading(session("same", 0, false), None));
+            let library_load = current.as_ref().unwrap().load_id;
+            // Enter cleanup before the library transcript finishes, then preview it.
+            let mut saved = current.take();
+            current = Some(super::DetailState::loading(session("same", 0, false), None));
+            let preview_load = current.as_ref().unwrap().load_id;
+            let completions = if preview_first {
+                [preview_load, library_load]
+            } else {
+                [library_load, preview_load]
+            };
+            for load_id in completions {
+                super::detail_for_load(&mut current, &mut saved, "same", load_id)
+                    .unwrap()
+                    .loading = false;
+            }
+            assert!(!current.as_ref().unwrap().loading);
+            // The cleanup toggle restores the original library state.
+            current = saved.take();
+            assert!(
+                !current.as_ref().unwrap().loading,
+                "Library reader stayed loading"
+            );
+        }
+    }
+
+    #[test]
+    fn replaced_detail_ignores_an_older_load_of_the_same_session() {
+        let old = super::DetailState::loading(session("same", 0, false), None);
+        let mut current = Some(super::DetailState::loading(
+            session("same", 0, false),
+            Some(12),
+        ));
+        let mut saved = None;
+        assert!(super::detail_for_load(&mut current, &mut saved, "same", old.load_id).is_none());
+        assert_eq!(current.as_ref().unwrap().jump_seq, Some(12));
+    }
+
+    #[test]
     fn date_labels_respect_calendar_week_boundaries() {
         let wednesday = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
         assert_eq!(
@@ -1515,6 +1609,7 @@ fn toggle_expanded_row(rows: &mut HashSet<usize>, ix: usize) {
 }
 
 struct DetailState {
+    load_id: u64,
     meta: SessionMeta,
     /// 过滤后的可见消息。Rc 让行渲染以引用计数克隆代替整条消息深拷贝
     transcript: Rc<Vec<TranscriptMessage>>,
@@ -1536,6 +1631,45 @@ struct DetailState {
     /// 放大预览操作的短暂就地反馈。绑定具体图片，避免切换预览后把上一张的
     /// 成功状态带过来；generation 让较早的复位计时器不能清掉较新的反馈。
     image_action_feedback: [Option<ImageActionFeedback>; 2],
+}
+
+impl DetailState {
+    fn loading(meta: SessionMeta, jump_seq: Option<i64>) -> Self {
+        static NEXT_LOAD: AtomicU64 = AtomicU64::new(0);
+        Self {
+            load_id: NEXT_LOAD.fetch_add(1, Ordering::Relaxed),
+            meta,
+            transcript: Rc::new(Vec::new()),
+            loading: true,
+            error: None,
+            // Bottom 对齐 = 聊天语义:打开落在最新消息,向上翻历史
+            msg_list: gpui::ListState::new(0, gpui::ListAlignment::Bottom, px(512.)),
+            expanded_tools: HashSet::new(),
+            expanded_thinking: HashSet::new(),
+            jump_seq,
+            images: Vec::new(),
+            zoom: None,
+            image_action_feedback: [None; 2],
+        }
+    }
+}
+
+fn detail_for_load<'a>(
+    current: &'a mut Option<DetailState>,
+    saved: &'a mut Option<DetailState>,
+    key: &str,
+    load_id: u64,
+) -> Option<&'a mut DetailState> {
+    // Library and cleanup may load the same session concurrently. The response
+    // belongs to the state that started it, even after that state moves slots.
+    current
+        .as_mut()
+        .filter(|detail| detail.meta.key == key && detail.load_id == load_id)
+        .or_else(|| {
+            saved
+                .as_mut()
+                .filter(|detail| detail.meta.key == key && detail.load_id == load_id)
+        })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2026,6 +2160,7 @@ pub struct Workbench {
     /// Insights 页(侧栏底部入口):打开时替换中栏+右栏。与其他导航目的地
     /// 互斥(侧栏单选模型);数据在 open/refresh 时后台重算,Rc 免深拷贝
     insights_open: bool,
+    cleanup: cleanup::CleanupState,
     insights: Option<Rc<InsightsData>>,
     insights_loading: bool,
     insights_range: InsightsRange,
@@ -2354,6 +2489,7 @@ impl Workbench {
             detail: None,
             image_action_feedback_generation: 0,
             insights_open: false,
+            cleanup: cleanup::CleanupState::default(),
             insights: None,
             insights_loading: false,
             insights_range: InsightsRange::Hour,
@@ -2367,6 +2503,7 @@ impl Workbench {
             _subs: subs,
         };
         this.load_open_in_prefs();
+        this.load_cleanup_prefs();
         this.refresh(cx);
         this._calendar_task = Some(cx.spawn(async move |this, cx| loop {
             cx.background_executor()
@@ -2526,6 +2663,7 @@ impl Workbench {
 
     /// 侧栏底部入口。再点一次(或点任意导航行)退回会话列表
     fn toggle_insights(&mut self, cx: &mut Context<Self>) {
+        self.leave_cleanup(cx);
         if self.insights_open {
             self.insights_open = false;
             cx.notify();
@@ -3854,6 +3992,10 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Hidden library selection restoration must not replace cleanup preview.
+        if self.cleanup.open {
+            return;
+        }
         let ix = match ev {
             ListEvent::Select(ix) | ListEvent::Confirm(ix) => *ix,
             ListEvent::Cancel => return,
@@ -4132,23 +4274,15 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if jump_seq.is_some() {
+            self.leave_cleanup(cx);
+        }
         let Ok(Some(meta)) = self.store.get_session(key) else {
             return;
         };
-        self.detail = Some(DetailState {
-            meta: meta.clone(),
-            transcript: Rc::new(Vec::new()),
-            loading: true,
-            error: None,
-            // Bottom 对齐 = 聊天语义:打开落在最新消息,向上翻历史
-            msg_list: gpui::ListState::new(0, gpui::ListAlignment::Bottom, px(512.)),
-            expanded_tools: HashSet::new(),
-            expanded_thinking: HashSet::new(),
-            jump_seq,
-            images: Vec::new(),
-            zoom: None,
-            image_action_feedback: [None; 2],
-        });
+        let detail = DetailState::loading(meta.clone(), jump_seq);
+        let load_id = detail.load_id;
+        self.detail = Some(detail);
         // 搜索路径:中栏列表同步选中并滚到该会话。
         // 列表点击路径(jump=None)不走——List 点击自带选中,再滚会跳视口
         if jump_seq.is_some() {
@@ -4167,43 +4301,47 @@ impl Workbench {
         cx.spawn_in(window, async move |this, cx| {
             let (key, result) = task.await;
             this.update_in(cx, |this, _window, cx| {
-                if let Some(detail) = &mut this.detail {
-                    if key == detail.meta.key {
-                        detail.loading = false;
-                        match result {
-                            Ok((messages, images)) => {
-                                detail.msg_list = gpui::ListState::new(
-                                    messages.len(),
-                                    gpui::ListAlignment::Bottom,
-                                    px(512.),
-                                );
-                                // 搜索跳转:seq → 可见消息下标,滚到视口顶。
-                                // FTS 命中的行可能被详情过滤(如空文本),用 >= 落到
-                                // 其后最近一条;找不到(尾部被滤)则保持默认落底。
-                                // jump_seq 归一为落点消息的实际 seq——高亮按精确相等
-                                // 渲染,不归一则命中被滤时滚动与高亮指向不同行
-                                if let Some(seq) = detail.jump_seq {
-                                    if let Some(ix) = messages.iter().position(|m| m.seq >= seq) {
-                                        detail.jump_seq = Some(messages[ix].seq);
-                                        detail.msg_list.scroll_to(gpui::ListOffset {
-                                            item_ix: ix,
-                                            offset_in_item: px(0.),
-                                        });
-                                    }
+                let detail = detail_for_load(
+                    &mut this.detail,
+                    &mut this.cleanup.saved_detail,
+                    &key,
+                    load_id,
+                );
+                if let Some(detail) = detail {
+                    detail.loading = false;
+                    match result {
+                        Ok((messages, images)) => {
+                            detail.msg_list = gpui::ListState::new(
+                                messages.len(),
+                                gpui::ListAlignment::Bottom,
+                                px(512.),
+                            );
+                            // 搜索跳转:seq → 可见消息下标,滚到视口顶。
+                            // FTS 命中的行可能被详情过滤(如空文本),用 >= 落到
+                            // 其后最近一条;找不到(尾部被滤)则保持默认落底。
+                            // jump_seq 归一为落点消息的实际 seq——高亮按精确相等
+                            // 渲染,不归一则命中被滤时滚动与高亮指向不同行
+                            if let Some(seq) = detail.jump_seq {
+                                if let Some(ix) = messages.iter().position(|m| m.seq >= seq) {
+                                    detail.jump_seq = Some(messages[ix].seq);
+                                    detail.msg_list.scroll_to(gpui::ListOffset {
+                                        item_ix: ix,
+                                        offset_in_item: px(0.),
+                                    });
                                 }
-                                detail.transcript = Rc::new(messages);
-                                detail.images = images;
-                                detail.zoom = None;
-                                detail.error = None;
                             }
-                            Err(error) => {
-                                detail.transcript = Rc::new(Vec::new());
-                                detail.images.clear();
-                                detail.zoom = None;
-                                detail.msg_list =
-                                    gpui::ListState::new(0, gpui::ListAlignment::Bottom, px(512.));
-                                detail.error = Some(error.into());
-                            }
+                            detail.transcript = Rc::new(messages);
+                            detail.images = images;
+                            detail.zoom = None;
+                            detail.error = None;
+                        }
+                        Err(error) => {
+                            detail.transcript = Rc::new(Vec::new());
+                            detail.images.clear();
+                            detail.zoom = None;
+                            detail.msg_list =
+                                gpui::ListState::new(0, gpui::ListAlignment::Bottom, px(512.));
+                            detail.error = Some(error.into());
                         }
                     }
                 }
@@ -4223,6 +4361,7 @@ impl Workbench {
         favorite: bool,
         cx: &mut Context<Self>,
     ) {
+        self.leave_cleanup(cx);
         self.selected_agent = agent;
         self.selected_project = project;
         self.favorite_only = favorite;
@@ -4553,6 +4692,7 @@ impl Workbench {
             detail.meta.favorite = v;
             self.refresh(cx);
             self.select_list_key(&key, false, window, cx);
+            self.refresh_cleanup_flags(&key, window, cx);
         }
     }
 
@@ -4564,6 +4704,7 @@ impl Workbench {
             detail.meta.pinned = v;
             self.refresh(cx);
             self.select_list_key(&key, true, window, cx);
+            self.refresh_cleanup_flags(&key, window, cx);
         }
     }
 
@@ -4769,7 +4910,8 @@ impl Workbench {
         let all_active = self.selected_agent.is_none()
             && self.selected_project.is_none()
             && !self.favorite_only
-            && !self.insights_open;
+            && !self.insights_open
+            && !self.cleanup.open;
         // 常态沉默,仅刷新中/监听失效时出现;None 时状态栏整行不渲染。
         // 文案在此按 scan 现算,不另存字段——存下来就会有第二个写入点要维护
         let note = if self.scan.scanning {
@@ -4864,22 +5006,11 @@ impl Workbench {
             .child(
                 div().flex_shrink_0().px(SIDEBAR_EDGE).pb(SPACE_MD).child(
                     h_flex().gap(SPACE_SM).child(
-                        h_flex()
+                        search_field_frame(cx)
                             .id("sidebar-search")
                             .flex_1()
                             .min_w_0()
-                            .h(ROW_HEIGHT)
-                            .px(SIDEBAR_EDGE)
-                            .gap(SPACE_SM)
-                            .rounded(theme.radius)
                             .cursor_pointer()
-                            .bg(theme.secondary)
-                            .text_size(FONT_CAPTION)
-                            .text_color(theme.muted_foreground)
-                            .hover(|s| {
-                                s.bg(theme.secondary_hover)
-                                    .text_colored(theme.foreground, FONT_CAPTION)
-                            })
                             .active(|s| {
                                 s.bg(theme.secondary_active)
                                     .text_colored(theme.foreground, FONT_CAPTION)
@@ -4933,12 +5064,12 @@ impl Workbench {
                         } else {
                             None
                         },
-                        self.favorite_only,
+                        self.favorite_only && !self.cleanup.open,
                         RowLevel::Primary,
                         cx.listener(|this, _, _window, cx| {
                             // 取消收藏过滤时 agent/project 必已是 None(互斥),
                             // 两个方向都归 set_scope
-                            let favorite = !this.favorite_only;
+                            let favorite = this.cleanup.open || !this.favorite_only;
                             this.set_scope(None, None, favorite, cx);
                         }),
                         cx,
@@ -4972,10 +5103,12 @@ impl Workbench {
                                 RowLead::Brand(agent.brand_icon(theme.mode.is_dark())),
                                 agent.display_name(),
                                 Some(*count),
-                                self.selected_agent == Some(agent),
+                                self.selected_agent == Some(agent) && !self.cleanup.open,
                                 RowLevel::Sub,
                                 cx.listener(move |this, _, _window, cx| {
-                                    let next = if this.selected_agent == Some(agent) {
+                                    let next = if this.selected_agent == Some(agent)
+                                        && !this.cleanup.open
+                                    {
                                         None
                                     } else {
                                         Some(agent)
@@ -5004,11 +5137,12 @@ impl Workbench {
                                 RowLead::Icon(icon("icons/folder.svg")),
                                 p.name.clone(),
                                 Some(p.session_count),
-                                self.selected_project.as_deref() == Some(p.path.as_str()),
+                                self.selected_project.as_deref() == Some(p.path.as_str())
+                                    && !self.cleanup.open,
                                 RowLevel::Sub,
                                 cx.listener(move |this, _, _window, cx| {
-                                    let next = if this.selected_project.as_deref()
-                                        == Some(path.as_str())
+                                    let next = if !this.cleanup.open
+                                        && this.selected_project.as_deref() == Some(path.as_str())
                                     {
                                         None
                                     } else {
@@ -5059,6 +5193,21 @@ impl Workbench {
                                     ic.into_any_element()
                                 },
                                 cx.listener(|this, _, _window, cx| this.toggle_insights(cx)),
+                                cx,
+                            ))
+                            .child(sidebar_tool_btn(
+                                "cleanup",
+                                t("Clean Up Sessions"),
+                                true,
+                                icon("icons/brush-cleaning.svg")
+                                    .with_size(px(14.))
+                                    .text_color(if self.cleanup.open {
+                                        theme.primary
+                                    } else {
+                                        theme.muted_foreground
+                                    })
+                                    .into_any_element(),
+                                cx.listener(|this, _, window, cx| this.toggle_cleanup(window, cx)),
                                 cx,
                             ))
                             .child(sidebar_tool_btn(
@@ -5176,41 +5325,14 @@ impl Workbench {
             .h_full()
             .flex_shrink_0()
             .bg(theme.colors.list)
-            .child(
-                v_flex()
-                    .id("list-header")
-                    .w_full()
-                    .h(LIBRARY_IDENTITY_HEIGHT)
-                    .flex_shrink_0()
-                    .window_control_area(WindowControlArea::Drag)
-                    .px(SPACE_LG)
-                    .justify_center()
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .items_start()
-                            .justify_between()
-                            .child(
-                                v_flex()
-                                    .min_w_0()
-                                    .gap(px(2.))
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_size(FONT_TITLE)
-                                            .font_semibold()
-                                            .child(self.context_title()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(FONT_LABEL)
-                                            .text_color(theme.muted_foreground)
-                                            .child(shown_label),
-                                    ),
-                            )
-                            .child(div().flex_shrink_0().pt(px(2.)).child(sort_menu)),
-                    ),
-            )
+            .child(library_header(
+                "list-header",
+                self.context_title(),
+                shown_label,
+                SPACE_LG,
+                Some(sort_menu.into_any_element()),
+                cx,
+            ))
             .child(if shown == 0 {
                 if library_empty && self.scan.scanning {
                     v_flex()
@@ -5805,32 +5927,14 @@ impl Workbench {
             .min_w_0()
             .h_full()
             .bg(theme.background)
-            .child(
-                v_flex()
-                    .id("insights-header")
-                    .w_full()
-                    .h(LIBRARY_IDENTITY_HEIGHT)
-                    .flex_shrink_0()
-                    .window_control_area(WindowControlArea::Drag)
-                    .px(SPACE_XXL)
-                    .justify_center()
-                    .child(
-                        v_flex()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .text_size(FONT_TITLE)
-                                    .font_semibold()
-                                    .child(t("Insights")),
-                            )
-                            .child(
-                                div()
-                                    .text_size(FONT_LABEL)
-                                    .text_color(theme.muted_foreground)
-                                    .child(subtitle),
-                            ),
-                    ),
-            )
+            .child(library_header(
+                "insights-header",
+                t("Insights"),
+                subtitle,
+                SPACE_XXL,
+                None,
+                cx,
+            ))
             .child(body)
             .into_any_element()
     }
@@ -6123,7 +6227,7 @@ impl Workbench {
         let delete_entity = export_entity.clone();
         // 远程会话只读:Delete 项整个不出现(阶段 1 不做远程删除——本地能
         // trash 的只有缓存副本,下次 rsync 就复活,语义是骗人的)
-        let menu_is_remote = !meta.host.is_empty();
+        let menu_is_remote = !meta.host.is_empty() || self.cleanup.open;
         let more_menu = Button::new("more-actions")
             .ghost()
             .rounded(RADIUS_BUTTON)
@@ -6204,10 +6308,13 @@ impl Workbench {
                 crate::tf!("Created {}", abs_date(meta.created_at)).into(),
             )
         });
-        let updated_time: Option<(SharedString, SharedString)> = (meta.updated_at > 0).then(|| {
+        let updated_at = self
+            .cleanup_preview()
+            .map_or(meta.updated_at, |c| c.updated_at);
+        let updated_time: Option<(SharedString, SharedString)> = (updated_at > 0).then(|| {
             (
-                crate::tf!("Updated {}", smart_time(meta.updated_at)).into(),
-                crate::tf!("Updated {}", abs_date(meta.updated_at)).into(),
+                crate::tf!("Updated {}", smart_time(updated_at)).into(),
+                crate::tf!("Updated {}", abs_date(updated_at)).into(),
             )
         });
         let branch: Option<SharedString> =
@@ -6263,6 +6370,20 @@ impl Workbench {
                                     .items_center()
                                     .text_size(FONT_LABEL)
                                     .text_color(theme.muted_foreground)
+                                    .when(self.cleanup.open, |row| row.child(
+                                        Button::new("cleanup-back")
+                                            .ghost()
+                                            .h(px(28.))
+                                            .px(SPACE_SM)
+                                            .text_size(FONT_CAPTION)
+                                            .rounded(RADIUS_BUTTON)
+                                            .icon(icon("icons/chevron-left.svg").with_size(px(15.)))
+                                            .label(t("Back"))
+                                            .tooltip(t("Back to cleanup list"))
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.close_cleanup_preview(window, cx);
+                                            }))
+                                    ))
                                     .child(img(meta.agent.brand_icon(theme.mode.is_dark())).size(px(15.)).flex_shrink_0())
                                     .child(div().flex_shrink_0().child(meta.agent.display_name()))
                                     .child(project_badge)
@@ -6568,6 +6689,7 @@ impl Workbench {
                                     )
                                     .child(div().min_w_0().truncate().child(detail_path)),
                             )
+                            .when(self.cleanup.open, |this| this.child(self.render_cleanup_detail_facts(cx)))
                             .when(created_time.is_some() || updated_time.is_some(), |this| {
                                 this.child(
                                     h_flex()
@@ -8669,6 +8791,20 @@ impl Render for Workbench {
             .id("workbench")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape"
+                    && this.cleanup.open
+                    && !window.has_active_dialog(cx)
+                    && (!this.cleanup.preview_open
+                        || this
+                            .detail
+                            .as_ref()
+                            .is_none_or(|detail| detail.zoom.is_none()))
+                    && this.navigate_cleanup_back(window, cx)
+                {
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(Self::toggle_search))
             .on_action(cx.listener(|this, _: &RefreshSessions, window, cx| {
                 this.refresh_sessions(window, cx)
@@ -8692,7 +8828,9 @@ impl Render for Workbench {
                     .child(self.render_sidebar(window, cx))
                     // Insights 是整页目的地:替换中栏+右栏,侧栏导航保持在场
                     .map(|this| {
-                        if self.insights_open {
+                        if self.cleanup.open {
+                            this.child(self.render_cleanup(window, cx))
+                        } else if self.insights_open {
                             this.child(self.render_insights(cx))
                         } else {
                             this.child(self.render_session_list(cx))

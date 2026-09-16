@@ -201,6 +201,10 @@ impl AgentAdapter for PiAdapter {
         })
     }
 
+    fn cleanup_paths(&self, meta: &SessionMeta) -> Option<Vec<String>> {
+        Some(self.session_paths(meta))
+    }
+
     fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
         // 选中 `~/.pi`/`~/.omp` 家目录形态或 sessions 目录本身都认。
         // pi 与 omp 布局全同:实例保持自己的 agent,探测时两家都会命中同一目录,

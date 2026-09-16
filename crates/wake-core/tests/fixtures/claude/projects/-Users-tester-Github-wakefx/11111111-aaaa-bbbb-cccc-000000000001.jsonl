@@ -8,3 +8,5 @@
 {"type":"system","subtype":"compact_boundary","content":"Conversation compacted","isMeta":false,"cwd":"/Users/tester/Github/wakefx","sessionId":"11111111-aaaa-bbbb-cccc-000000000001","uuid":"s-0001","timestamp":"2026-08-01T10:02:00.000Z"}
 {"type":"custom-title","customTitle":"QR login revamp","sessionId":"11111111-aaaa-bbbb-cccc-000000000001"}
 {"type":"wibble-experimental","payload":{"note":"unknown line type, must be counted"}}
+{"type":"atis-latch","sessionId":"11111111-aaaa-bbbb-cccc-000000000001","atis":true}
+{"type":"bridge-session","sessionId":"11111111-aaaa-bbbb-cccc-000000000001","bridgeSessionId":"bridge-fixture","lastSequenceNum":42,"ownerAccountUuid":"account-fixture","ownerOrganizationUuid":"organization-fixture"}

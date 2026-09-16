@@ -1,4 +1,5 @@
 pub mod adapters;
+pub mod cleanup;
 pub mod cli;
 pub mod db;
 pub mod mcp;

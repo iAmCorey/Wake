@@ -905,6 +905,10 @@ impl AgentAdapter for CodexAdapter {
         })
     }
 
+    fn cleanup_paths(&self, meta: &SessionMeta) -> Option<Vec<String>> {
+        Some(self.session_paths(meta))
+    }
+
     fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
         // dir 视作 CODEX_HOME 形态;归一化未上提的孤立数据目录按**目录名**
         // 保留角色:空的独立 sessions 目录日后落盘的 rollout 要能被发现,

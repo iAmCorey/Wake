@@ -342,6 +342,75 @@ fn kimi_ref() -> SessionFileRef {
 // ---------------------------------------------------------------- 每家解析
 
 #[test]
+fn claude_bridge_metadata_can_pass_cleanup_review() {
+    use std::sync::atomic::AtomicBool;
+    use wake_core::{cleanup, db::Store};
+
+    setup(); // All paths below belong to the shared synthetic home.
+    let adapter = ClaudeAdapter::new();
+    let root = adapter.data_roots().remove(0);
+    fs::create_dir_all(&root).unwrap();
+    // macOS temp paths may start with the /var alias; cleanup requires real paths.
+    let root = root.canonicalize().unwrap();
+    let adapter = adapter.with_custom_root(root.clone());
+    let project = tempfile::tempdir_in(&root).unwrap();
+    let path = project.path().join("bridge-cleanup-fixture.jsonl");
+    let original = fs::read_to_string(&claude_ref().file_path).unwrap();
+    let valid = original
+        .lines()
+        .filter(|line| !line.contains("wibble-experimental"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(&path, &valid).unwrap();
+    let reference = fs_ref(AgentId::ClaudeCode, &path, "bridge-cleanup-fixture");
+    let parsed = adapter.parse_session(&reference).unwrap();
+    assert_eq!(parsed.unknown_line_count, 0);
+    assert_eq!(parsed.meta.message_count, 3);
+    let transcript = adapter.parse_transcript(&reference).unwrap();
+    assert_eq!(transcript.unknown_line_count, 0);
+    assert_eq!(transcript.mainline.len(), 5);
+
+    let db_dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&db_dir.path().join("test.db")).unwrap();
+    store
+        .write_session(&parsed.meta, reference.mtime_ms, &parsed.units)
+        .unwrap();
+    let adapters = vec![adapter];
+    let inventory = cleanup::inventory(&store, &adapters).unwrap();
+    assert_eq!(inventory.candidates.len(), 1);
+    let review = cleanup::review(
+        &store,
+        &adapters,
+        inventory.candidates,
+        &AtomicBool::new(false),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(review.ready.len(), 1);
+    assert!(review.skipped.is_empty());
+    cleanup::revalidate(&store, &adapters, &review.ready[0]).unwrap();
+
+    // Supporting known bookkeeping must not allow malformed or unknown records.
+    for invalid in [r#"{"type":"unknown-fixture-record"}"#, "{truncated"] {
+        fs::write(&path, format!("{valid}{invalid}\n")).unwrap();
+        let inventory = cleanup::inventory(&store, &adapters).unwrap();
+        let review = cleanup::review(
+            &store,
+            &adapters,
+            inventory.candidates,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        assert!(review.ready.is_empty());
+        assert_eq!(review.skipped.len(), 1);
+        assert_eq!(review.skipped[0].reason, "Session has unrecognized content");
+        assert!(path.exists());
+    }
+}
+
+#[test]
 fn claude_parse_contract() {
     setup();
     let adapter = ClaudeAdapter::new();
@@ -361,8 +430,9 @@ fn claude_parse_contract() {
     assert_eq!(s.meta.message_count, 3);
     assert_eq!(s.meta.created_at, ms("2026-08-01T09:59:00Z"));
     assert_eq!(s.meta.updated_at, ms("2026-08-01T10:02:00Z"));
-    // "wibble-experimental" 计 unknown;"summary" 在已知跳过表内不计
+    // "wibble-experimental" 计 unknown;summary / atis-latch / bridge-session 不计
     assert_eq!(s.unknown_line_count, 1);
+    assert_eq!(t.unknown_line_count, 1);
 
     assert_eq!(
         roles_kinds(&t.mainline),

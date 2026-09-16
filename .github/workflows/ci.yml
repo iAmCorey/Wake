@@ -49,6 +49,12 @@ jobs:
       - name: Test wake-core
         run: cargo test -p wake-core
 
+      # Exercise the real OS trash only with uniquely named synthetic fixtures.
+      # Normal local test runs do not touch the system trash.
+      - name: Test system trash round trip
+        if: runner.os == 'Linux' || runner.os == 'Windows'
+        run: cargo test -p wake-core --lib cleanup::tests::system_trash_cleanup_round_trip -- --ignored --exact
+
       # UI crate 内不启动窗口的纯逻辑单测；联网测试标为 ignored
       - name: Test app logic
         run: cargo test -p wake

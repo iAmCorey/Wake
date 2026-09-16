@@ -485,6 +485,10 @@ impl AgentAdapter for CursorAdapter {
         Ok(parse_cursor_jsonl(&file, true)?.messages)
     }
 
+    fn cleanup_paths(&self, meta: &SessionMeta) -> Option<Vec<String>> {
+        Some(self.session_paths(meta))
+    }
+
     fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
         // 选中 `~/.cursor` 形态(含 projects/)或直接选中 projects 目录都认
         let root = if dir.join("projects").is_dir() {

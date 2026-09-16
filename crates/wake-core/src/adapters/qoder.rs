@@ -683,6 +683,10 @@ impl AgentAdapter for QoderAdapter {
         paths
     }
 
+    fn cleanup_paths(&self, meta: &SessionMeta) -> Option<Vec<String>> {
+        Some(self.session_paths(meta))
+    }
+
     fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
         let root = if dir.join("projects").is_dir() {
             dir.join("projects")

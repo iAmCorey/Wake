@@ -394,6 +394,17 @@ fn clipboard_fallback(command: &str) -> String {
     }
 }
 
+/// Reject locations for which the OS backend cannot safely recycle files.
+pub(crate) fn validate_trash_path(path: &Path) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    return super::windows_fs::ensure_recyclable(path);
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
 /// 删除会话文件到系统回收站(可恢复)。虚拟路径 `<db>#<id>` 与已消失的
 /// 文件在此过滤(不变量 3:SQLite 型只 tombstone),平台原语只收真实路径。
 /// 部分失败语义:平台实现可能删到一半报错(macOS 逐文件、Linux/Windows
@@ -404,10 +415,28 @@ pub fn trash_paths(paths: &[String]) -> anyhow::Result<()> {
         .map(|s| s.as_str())
         .filter(|p| Path::new(p).exists())
         .collect();
+    // Preflight the entire batch before moving anything, including callers
+    // outside the cleanup page. Never fall back to permanent deletion.
+    for path in &existing {
+        validate_trash_path(Path::new(path))?;
+    }
     if existing.is_empty() {
         return Ok(());
     }
     platform::trash_existing(&existing)
+}
+
+/// Open the system trash for the user to inspect the reviewed batch. Never
+/// empty it here: it can contain unrelated files.
+pub fn open_trash() {
+    #[cfg(target_os = "macos")]
+    if let Some(home) = dirs::home_dir() {
+        platform::open_dir(&home.join(".Trash").to_string_lossy());
+    }
+    #[cfg(target_os = "linux")]
+    platform::open_dir("trash:///");
+    #[cfg(target_os = "windows")]
+    platform::open_dir("shell:RecycleBinFolder");
 }
 
 /// 致命错误提示。GPUI 窗口还没起来时这是唯一能让用户看见的通道,

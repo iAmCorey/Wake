@@ -617,6 +617,10 @@ mod tests {
     fn packs_have_no_keys_without_a_call_site() {
         const SOURCES: &[&str] = &[
             include_str!("workbench.rs"),
+            include_str!("workbench/cleanup.rs"),
+            include_str!("workbench/cleanup/filter.rs"),
+            include_str!("workbench/cleanup/history.rs"),
+            include_str!("workbench/cleanup/rows.rs"),
             include_str!("settings.rs"),
             include_str!("main.rs"),
             include_str!("markdown_links.rs"),
@@ -656,6 +660,7 @@ mod tests {
             "Session moved to ",
             "{} sessions moved to ",
             "The session file will be moved to ",
+            "You can restore files from ",
             "Show in ",
             "Reveal in ",
         ];

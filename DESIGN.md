@@ -128,12 +128,13 @@ macOS 不设置横跨三栏的自定义 header。主窗口透明标题栏高 44p
 - 侧栏顶端按红绿灯、`Wake` 标题和搜索框的可见边界做光学对齐：标题容器上留 4px、下留 16px。窗口控制区和品牌行各高 44px，合计 88px。
 - 顶部是唯一的全文搜索入口,文案 "Search sessions",右侧显示 `⌘K`;Search/All Sessions/Starred 固定不随滚动。
 - 搜索行必须有防溢出结构:标签文字 `flex_1 + min_w_0 + truncate`,图标与 `⌘K` 徽标显式 `flex_shrink_0`。裸文字子元素的最小宽度被内容锁死,侧栏一窄就会把右侧元素挤出边界裁掉。
+- 侧栏搜索入口与 Filter 来源搜索共用 `ui::search_field_frame`：32px 高、8px 主题圆角、secondary 填充、10px 水平留白、13px 搜索图标和 Caption 字阶。局部搜索在同一外壳内放无外观的 Input，不叠加默认细边框输入框。
 - **行分两级**(侧栏纵向层级的来源,不得拉平):主导航 All Sessions/Starred 32px 行高 + Body 14;分组展开项(agent/项目)26px 行高 + Caption 12 + 整行右移 `SUB_INDENT` 12px 表达从属。
 - **每行必须有行首元素**,由 `RowLead` 枚举强制(`Icon` 或 `Brand` 两态,无 `None`):主导航用 Lucide 单线图标,agent 行用品牌 PNG,项目行用 `folder.svg`。槽位定宽 `LEAD_BOX` 管右侧文字起点统一,槽内居中管中轴对齐。
 - 线条图标比实心品牌图视觉轻,同档里给小一号:分组项 Lucide 14 / 品牌图 18,主导航 Lucide 15。
 - 行内容 = 行首元素 + 标题 + 计数;计数一律 Label 档 muted。
 - 组头 "Agents"/"Projects" 用 Body 档常规字重 + muted 色(与主导航同字号同字重,仅靠颜色和"无行首图标"区分——加粗会让组头压过它统辖的行),带 13px chevron 可折叠。
-- 底部工具条常驻,总高 44px（含顶部 1px hairline）,按钮靠右排列(次要操作区:透明底、hover 才出色,不与导航行选中态抢注意力)——依次为 chart-column "Insights"、齿轮 "Settings"、refresh。Insights 页打开时其图标以 primary 点亮,是工具条里唯一有激活态的按钮。Settings 同时进入 Wake 菜单并绑定 `⌘,`(其他平台 `Ctrl+,`),保持单例窗口。
+- 底部工具条常驻,总高 44px（含顶部 1px hairline）,按钮靠右排列(次要操作区:透明底、hover 才出色,不与导航行选中态抢注意力)——依次为 chart-column "Insights"、brush-cleaning "Clean Up Sessions"、齿轮 "Settings"、refresh。Insights 或清理页打开时，对应图标以 primary 点亮。Settings 同时进入 Wake 菜单并绑定 `⌘,`(其他平台 `Ctrl+,`),保持单例窗口。
 - Settings 默认 820×600，采用 180px 窄侧栏 + 内容页结构，固定为 General / Locations / Remote hosts / Connect / Data / Updates / About 七项(Connect 为 0.5.0 新增,插在 Remote hosts 与 Data 之间——两页都是"把 Wake 接到外部"的集成面,Data 之后是纯本地信息)；About 与功能设置分离并钉在侧栏底部，Wake 菜单的 About Wake 直达同一页。About 沿用 Kooky/Birth 的信息顺序：产品图标、名称、版本、tagline、GitHub、短分隔线、版权/许可证与作者署名。Updates 是独立功能页,仅在用户点击页面按钮或 macOS Wake 菜单的 Check for Updates 时读取 GitHub 最新正式 Release 元数据,明确呈现检查中/最新版/有新版/失败四种状态;有新版时打开 Release 页供用户下载,不后台检查、不自行覆盖应用包。内部常规文字按钮统一沿用主界面的 24px 高、6px 圆角和主题交互色,普通页面动作使用 muted 填充 + hairline；发现新版后的 View Update 是需要用户继续完成的主操作,使用 32px 高 primary 填充和轻阴影。Appearance 分段选择器也使用同一材质。General 只放真实可用的全局偏好,当前为持久化的 System / Light / Dark 外观选择与 Language(跟随系统或固定某个语言包,0.5.2 起);不提供默认 “Open In” 终端。Data 只展示 Wake 本地存储位置、会话数与磁盘占用并提供文件管理器入口,不重复放刷新或清库动作；常规 Refresh 的唯一入口仍是主侧栏底部。Locations 页按 AgentId 声明序以 agent 分组,品牌名只在组头出现一次;本机有数据的组优先,未检测到的 agent 默认收进可展开区。每条路径以路径为主信息、会话数/不可用状态为 muted 副信息,最右为逐路径开关;停用时只降低文字层级，开关与菜单保持完整对比度。行本身不承担编辑,`…` 菜单集中 Edit / Show in Finder / 自定义 Remove。顶部操作为低强调的 Add location,Restore defaults 收进页级 `…` 菜单且无偏离时禁用。添加/编辑仍复用 agent 下拉 + 可手输路径 + 目录选择表单;关闭 location 后保留配置、停止扫描/监听并从会话与搜索结果排除,重新开启即增量扫回;纯路径管理不做内容校验。Remote hosts 页沿用 Locations 的版式:标题 + 说明,右侧低强调的 Sync now / Add host;host 列表为单张 popover 底圆角卡,一行一台(名字为主信息、同步状态为 muted 副信息,失败用 danger),`…` 菜单集中 Sync now / Remove,最右为开关;添加走与 location 同材质的单字段表单弹窗,SSH 前提说明放在字段下方。列表与详情页的远程会话以 `@host` 徽章标识:列表行为 primary 淡底填充胶囊(与 muted 项目胶囊区分),详情页与 model/source 同排用 primary 描边。Connect 页沿用 Data 页的版式,**只放状态与动作,不放文档**(用户 2026-09-08 三轮定稿:平级双卡带代码块、嵌套同卡、缩进从属卡都试过,根源是设置窗里塞了 README 内容,怎么排都像教程):标题 + 一句说明(不点名 MCP、不写 read-only 声明);「MCP server」卡 84px 一行显示 wake-mcp 名称与 mono 字体的 `~/…` 路径,右侧 Copy path,不放"Ready"状态行,只在找不到二进制时给一行 danger 文案;「MCP clients」卡三行(Claude Code / Codex / Cursor),17px 品牌图标领行、客户端名为主信息、用法提示为 muted 副信息、右侧是 ghost 的 Show/Hide 切换(chevron 图标 + 文案,muted 前景,用户 2026-09-08 追加)加 Copy command / Copy config;代码块**默认收起**,展开后出现在该行下方、左缘对齐到文字轴(行内边距 16 + 图标 17 + 间距 12),secondary 填充 + 主题圆角的 mono 逐行渲染,Settings 重开即复位。0.6.x 起页面是**四个区块**(用户 2026-09-11 定稿):MCP server / MCP clients / Command line / Skill——MCP server / Command line / Skill 各一张 84px 信息卡、MCP clients 仍是三行客户端列表(wake-mcp、wake-cli 是二进制名与 mono 路径 + Copy path;wake-cli 那张在 Copy path **左侧**多一个 Copy command,复制「把它放进 PATH」的那行命令——右侧留给两张卡同名的 Copy path,纵向才对得齐;deb/tar 已装进 `…/bin` 或 Windows 上没有可粘命令时这个按钮不出现;Skill 是 `npx skills add …` + Copy command),区块标题为「Agents」时看不出这块特指 MCP,故改名 MCP clients 与上方 MCP server 成对。**说明性 caption 一律不放**——那正是"设置窗里塞 README"的复发形态;Setup guide 链接改挂在区块标题右端,规则是**每个面的第一个区块挂自己的文档**:MCP server → docs/mcp.md,Command line → docs/cli.md(MCP clients 与 Skill 分属这两个面的第二块,不重复挂)。四块之后整页**超过一屏、需要滚动**——2026-09-08 那条"一屏放下"的约束随第三、四个区块作废,滚动容器本来就在(`flex_1().min_h_0().overflow_y_scroll()`),卡片记得 `flex_shrink_0` 否则会被压扁。复制反馈是按钮原地变 "Copied"(check 图标)1.6s 后复原,**不弹通知**——gpui-component 的 toast 在窗口失活或被悬停时暂停自动关闭,在 Settings 从属窗里经常就挂着不走(用户 2026-09-08 反馈),且主界面的 Copy Session ID / Copy code 本来就不弹;页面只展示不代写别家配置。
 - 工具条内的**状态行"常态沉默"**:仅刷新中或监听不可用时出现在按钮行上方;文案须可 truncate,窄侧栏放不下长句(故为 "Live updates off" 而非带操作建议的整句)。
 - 手动 Refresh 始终后台运行；进度复用侧栏状态行，完成后发通知，不用模态框阻断浏览、搜索或阅读。
@@ -172,7 +173,7 @@ macOS 不设置横跨三栏的自定义 header。主窗口透明标题栏高 44p
 
 详情加载失败不得退化为空白阅读面：没有匹配 adapter 时明确说明 agent 与会话路径不匹配，转录解析失败时保留底层错误链；两者共用居中的错误态，并提供“在文件管理器中显示”动作定位原始会话文件。异步解析结果只允许写回仍然选中的同一会话，避免快速切换时旧任务覆盖新详情。
 
-对话框标题一律 Heading 16 semibold:组件内建 `.title()` 不设字号(实渲窗口默认 14px),必须显式补 `text_size(FONT_HEADING)`。破坏性确认的主按钮点名动作并用 danger 形态("Move to Trash",Windows 上经 trash_copy! 平台文案为 "Move to Recycle Bin",不留裸 "OK");表单弹窗内控件同档取齐(输入框与下拉/浏览钮同高,次级动作行才允许 small)。输入框聚焦态只把边框染成 ring 色,不画框外的聚焦环(theme.rs 关掉了 `focus_ring`):组件的环是元素框外 2px 的绝对定位子元素,弹窗内容层与滚动列表都会裁掉它,染色边框不占空间也不会残缺。
+对话框标题一律 Heading 16 semibold:组件内建 `.title()` 不设字号(实渲窗口默认 14px),必须显式补 `text_size(FONT_HEADING)`。破坏性确认的主按钮点名动作并用 danger 形态（常规删除使用平台化的 Move to Trash／Move to Recycle Bin；清理入口使用 Delete，确认框按用户指定使用 Confirm；正文明确恢复方式及空间回收条件）；表单弹窗内控件同档取齐(输入框与下拉/浏览钮同高,次级动作行才允许 small)。输入框聚焦态只把边框染成 ring 色,不画框外的聚焦环(theme.rs 关掉了 `focus_ring`):组件的环是元素框外 2px 的绝对定位子元素,弹窗内容层与滚动列表都会裁掉它,染色边框不占空间也不会残缺。
 
 ### 对话阅读面
 
@@ -220,6 +221,24 @@ emoji 不再承担界面或正文结构图标职责。
 - Agents / Projects / Models 三个榜单同构:24px 条形行 = 行首(品牌图 15px 原色 / folder 图标 / 无)+ 名称列定宽 truncate + 6px 圆头轨道条(`muted` 轨、`primary` 填充,按组内峰值归一)+ 右对齐 Label 计数。三个组头都挂 ‹ › 切换度量,循环序与概览行一致:Sessions / Tokens / Prompts;**当前档位名(首字母大写的裸名词)显示在两键中间**——64px 定宽居中,Caption muted,按钮位置不随文本跳动;榜单组头因此为单行(标题与按钮组居中对齐),分布图组头保留 caption 双行、按钮中间无标签(其标题本身就是档位名)。每个榜单各自记忆档位,行按当前度量降序重排后取 top-N(Agents 全量、Projects/Models 各 6;截断在排序之后,换度量不漏项);Tokens 档只列报过用量的组、值用 K/M 缩写,组内无人报 token 时该档不进循环。
 - 空态沿用详情空态形制("No activity yet" + "Refresh sessions to see your activity here.");加载用居中 Spinner,已有数据时静默换新不闪烁。
 
+### 本机会话清理
+
+- Filter 使用 16px 内边距，标题、日期区、来源区与操作栏共用左缘。标题右侧提供「仅显示可清理」多选选项，默认关闭并随其他条件一起记忆、清除。Clear（悬停提示 Clear filters）与 Done 集中到底栏，均为 32px 高、6px 圆角，复用 Settings 的普通／主要按钮样式；常态实色填充，前者 secondary、后者 primary，Done 最小宽度 80px。
+
+- 清理入口 Delete 与最终 Confirm 按钮统一使用现有 danger 样式；取消选择、筛选与排序仍使用各自的普通控件。检查阶段显示已检查数 / 总数并可取消，执行阶段显示已处理数 / 总数并允许完成当前会话后停止。取消检查不产生确认框或清理记录。
+- 确认框标题用 Delete this session?／Delete N sessions?，顶部仅接一行 Caption／muted 的 Local files · About X 体积摘要，随后直接显示会话列表。两条短说明固定在列表下方、按钮上方，与列表共用左缘：先说明可从废纸篓恢复及释放空间的条件，再说明原工具可能无法继续会话。说明区顶部的分隔线固定，清单内仅在会话之间分隔；说明与按钮间距 16px，不随文件列表滚动。移除重复的长段落和清理页中额外的 Codex 说明；文件名使用 12px muted 等宽文字，过长时省略，悬停可见完整路径。只有一项时使用单数文案。结果区把未开始、已移动、需要处理分开，未开始不标红；没有移动文件时不提示空间待回收。
+
+- 入口在侧栏底部工具条，顺序为 Insights / Clean Up Sessions / Settings / Refresh；清理使用 14px `brush-cleaning` 图标，打开时以 primary 表达激活态。
+- 清理页保留侧栏，主区与 Insights 共用 `background` 页面底色及 24px 水平留白。标题通过 `library_header` 与 All Sessions、Insights 共用：88px 高、22px 标题、11px 副行、2px 行间距并支持窗口拖拽，Filter、Sort、刷新对齐标题首行右侧；不放装饰图标、独立体积大字或嵌套卡片。
+- 标题下直接进入列表，不设置内容分类标签或独立工具栏。Filter 内容宽 468px，使用单层弹出面板：两项日期各用一行完整时长选项，沿用 Appearance 的中性分段控件，选中项用 popover 底色与轻阴影；Exclude 以独立标题与下方等宽选项呈现收藏/置顶/无法清理排除，标题右侧不放筛选条件。日期与排除条件固定可见。Agent、项目与 Exclude 统一使用原 Agents 的选项块样式：28px 行高、12px 文字，选中时浅蓝底色与右侧勾号，未选中时使用浅中性底色和细边框，不使用方形复选框。Agent 的 15px 品牌图标位于名称左侧。来源区域以分隔线分组，Sources 标题右侧放 284px 宽搜索框，来源选项单独滚动。输入来源搜索词不改变会话范围，点选后立即生效且面板保持打开。创建时间与更新时间各自提供完整时长快捷项，组合时取交集；副标题同时显示生效条件。旧单日期偏好迁移到对应项，另一项不限。候选无预设大小或对话轮数门槛，旧内容分类偏好加载时忽略。
+- 收藏与置顶默认不排除，选中的排除条件同步显示在页面副标题；时间门槛完全由时间筛选决定，不另设隐藏的 7 天保护。可清理和无法清理的会话统一显示，参与同一套创建／更新日期、来源、收藏和置顶筛选以及排序。无法清理项禁用勾选，标题与品牌图保持正常显示，来源信息后直接呈现简短原因，完整说明通过悬停查看，保留预览；不再提供额外展开入口或原因弹窗。大小未知显示「—」，按大小升降序均排在最后，统计只累加可清理体积。Filter 可显式开启「仅显示可清理」。所有计数均为当前筛选范围；全选只选择可清理会话。
+- 列表头保持 44px 单行：全选（可清理数量）、筛选结果总数、无法清理数量；可清理体积放在未勾选时的底部摘要，不重复状态词。两种会话共用 `cleanup/rows.rs` 的标题／来源两行布局，无法清理原因使用 Label 字阶接在项目徽章后；完整项目名与原因支持悬停查看。项目徽章上限 128px，品牌图保持 15px。每行占 64px，内部高亮面为 60px，上下各留 2px，避免相邻选中行连成大色块。日期列 112px，仅显示当前排序日期（按文件大小排序时，只有创建时间启用则显示创建日期，否则显示更新日期），悬停显示创建和更新的完整时间。体积列 88px，数字右对齐；移除常驻操作列，将空间留给会话标题；不加体积条。行高亮留 16px 外边距，内容内缩 8px，沿用 8px 主题圆角；勾选使用 `list_active`，悬停使用 `list_hover`。
+- 清理记录直接打开主区历史列表，不用时间戳菜单；列表显示会话标题、品牌、时间、会话数、结果与体积。单次详情与列表形成明确返回层级，标题左侧返回按钮和 Esc 均可返回。标题复用 88px 页面头，正文遵循 Insights 的居中 720px 内容宽度；记录列表复用 Settings 的圆角分组面板，88px 行内以品牌、标题和时间为主，体积与轻量状态标记靠右。详情顶部展示结果摘要，下面的会话面板用 40px 整行控件展开文件位置；已还原条目不再显示废纸篓或恢复操作，部分完成、中断与待核对单独表达。纯浏览保留候选列表筛选、勾选和滚动，执行或恢复后回候选页才重新核对文件状态。
+- 清理页、Filter、结果页和确认框的文字操作统一复用 `ui::action_button`：32px 高、左右 12px、6px 圆角，与 Settings 主操作共享尺寸；内部文字、图标和图文间距统一使用 Settings 常规按钮的 Small 档，避免仅改外框却遗留默认字号。页面主操作同排等高；历史页返回按钮为 32px，文件位置使用 40px 整行展开控件，顶部 Filter／Sort／Refresh 沿用 All Sessions 的图标按钮尺寸。
+- 底部与侧栏工具条统一为 44px（包含顶部 hairline），摘要使用 11px Label 字阶。未选择时显示可清理体积及清理记录，无可清理项时显示对应引导；选择后原位显示数量、体积和单词按钮 `Clear`／`Delete`；按钮使用纯文字，未选择时显示纯文字 `History`；悬停分别说明取消全选和移到系统废纸篓。点击会话标题在主区域进入现有正文阅读器，保留侧栏，不使用弹窗或第二列；阅读器来源行增加返回按钮，也可按 Esc 返回，勾选、筛选和列表位置保持。进入清理页不自动加载正文。源文件明细归入清理确认框，每个会话显示品牌、标题、项目、数量与体积，文件数量按钮按需展开文件名、父目录和大小；长路径截断并支持悬停。结果页共用页面标题与 24px 留白；空状态复用现有 `empty_state_card`。
+- `Delete` 先检查所选会话，再打开最终确认清单，只有确认框里的 Confirm 才执行。检查逐项汇总失败原因；部分失败时明确显示将跳过的项及真正将清理的数量与体积，全部失败时展示原因与刷新入口，不提供删除按钮，不用底部裸错误取代确认流程。
+- Sort 与 All Sessions 使用相同菜单结构、180px 最小宽度和右对齐锚点：上半部分为更新时间、创建时间、文件大小，分隔线下方为降序、升序。字段和方向各自勾选，tooltip 沿用“排序：字段 · 方向”。切换字段保留当前方向；切换字段或方向都保留已选会话，改变筛选条件才清空勾选。
+
 ## 图标、形状与层次
 
 - UI chrome 只使用内嵌 Lucide 单线 SVG，不使用 Unicode 或 emoji 图标；Agent 身份用内嵌品牌 PNG，经 `img()` 渲染并**保持原色**(不得用 `text_color` 着色,选中态也不变色)。
@@ -254,3 +273,25 @@ scripts/build_and_run.sh --verify
 ```
 
 视觉验收至少覆盖：空态、选中会话、详情阅读、更多菜单、`⌘K` 搜索，以及系统浅色和深色模式。
+
+
+### 清理操作按钮规范（2026-09-16）
+
+- 清理页文字操作统一采用纯文字按钮，包括 Clear、Delete、History、Filter 的 Clear／Done、失败后的 Refresh，以及历史恢复操作。
+- 确认框为 Cancel／Confirm，保留 danger 层级；底部说明也使用纯文字，与列表左缘对齐。
+- 顶部筛选／排序／刷新、返回和文件展开的功能图标，以及 Agent 品牌图标保留。
+- Settings 更新动作沿用 refresh-cw／download 图标。
+
+### 清理来源多选（2026-09-16）
+
+- Filter 的 Agents、Projects 都支持多选，组内取并集、组间以及日期条件取交集；未选任何值表示该组不限。
+- 多选统一采用原 Agents 的轻量选项块：28px 行高、12px 文字，选中时浅蓝底色与右侧勾号，未选中时使用浅中性底色和细边框；不使用方形复选框。Agents、Projects 与 Exclude 共用这一组件。Agent 图标保留在名称左侧，点击已选项可取消；标题显示整组选中数量，来源分组标题右侧的搜索只影响候选项显示。
+- 不另设 All 选项，取消该组所有勾选即恢复不限；Clear 清除全部筛选。筛选在关闭面板、重新进入清理页和重启后保留，旧单选设置自动迁移。
+- 页面摘要单项显示名称，多项显示分组数量；已选但数据暂时不可用的来源仍可取消。
+
+### 清理记录的手动恢复（2026-09-16）
+
+- 不提供应用内自动 Restore。macOS 的废纸篓权限会阻止目录读取，临时测试文件通过不能代表用户已有目录可访问。
+- 顶部结果卡片在说明下方放置纯文字 Trash／Check，保持 32px 高、12px 水平留白和 6px 圆角。说明明确“在废纸篓选择放回原处，再点击检查”；两按钮与说明左对齐，不用页面底栏。
+- Trash 打开系统废纸篓；Check 只验证原位置的会话及关联文件，完整后清除本次删除标记、重新扫描。Check 不读废纸篓、不移动文件。文件尚未放回时给普通操作提示，不显示权限栈或声称已恢复。
+- 旧自动恢复的权限错误不把已经成功的删除显示成部分完成，改用手动恢复说明；其他实际文件或索引错误仍展示。全部重新收录后隐藏操作。

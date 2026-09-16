@@ -91,6 +91,11 @@ pub trait AgentAdapter: Send + Sync {
     fn session_paths(&self, meta: &SessionMeta) -> Vec<String> {
         vec![meta.file_path.clone()]
     }
+    /// Explicit opt-in for independently owned local files. Database and remote
+    /// adapters must leave this unsupported; cleanup also verifies containment.
+    fn cleanup_paths(&self, _meta: &SessionMeta) -> Option<Vec<String>> {
+        None
+    }
     /// 一轮扫描开始前刷新 adapter 的跨会话快照。默认 adapter 没有这类状态。
     fn begin_scan(&self) {}
     /// 此 adapter 是否负责维护会话父子关系。单独的能力位用于区分“当前没有

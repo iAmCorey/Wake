@@ -478,6 +478,10 @@ impl AgentAdapter for GrokAdapter {
         })
     }
 
+    fn cleanup_paths(&self, meta: &SessionMeta) -> Option<Vec<String>> {
+        Some(self.session_paths(meta))
+    }
+
     fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
         Box::new(Self::from_custom_dir(dir))
     }

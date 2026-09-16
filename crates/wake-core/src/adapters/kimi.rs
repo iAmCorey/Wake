@@ -290,6 +290,10 @@ impl AgentAdapter for KimiAdapter {
         })
     }
 
+    fn cleanup_paths(&self, meta: &SessionMeta) -> Option<Vec<String>> {
+        Some(self.session_paths(meta))
+    }
+
     fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
         // `~/.kimi-code` 形态(含 sessions/)则 index 在其顶层;直接选中
         // sessions 则上一层找。index 相对 dir 派生,落回默认家会拿错 cwd 映射

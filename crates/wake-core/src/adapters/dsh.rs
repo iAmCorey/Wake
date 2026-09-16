@@ -521,6 +521,10 @@ impl AgentAdapter for DshAdapter {
         }
     }
 
+    fn cleanup_paths(&self, meta: &SessionMeta) -> Option<Vec<String>> {
+        Some(self.session_paths(meta))
+    }
+
     fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
         let root = if dir.join("sessions").is_dir() {
             dir.join("sessions")

@@ -272,6 +272,10 @@ impl AgentAdapter for GeminiAdapter {
         })
     }
 
+    fn cleanup_paths(&self, meta: &SessionMeta) -> Option<Vec<String>> {
+        Some(self.session_paths(meta))
+    }
+
     fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
         // `~/.gemini` 形态(含 tmp/)则 projects.json 在其顶层;直接选中 tmp
         // 形态则上一层找。侧档必须相对 dir 派生,落回默认家就会拿错 cwd 映射

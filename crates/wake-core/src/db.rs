@@ -558,9 +558,40 @@ impl Store {
     /// 一棵会话树在索引侧原子删除。磁盘路径由调用方先整体移入废纸篓；若
     /// 任一索引步骤失败，所有 session/message/FTS/tombstone 改动一起回滚。
     pub fn remove_sessions(&self, keys: &[String], tombstone: bool) -> Result<()> {
+        self.remove_sessions_recorded(keys, tombstone, &[], now_ms())
+    }
+
+    /// Keep the reviewed paths even if the watcher already removed a missing
+    /// source row. File moves and watcher delivery cannot share a transaction.
+    pub fn complete_cleanup(&self, sessions: &[SessionMeta], stamp: i64) -> Result<()> {
+        let keys = sessions.iter().map(|s| s.key.clone()).collect::<Vec<_>>();
+        self.remove_sessions_recorded(&keys, true, sessions, stamp)
+    }
+
+    fn remove_sessions_recorded(
+        &self,
+        keys: &[String],
+        tombstone: bool,
+        recorded: &[SessionMeta],
+        stamp: i64,
+    ) -> Result<()> {
         let mut conn = self.write.lock().unwrap();
         let tx = conn.transaction()?;
         for key in keys {
+            if let Some(expected) = recorded.iter().find(|s| s.key == *key) {
+                let sql=format!("SELECT {SESSION_COLS} FROM sessions s LEFT JOIN user_data u ON u.session_key = s.key WHERE s.key = ?1");
+                if let Some(current) = tx.query_row(&sql, params![key], row_to_meta).optional()? {
+                    anyhow::ensure!(
+                        current.file_path == expected.file_path
+                            && current.updated_at == expected.updated_at
+                            && current.created_at == expected.created_at
+                            && current.favorite == expected.favorite
+                            && current.pinned == expected.pinned,
+                        "Session changed before index update: {}",
+                        current.title
+                    );
+                }
+            }
             let file_path: Option<String> = tx
                 .query_row(
                     "SELECT file_path FROM sessions WHERE key = ?1",
@@ -583,10 +614,15 @@ impl Store {
             tx.execute("DELETE FROM titles_fts WHERE key = ?1", params![key])?;
             tx.execute("DELETE FROM sessions WHERE key = ?1", params![key])?;
             if tombstone {
-                if let Some(fp) = file_path {
+                if let Some(fp) = file_path.or_else(|| {
+                    recorded
+                        .iter()
+                        .find(|s| s.key == *key)
+                        .map(|s| s.file_path.clone())
+                }) {
                     tx.execute(
                         "INSERT OR REPLACE INTO tombstones(file_path, key, deleted_at) VALUES (?1, ?2, ?3)",
-                        params![fp, key, now_ms()],
+                        params![fp, key, stamp],
                     )?;
                 }
             }
@@ -669,6 +705,66 @@ impl Store {
             "INSERT OR REPLACE INTO prefs(key, value) VALUES (?1, ?2)",
             params![key, value],
         )?;
+        Ok(())
+    }
+
+    /// Cleanup journals survive ordinary index rebuilds, like other user prefs.
+    pub fn cleanup_journals(&self) -> Result<Vec<String>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT value FROM prefs WHERE key LIKE 'cleanup.batch.%' ORDER BY key DESC",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Fresh ownership metadata for inventory and each deletion check. Deliberately
+    /// independent of the message index, which can contain millions of rows.
+    pub fn cleanup_index(&self) -> Result<Vec<crate::cleanup::IndexedSession>> {
+        let conn = self.read.lock().unwrap();
+        let sql = format!("SELECT {SESSION_COLS}, s.parent_key FROM sessions s LEFT JOIN user_data u ON u.session_key = s.key");
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |r| {
+            Ok(crate::cleanup::IndexedSession {
+                meta: row_to_meta(r)?,
+                parent: r.get(19)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Display-only counts, collected once per cleanup inventory, never per tree
+    /// during review or execution. Sidechain prompts do not belong to the mainline.
+    pub fn cleanup_prompt_counts(&self) -> Result<std::collections::HashMap<String, i64>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT session_key, COUNT(*) FROM messages WHERE role = 'user' AND sidechain_id IS NULL GROUP BY session_key")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Check before moving restored files, then check again in the transaction.
+    pub fn validate_cleanup_restore(&self, sessions: &[SessionMeta], stamp: i64) -> Result<()> {
+        let conn = self.read.lock().unwrap();
+        for s in sessions {
+            let conflict: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM tombstones WHERE (key = ?1 OR file_path = ?2) AND deleted_at != ?3)", params![s.key, s.file_path, stamp], |r| r.get(0))?;
+            anyhow::ensure!(!conflict, "A newer deletion protects {}", s.file_path);
+        }
+        Ok(())
+    }
+
+    /// Only undo the tombstones written by this cleanup, never later deletions.
+    pub fn restore_cleanup(&self, sessions: &[SessionMeta], stamp: i64) -> Result<()> {
+        let mut conn = self.write.lock().unwrap();
+        let tx = conn.transaction()?;
+        for s in sessions {
+            let conflict: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM tombstones WHERE (key = ?1 OR file_path = ?2) AND deleted_at != ?3)", params![s.key, s.file_path, stamp], |r| r.get(0))?;
+            anyhow::ensure!(!conflict, "A newer deletion protects {}", s.file_path);
+            tx.execute(
+                "DELETE FROM tombstones WHERE key = ?1 AND file_path = ?2 AND deleted_at = ?3",
+                params![s.key, s.file_path, stamp],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 

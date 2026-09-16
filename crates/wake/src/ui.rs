@@ -5,10 +5,12 @@
 use std::collections::HashSet;
 
 use gpui::{
-    div, px, AnyElement, App, Global, Hsla, InteractiveElement as _, IntoElement, MouseButton,
+    div, px, AnyElement, App, Div, Global, Hsla, InteractiveElement as _, IntoElement, MouseButton,
     Pixels, Styled, Window, WindowId,
 };
-use gpui_component::{dialog::Dialog, Root, WindowExt as _};
+use gpui_component::{
+    button::Button, dialog::Dialog, h_flex, ActiveTheme as _, Root, Sizable as _, WindowExt as _,
+};
 
 /// 产品展示名（About）——medium
 pub const FONT_DISPLAY: Pixels = px(28.);
@@ -68,8 +70,8 @@ file_manager_copy!("File Explorer");
 file_manager_copy!("File Manager");
 
 // 系统回收站的平台名词(macOS 与 freedesktop 都叫 Trash,Windows 是
-// Recycle Bin)与由它派生的五句删除文案。名词只写一次、整句由 concat!
-// 拼出:五处分别手写 cfg! 链的话,没有任何东西能拦住它们说不同的词
+// Recycle Bin)与由它派生的删除文案。名词只写一次、整句由 concat!
+// 拼出:各处分别手写 cfg! 链的话,没有任何东西能拦住它们说不同的词
 // ——与 wake-core 各平台 trash_existing 的失败文案也得是同一个词。
 //
 // 确认框内容活在 **dialog builder 闭包**里、对话框开着时每帧重跑,`t()` 是
@@ -91,6 +93,14 @@ macro_rules! trash_copy {
         /// 确认框正文里嵌的名词(冠词随名词变,故与 $noun 分开)
         pub fn trash_body() -> &'static str {
             crate::i18n::t($body)
+        }
+        /// 批量清理确认的恢复方式与空间回收条件。
+        pub fn cleanup_trash_hint() -> &'static str {
+            crate::i18n::t(concat!(
+                "You can restore files from ",
+                $body,
+                ". Space is freed after emptying it."
+            ))
         }
         /// 删除确认框正文首句
         pub fn trash_confirm_body() -> &'static str {
@@ -168,11 +178,42 @@ pub const ROW_HEIGHT: Pixels = px(32.);
 /// 配 FONT_CAPTION 形成侧栏纵向层级(macOS 原生侧栏惯例)
 pub const ROW_HEIGHT_SUB: Pixels = px(26.);
 
+/// 侧栏搜索入口与局部搜索输入共用的外壳；文字输入本身不再叠加组件默认边框。
+pub fn search_field_frame(cx: &App) -> Div {
+    let theme = cx.theme();
+    h_flex()
+        .h(ROW_HEIGHT)
+        .px(SIDEBAR_EDGE)
+        .gap(SPACE_SM)
+        .rounded(theme.radius)
+        .bg(theme.secondary)
+        .text_size(FONT_CAPTION)
+        .text_color(theme.muted_foreground)
+        .hover(|s| {
+            s.bg(theme.secondary_hover)
+                .text_colored(theme.foreground, FONT_CAPTION)
+        })
+}
+
 // ---------------- 圆角 ----------------
 // 四档见 DESIGN.md:面板 12 = `theme.radius_lg`,列表与侧栏选择 8 = `theme.radius`
 // (这两档走主题 token),其余三档无 token,在此定名以免散成魔法数字。
 /// 按钮圆角。**用户钉死 6px,勿改**
 pub const RADIUS_BUTTON: Pixels = px(6.);
+
+/// Page and dialog actions use fixed pixels; the library's rem-based Small
+/// preset becomes 21px at Wake's 14px rem size and crowds mixed-size footers.
+/// Normalize the inner label/icon/gap too: Button renders those in a nested
+/// element, so setting the outer text_size alone does not override its size preset.
+pub fn action_button(button: Button) -> Button {
+    button
+        .small()
+        .h(BUTTON_ACTION_H)
+        .px(SPACE_MD)
+        .text_size(FONT_CAPTION)
+        .rounded(RADIUS_BUTTON)
+}
+
 /// 快捷键标签
 pub const RADIUS_KBD: Pixels = px(5.);
 /// 小胶囊 badge(项目名 / model / source / 各处计数共用)
@@ -191,6 +232,8 @@ pub const RADIUS_CELL: Pixels = px(2.);
 pub const BUTTON_SM_PX: Pixels = px(10.5);
 /// gpui-component `Size::Small` 按钮高度(h_6 = 24),手排胶囊钮取齐用
 pub const BUTTON_SM_H: Pixels = px(24.);
+/// 页面与确认框操作按钮的高度，避免与组件的 rem 尺寸混用。
+pub const BUTTON_ACTION_H: Pixels = px(32.);
 
 // ---------------- 交互态文字 ----------------
 
