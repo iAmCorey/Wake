@@ -130,7 +130,7 @@ impl PiRender {
             .and_then(|u| u.get("totalTokens"))
             .and_then(Value::as_i64)
         {
-            self.tokens_used = Some(t);
+            self.tokens_used = Some(self.tokens_used.unwrap_or(0) + t);
         }
         // 连续 assistant(中间只隔 toolResult)合并成一条,详情页每个回合一条助手消息
         if !matches!(self.messages.last(), Some(m) if m.role == Role::Assistant) {

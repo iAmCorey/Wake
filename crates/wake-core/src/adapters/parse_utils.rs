@@ -197,7 +197,10 @@ pub fn optional_string(v: Option<&Value>) -> Option<String> {
 
 /// usage 对象 → 本次调用的 token 数:`total_tokens` 优先;否则 Anthropic 形
 /// input / output / cache 四项之和;再否则 OpenAI completions 形 prompt +
-/// completion(Qoder 与 CodeBuddy 的 rawUsage 共用)
+/// completion(Qoder 与 CodeBuddy 的 rawUsage 共用)。当以上均为 0 但存在
+/// `credits` 字段时(Qoder CLI 不落盘真实 token,只记录 credits 费用),以
+/// credits 的整数值作为粗略代理返回——非真实 token 数,但使 Qoder 在
+/// Insights 排行榜中可见,而非永远为 NULL。
 pub fn usage_tokens(usage: &Value) -> i64 {
     let total = usage
         .get("total_tokens")
@@ -218,10 +221,19 @@ pub fn usage_tokens(usage: &Value) -> i64 {
     if message_tokens > 0 {
         return message_tokens;
     }
-    ["prompt_tokens", "completion_tokens"]
+    let openai_tokens: i64 = ["prompt_tokens", "completion_tokens"]
         .iter()
         .map(|key| usage.get(*key).and_then(Value::as_i64).unwrap_or(0))
-        .sum()
+        .sum();
+    if openai_tokens > 0 {
+        return openai_tokens;
+    }
+    // Qoder CLI 降级:token 字段全为 0 时,用 credits 整数部分做代理
+    usage
+        .get("credits")
+        .and_then(Value::as_f64)
+        .map(|c| c.round() as i64)
+        .unwrap_or(0)
 }
 
 /// 递归枚举 `dir` 下的 `*.jsonl` 普通文件。file_type 来自 readdir、不额外
