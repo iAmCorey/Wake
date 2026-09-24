@@ -215,8 +215,16 @@ impl AgentId {
             // 官方 app 图标(黑底白 Z),两模式通用
             AgentId::Zcode => "brands/zcode.png",
             AgentId::CraftAgents => "brands/craft-agents.png",
-            // 官方 app 图标(蓝图网格白字),两模式通用
-            AgentId::Devin => "brands/devin.png",
+            // 官网现用的单色标志(三个六边形、中间一个圆形缺口,devin.ai 的 SVG 渲染),
+            // 与 Cursor / Grok 一样按模式取白版或深墨版。lobe-icons 那版蓝青绿六段链不是
+            // 官网现用的;Devin Desktop 的 app 图标是整块圆角方块加蓝图网格,侧栏尺寸下只剩噪点
+            AgentId::Devin => {
+                if dark {
+                    "brands/devin.png"
+                } else {
+                    "brands/devin-light.png"
+                }
+            }
         }
     }
 }
