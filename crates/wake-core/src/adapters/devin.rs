@@ -132,7 +132,7 @@ impl DevinAdapter {
         })
     }
 
-    fn parse(&self, r: &SessionFileRef) -> Result<(SessionMeta, Vec<TranscriptMessage>)> {
+    fn parse(&self, r: &SessionFileRef) -> Result<(SessionMeta, Decoded)> {
         if Path::new(strip_virtual_path(&r.file_path)) != self.db.as_path() {
             return Err(anyhow!("devin database is outside adapter roots"));
         }
@@ -144,9 +144,9 @@ impl DevinAdapter {
             .ok_or_else(|| anyhow!("devin session {} not in db", r.native_id))?;
         let nodes = query_nodes(&ro.conn, &r.native_id)?;
         let chain = main_chain(nodes, row.main_chain_id);
-        let (messages, tokens) = decode_nodes(chain, &row.model);
-        let meta = build_meta(r, &row, &messages, tokens);
-        Ok((meta, messages))
+        let decoded = decode_nodes(chain, &row.model);
+        let meta = build_meta(r, &row, &decoded.messages, decoded.tokens);
+        Ok((meta, decoded))
     }
 }
 
@@ -276,33 +276,28 @@ fn main_chain(rows: Vec<DevinNode>, leaf: Option<i64>) -> Vec<DevinNode> {
         .enumerate()
         .map(|(i, n)| (n.node_id, i))
         .collect();
-    let Some(mut cur) = by_id.get(&leaf).copied() else {
+    let Some(&start) = by_id.get(&leaf) else {
         return rows;
     };
-    let mut rev: Vec<DevinNode> = Vec::new();
-    loop {
-        if rev.len() == rows.len() {
-            return rows;
-        }
-        let node = DevinNode {
-            node_id: rows[cur].node_id,
-            parent_node_id: rows[cur].parent_node_id,
-            chat_message: rows[cur].chat_message.clone(),
-            created_ms: rows[cur].created_ms,
-        };
-        match node.parent_node_id.and_then(|p| by_id.get(&p)).copied() {
-            Some(parent) => {
-                rev.push(node);
-                cur = parent;
+    // 先按下标走完整条链,确认走得到根再搬节点
+    let mut chain = vec![start];
+    let mut cur = start;
+    while let Some(parent) = rows[cur].parent_node_id {
+        match by_id.get(&parent) {
+            // 链不可能比全部节点还长,再长就是成环
+            Some(&ix) if chain.len() < rows.len() => {
+                chain.push(ix);
+                cur = ix;
             }
-            None => {
-                rev.push(node);
-                break;
-            }
+            _ => return rows,
         }
     }
-    rev.reverse();
-    rev
+    let mut slots: Vec<Option<DevinNode>> = rows.into_iter().map(Some).collect();
+    chain
+        .iter()
+        .rev()
+        .filter_map(|&ix| slots[ix].take())
+        .collect()
 }
 
 /// compaction 请求的正文特征(Devin 把摘要写成隐藏辅助会话,也内联进主链)
@@ -348,15 +343,24 @@ fn metric_i64(metrics: &Value, key: &str) -> i64 {
     metrics.get(key).and_then(Value::as_i64).unwrap_or(0)
 }
 
-/// 主链逐节点解码;返回 (消息, token 合计)。token 在消息取舍之外单独累计:
-/// content 为空但消耗了 token 的 assistant 收尾节点照样入账
-fn decode_nodes(chain: Vec<DevinNode>, session_model: &str) -> (Vec<TranscriptMessage>, i64) {
+struct Decoded {
+    messages: Vec<TranscriptMessage>,
+    /// 在消息取舍之外单独累计:content 为空但消耗了 token 的 assistant 收尾节点照样入账
+    tokens: i64,
+    /// 解不开的 chat_message 与词汇表外的 role:格式漂移的金丝雀
+    unknown: u32,
+}
+
+/// 主链逐节点解码
+fn decode_nodes(chain: Vec<DevinNode>, session_model: &str) -> Decoded {
     let mut messages: Vec<TranscriptMessage> = Vec::new();
     let mut tokens = 0i64;
+    let mut unknown = 0u32;
     // tool_call_id → (消息下标, tool_calls 下标)
     let mut by_id: HashMap<String, (usize, usize)> = HashMap::new();
     for node in chain {
         let Ok(v) = serde_json::from_str::<Value>(&node.chat_message) else {
+            unknown += 1;
             continue;
         };
         if let Some(metrics) = v.pointer("/metadata/metrics") {
@@ -439,11 +443,15 @@ fn decode_nodes(chain: Vec<DevinNode>, session_model: &str) -> (Vec<TranscriptMe
                 msg.kind = MessageKind::Meta;
                 messages.push(msg);
             }
-            _ => {}
+            _ => unknown += 1,
         }
     }
     assign_seq(&mut messages);
-    (messages, tokens)
+    Decoded {
+        messages,
+        tokens,
+        unknown,
+    }
 }
 
 impl AgentAdapter for DevinAdapter {
@@ -475,17 +483,21 @@ impl AgentAdapter for DevinAdapter {
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
-        let (meta, messages) = self.parse(r)?;
-        Ok(ParsedSession::derive(meta, &messages, 0))
+        let (meta, decoded) = self.parse(r)?;
+        Ok(ParsedSession::derive(
+            meta,
+            &decoded.messages,
+            decoded.unknown,
+        ))
     }
 
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript> {
-        let (meta, messages) = self.parse(r)?;
+        let (meta, decoded) = self.parse(r)?;
         Ok(ParsedTranscript {
             meta,
-            mainline: messages,
+            mainline: decoded.messages,
             sidechains: Vec::new(),
-            unknown_line_count: 0,
+            unknown_line_count: decoded.unknown,
         })
     }
 

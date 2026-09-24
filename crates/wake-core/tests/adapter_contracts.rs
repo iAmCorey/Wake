@@ -2935,6 +2935,54 @@ fn devin_degrades_on_old_schema() {
     assert_eq!(s.meta.tokens_used, Some(15));
 }
 
+/// 主链走不到根(叶子的父节点不在库里)就退回全部节点,不给半截链;解不开的
+/// chat_message 与词汇表外的 role 计进 unknown(格式漂移的金丝雀)
+#[test]
+fn devin_broken_chain_falls_back_and_counts_unknown_nodes() {
+    setup();
+    let home = tempfile::tempdir().unwrap();
+    let db_dir = home.path().join("cli");
+    fs::create_dir_all(&db_dir).unwrap();
+    let conn = rusqlite::Connection::open(db_dir.join("sessions.db")).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE sessions (id TEXT PRIMARY KEY, working_directory TEXT NOT NULL,
+                               model TEXT NOT NULL, created_at INTEGER NOT NULL,
+                               last_activity_at INTEGER NOT NULL, title TEXT,
+                               main_chain_id INTEGER, hidden INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY, session_id TEXT NOT NULL,
+                                    node_id INTEGER NOT NULL, parent_node_id INTEGER,
+                                    chat_message TEXT NOT NULL, created_at INTEGER NOT NULL);
+        INSERT INTO sessions VALUES ('gap-1','/work/gap','swe-2',1789000000,1789000005,'gap',5,0);
+        INSERT INTO message_nodes (session_id, node_id, parent_node_id, chat_message, created_at) VALUES
+            ('gap-1',1,NULL,'{"role":"user","content":"第一句"}',1789000001),
+            ('gap-1',2,1,'{"role":"assistant","content":"第一句的回答"}',1789000002),
+            ('gap-1',3,2,'{"role":"developer","content":"没见过的角色"}',1789000003),
+            ('gap-1',4,3,'{ torn',1789000004),
+            ('gap-1',5,99,'{"role":"assistant","content":"父节点 99 不在库里"}',1789000005);
+        "#,
+    )
+    .unwrap();
+    drop(conn);
+
+    let adapter = DevinAdapter::new().with_custom_root(home.path().to_path_buf());
+    let refs = adapter.list_session_files().unwrap();
+    let t = adapter.parse_transcript(&refs[0]).unwrap();
+    assert_eq!(
+        t.mainline
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect::<Vec<_>>(),
+        ["第一句", "第一句的回答", "父节点 99 不在库里"],
+        "只剩叶子那一句就把前面的对话丢了"
+    );
+    assert_eq!(t.unknown_line_count, 2, "没见过的 role + 写坏的 JSON");
+    assert_eq!(
+        adapter.parse_session(&refs[0]).unwrap().unknown_line_count,
+        2
+    );
+}
+
 /// 自定义 location:`cli/sessions.db` 与 `cli` 层在入库前上提到数据根
 /// (normalize_custom_root),孤立库拷贝原样进构造器
 #[test]
