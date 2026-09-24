@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "anchors": {
+    "msg-1786200002000-a2": {
+      "sdkSessionId": "c1a0de00-aaaa-4bbb-8ccc-00000000000a",
+      "sdkMessageUuid": "msg_01Fixture01"
+    },
+    "msg-1786200005000-a3": {
+      "sdkSessionId": "c1a0de00-aaaa-4bbb-8ccc-000000000001",
+      "sdkMessageUuid": "msg_01Fixture03"
+    }
+  }
+}

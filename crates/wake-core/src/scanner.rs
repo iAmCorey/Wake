@@ -320,6 +320,10 @@ fn run_scan_inner(
     for adapter in adapters {
         adapter.begin_scan();
     }
+    // 认领先对账、再枚举:新认领的替身在这一步就出库,枚举时直接跳过、不白解析;
+    // 撤销的认领(认领方会话没了)这一轮就放替身回来
+    refresh_claims(adapters, store, events);
+    let claimed = store.claimed_keys().unwrap_or_default();
     let force_grok_backfill = store.needs_grok_parent_backfill();
     // FTS 派生规则换代(db::FTS_FORMAT):这一轮把 mtime/size 没变的也全部重解析。
     // 跑完就清旗子,不按"全部成功"重试——解析失败的文件下次也不会自己好,它变了
@@ -371,6 +375,9 @@ fn run_scan_inner(
             .filter(|r| {
                 !store.is_tombstoned(&r.file_path) && !store.is_key_tombstoned(&key_of(ix, r))
             })
+            // 被外壳产品认领的替身(Craft 的 Claude 后端在 ~/.claude 落的那份)不索引:
+            // 不在 seen_paths 里,库里若还有它的行,下面的删除检测一并清掉
+            .filter(|r| !claimed.contains(&key_of(ix, r)))
             // 无任何根认领的引用(越界枚举或合成测试)保守放行给枚举者;
             // 过滤只裁决"确有更深的根拥有它"的情形
             .filter(|r| owner_of(&r.file_path).is_none_or(|o| o == ix))
@@ -607,7 +614,7 @@ fn run_scan_inner(
         }
     }
 
-    if sync_parent_links(adapters, store)? {
+    if sync_parent_links(adapters, store, None)? {
         events.on_sessions_changed();
     }
     if sync_memories(adapters, store) {
@@ -748,13 +755,20 @@ fn sync_memories(adapters: &[Box<dyn AgentAdapter>], store: &Arc<Store>) -> bool
 /// 多 location 下关系元数据跟着 parent 会话，而 child 的胜出文件可能在另一根。
 /// 因此先接受“关系目标 parent 的胜出文件也属于该快照”的直接边，再跨快照把
 /// 嵌套链扁平到 root。解除/换父前重解析 child，恢复被旧父项目覆盖的自身归属。
-fn sync_parent_links(adapters: &[Box<dyn AgentAdapter>], store: &Arc<Store>) -> Result<bool> {
+/// `only` 把对账限在这些 agent(watcher 增量只动了它们的文件;关系只连同家会话,
+/// 别家的快照不会因此变);全量扫描给 None 对账全部
+fn sync_parent_links(
+    adapters: &[Box<dyn AgentAdapter>],
+    store: &Arc<Store>,
+    only: Option<&std::collections::HashSet<AgentId>>,
+) -> Result<bool> {
     let mut managed_agents = std::collections::HashSet::new();
     let mut unknown_agents = std::collections::HashSet::new();
     let mut links_by_adapter: Vec<std::collections::HashMap<String, String>> =
         Vec::with_capacity(adapters.len());
     for adapter in adapters {
-        if adapter.manages_parent_links() {
+        if adapter.manages_parent_links() && only.is_none_or(|only| only.contains(&adapter.agent()))
+        {
             managed_agents.insert(adapter.agent());
             match adapter.parent_links() {
                 Some(links) => links_by_adapter.push(links.into_iter().collect()),
@@ -781,8 +795,8 @@ fn sync_parent_links(adapters: &[Box<dyn AgentAdapter>], store: &Arc<Store>) -> 
         }
         // 这一家眼下一条关系都没有、库里也没有:整段对账是纯浪费——
         // session_sources_for_agent 要把这家全部会话读一遍,replace_parent_links
-        // 还要开写事务与扫描线程抢锁。watcher 只要**任一**受影响 agent 管关系
-        // 就会走到这里,而多数 agent 常年零关系(Codex 是 spawn_agent 用过才有)
+        // 还要开写事务与扫描线程抢锁。全量扫描对每家管关系的都走一遍,而多数
+        // agent 常年零关系(Codex 是 spawn_agent 用过才有)
         let current = store.parent_links_for_agent(agent)?;
         let has_links = links_by_adapter
             .iter()
@@ -803,15 +817,19 @@ fn sync_parent_links(adapters: &[Box<dyn AgentAdapter>], store: &Arc<Store>) -> 
         }
 
         // meta.json 位于 parent 的 location。只采纳由当前胜出 parent 所属快照
-        // 提供的边，避免另一份陈旧备份把已解除的关系重新挂回去。
+        // 提供的边，避免另一份陈旧备份把已解除的关系重新挂回去。关系写在 child
+        // 自己文件里的家(`parent_links_in_child`,Craft)按同一道理换成 child 的
+        // 胜出文件:那份首行才是现行的关系,parent 归哪个 location 无关
         let mut direct = std::collections::HashMap::new();
         for (adapter_ix, links) in links_by_adapter.iter().enumerate() {
             if adapters[adapter_ix].agent() != agent {
                 continue;
             }
+            let in_child = adapters[adapter_ix].parent_links_in_child();
             for (child, parent) in links {
+                let holder = if in_child { child } else { parent };
                 if source_by_key.contains_key(child)
-                    && owner_by_key.get(parent).copied() == Some(adapter_ix)
+                    && owner_by_key.get(holder).copied() == Some(adapter_ix)
                 {
                     direct.insert(child.clone(), parent.clone());
                 }
@@ -853,13 +871,20 @@ fn sync_parent_links(adapters: &[Box<dyn AgentAdapter>], store: &Arc<Store>) -> 
         // 在 parent 写进库之前就读了 sources 快照。少了这道判断,这一批会拿
         // replace_parent_links 的整家清空把全量刚建好的关系抹掉,而 Codex 没有
         // is_parent_link_event、state DB 也不在监听路径里,没有第二次机会补救
+        // 关系写在 child 里的家只算 child 胜出文件那份的声称:落选的旧备份还写着的
+        // 过期关系不该靠这道守卫留下来
+        let owners = &owner_by_key;
         let asserted: std::collections::HashSet<(&str, &str)> = links_by_adapter
             .iter()
             .enumerate()
             .filter(|(adapter_ix, _)| adapters[*adapter_ix].agent() == agent)
-            .flat_map(|(_, links)| {
+            .flat_map(|(adapter_ix, links)| {
+                let in_child = adapters[adapter_ix].parent_links_in_child();
                 links
                     .iter()
+                    .filter(move |(child, _)| {
+                        !in_child || owners.get(*child).copied() == Some(adapter_ix)
+                    })
                     .map(|(child, parent)| (child.as_str(), parent.as_str()))
             })
             .collect();
@@ -897,7 +922,66 @@ fn sync_parent_links(adapters: &[Box<dyn AgentAdapter>], store: &Arc<Store>) -> 
     Ok(changed)
 }
 
-/// watcher 收到关系边车事件、但没有会话主文件可交给 `scan_files` 时使用。
+/// 外壳产品对别家替身的认领(`AgentAdapter::claimed_sessions`)按认领方 agent 整组对账:
+/// 同家各实例(默认根、自定义根、远程镜像)的结果合并,key 按**报认领的实例**的 host 拼
+/// (与枚举时的 key_of 同一个 session_key);任一实例这一刻读不出(None)这一家整段跳过、
+/// 库里的认领原样保留(与 sync_parent_links 同一纪律)。库里有、roster 里已经没有的认领方
+/// (location 全删或停用)整组撤销——它藏起来的替身得放回来。替身的删除在
+/// `replace_claims` 的事务里做;返回库是否变了
+fn sync_claims(adapters: &[Box<dyn AgentAdapter>], store: &Arc<Store>) -> Result<bool> {
+    let mut claims: std::collections::BTreeMap<AgentId, Option<Vec<String>>> =
+        std::collections::BTreeMap::new();
+    for adapter in adapters.iter().filter(|a| a.manages_claims()) {
+        let slot = claims
+            .entry(adapter.agent())
+            .or_insert_with(|| Some(Vec::new()));
+        match adapter.claimed_sessions() {
+            Some(claimed) => {
+                if let Some(keys) = slot {
+                    keys.extend(
+                        claimed
+                            .iter()
+                            .map(|(agent, native)| session_key(*agent, adapter.host(), native)),
+                    );
+                }
+            }
+            None => {
+                eprintln!(
+                    "[scanner] claims of {} unreadable this round; keeping the indexed ones",
+                    adapter.agent().as_str()
+                );
+                *slot = None;
+            }
+        }
+    }
+    for claimant in store.claimants()? {
+        claims.entry(claimant).or_insert_with(|| Some(Vec::new()));
+    }
+    let mut changed = false;
+    for (claimant, keys) in claims {
+        if let Some(keys) = keys {
+            changed |= store.replace_claims(claimant, &keys)?;
+        }
+    }
+    Ok(changed)
+}
+
+/// 对账认领并通知列表;全量扫描开头与 watcher(认领方的快照事件,写库之前)共用。
+/// 失败只记日志、不截断扫描——写入闸门仍按库里现有的认领把关。撤销的认领不会让替身
+/// 在这一刻回来:它的行早删了、文件也没变,下一轮扫描枚举到它才重新入库
+pub fn refresh_claims(
+    adapters: &[Box<dyn AgentAdapter>],
+    store: &Arc<Store>,
+    events: &dyn ScanEvents,
+) {
+    match sync_claims(adapters, store) {
+        Ok(true) => events.on_sessions_changed(),
+        Ok(false) => {}
+        Err(error) => eprintln!("[scanner] claim refresh failed: {error}"),
+    }
+}
+
+/// watcher 收到快照事件(关系边车一类)、但没有会话主文件可交给 `scan_files` 时使用。
 /// 同 agent 的全部 location 必须一起刷新，否则跨 location 的父链会被局部快照截断。
 pub fn refresh_parent_links(
     adapters: &[Box<dyn AgentAdapter>],
@@ -915,7 +999,8 @@ pub fn refresh_parent_links(
     if !refreshable {
         return;
     }
-    match sync_parent_links(adapters, store) {
+    let only: std::collections::HashSet<AgentId> = affected_agents.iter().copied().collect();
+    match sync_parent_links(adapters, store, Some(&only)) {
         Ok(true) => events.on_sessions_changed(),
         Ok(false) => {}
         Err(error) => eprintln!("[scanner] parent-link sidecar refresh failed: {error}"),
@@ -1003,6 +1088,7 @@ pub fn scan_files(
             adapter.begin_scan();
         }
     }
+    let mut changed = false;
     // 按**实例**分组,不是按 agent:自定义 location 让同 agent 有多实例,
     // 文件必须交给拥有其根的那个(gemini/kimi 的 cwd 反查、codex 的 state DB
     // 都是实例相对侧档);quick_meta 是整库查询,每组只查一次,不能逐文件调。
@@ -1016,13 +1102,14 @@ pub fn scan_files(
         let Some(ix) = crate::adapters::adapter_ix_for(adapters, r.agent, &r.file_path) else {
             continue;
         };
-        if store.is_key_tombstoned(&session_key(r.agent, adapters[ix].host(), &r.native_id)) {
+        let key = session_key(r.agent, adapters[ix].host(), &r.native_id);
+        // 认领的替身连解析都省了;合并改过 key 的情形由写入闸门兜住
+        if store.is_key_tombstoned(&key) || store.is_key_claimed(&key) {
             continue;
         }
         by_adapter.entry(ix).or_default().push(r);
     }
 
-    let mut changed = false;
     for (ix, group) in by_adapter {
         let adapter = &adapters[ix];
         let quick = adapter.quick_meta(&group);
@@ -1069,10 +1156,11 @@ pub fn scan_files(
         .iter()
         .any(|adapter| affected_agents.contains(&adapter.agent()) && adapter.manages_parent_links())
     {
-        changed |= sync_parent_links(adapters, store).unwrap_or_else(|error| {
-            eprintln!("[scanner] parent-link refresh failed: {error}");
-            false
-        });
+        changed |=
+            sync_parent_links(adapters, store, Some(&affected_agents)).unwrap_or_else(|error| {
+                eprintln!("[scanner] parent-link refresh failed: {error}");
+                false
+            });
     }
     if changed {
         events.on_sessions_changed();

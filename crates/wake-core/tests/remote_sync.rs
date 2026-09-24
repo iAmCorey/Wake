@@ -166,6 +166,21 @@ fn remote_pipeline_end_to_end() {
     );
     assert!(!cache.join(".codex/auth.json").exists(), "凭证进了缓存");
     assert!(!cache.join(".copilot").exists());
+    // Craft Agents:会话与回合锚点(认领要读)到位;源配置(可能带 client secret)、
+    // 附件、引擎原料与原子写的中间文件被带层级的 exclude 挡在外面
+    let craft_ws = cache.join(".craft-agent/workspaces/wakefx-ws");
+    let otter = craft_ws.join("sessions/260801-brave-otter");
+    assert!(
+        otter.join("session.jsonl").is_file(),
+        "Craft 会话没同步到缓存"
+    );
+    assert!(otter.join("meta/claude-turn-anchors.json").is_file());
+    assert!(!craft_ws.join("sources").exists(), "Craft 的源配置进了缓存");
+    assert!(!otter.join("attachments").exists());
+    assert!(!otter.join("session.jsonl.tmp").exists());
+    assert!(!craft_ws
+        .join("sessions/260802-quiet-lake/.pi-sessions")
+        .exists());
     assert!(
         cache
             .join(".gemini/antigravity-cli/conversation_summaries.db")

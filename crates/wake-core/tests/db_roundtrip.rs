@@ -2003,3 +2003,53 @@ fn an_unwritable_holder_note_does_not_forfeit_the_lock() {
         Ownership::Ours(_) => panic!("the lock must still be held"),
     }
 }
+
+/// 外壳产品的认领(claimed_sessions 表):认领落地即删掉已入库的替身(连 FTS 一起)、
+/// 两条写库路径都挡住它、认领撤销后能照常写回;认领方清单给"roster 里已经没有的
+/// 认领方整组撤销"用
+#[test]
+fn claims_hide_the_copy_until_released() {
+    let (_dir, store) = temp_store();
+    let copy = meta("claude-code:engine-1", "引擎那份转录");
+    store
+        .write_session(
+            &copy,
+            copy.updated_at,
+            &[unit(0, Role::User, "二维码扫描崩了")],
+        )
+        .unwrap();
+    let never_ranks = |_: &str| 0u8;
+
+    assert!(store
+        .replace_claims(AgentId::CraftAgents, &[copy.key.clone()])
+        .unwrap());
+    assert!(
+        store.get_session(&copy.key).unwrap().is_none(),
+        "替身没出库"
+    );
+    assert!(
+        store.search("二维码", &[], None, 10).unwrap().0.is_empty(),
+        "替身的正文还在 FTS 里"
+    );
+    assert!(store.is_key_claimed(&copy.key));
+    assert_eq!(store.claimants().unwrap(), vec![AgentId::CraftAgents]);
+    // 全量 / 增量共用的写入闸门与 quick 路径都挡
+    assert!(!store
+        .write_session_guarded(&copy, copy.updated_at, &[], &[], &never_ranks, None)
+        .unwrap());
+    store.write_meta_only(&[(copy.clone(), 0)]).unwrap();
+    assert!(store.get_session(&copy.key).unwrap().is_none());
+    // 同一快照再对一遍:没有变化
+    assert!(!store
+        .replace_claims(AgentId::CraftAgents, &[copy.key.clone()])
+        .unwrap());
+
+    // 撤销(认领方会话没了):替身可以写回
+    assert!(store.replace_claims(AgentId::CraftAgents, &[]).unwrap());
+    assert!(!store.is_key_claimed(&copy.key));
+    assert!(store.claimants().unwrap().is_empty());
+    assert!(store
+        .write_session_guarded(&copy, copy.updated_at, &[], &[], &never_ranks, None)
+        .unwrap());
+    assert!(store.get_session(&copy.key).unwrap().is_some());
+}

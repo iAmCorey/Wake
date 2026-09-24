@@ -108,6 +108,8 @@ pub fn agent_series_color(agent: wake_core::models::AgentId) -> u32 {
         Workbuddy => 0x0EC8A9,
         // 品牌是黑白的,趋势图里给一档中性石板灰
         Zcode => 0x8B95A5,
+        // app 图标像素 "C" 的紫(取自内嵌 PNG),比 Kiro 的电光紫灰、暗
+        CraftAgents => 0x9570BE,
     }
 }
 

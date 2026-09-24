@@ -183,6 +183,17 @@ CREATE TABLE IF NOT EXISTS wake_lookups (
   tool        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_wake_lookups_session ON wake_lookups(session_key);
+
+-- 外壳产品认领的别家会话(2026-09-24,Craft Agents:它的 Claude 后端跑的是 Claude Agent
+-- SDK,引擎在 ~/.claude/projects 里另落一份转录,同一段对话会以 Claude Code 身份再列一次)。
+-- key 是替身的会话 key,claimant 是认领方 agent。被认领的 key 不入库(写入闸门在
+-- write_session_guarded / write_meta_only 的事务里),认领落地时已入库的一并删掉;
+-- 每轮扫描按认领方整组替换,认领方的会话没了,替身下一轮就回来。只有 GUI 与写库的
+-- CLI 碰它,只读读者不查(NEWEST_* 不动)
+CREATE TABLE IF NOT EXISTS claimed_sessions (
+  key      TEXT PRIMARY KEY,
+  claimant TEXT NOT NULL
+);
 "#;
 
 /// 会话元数据和 FTS 单元的派生规则版本(`adapters::units_from_messages` 及其上游解析)。改了派生
@@ -741,6 +752,10 @@ impl Store {
     ) -> Result<bool> {
         let mut conn = self.write.lock().unwrap();
         let tx = conn.transaction()?;
+        // 被外壳产品认领的替身不入库。与写入同一事务:认领在并发间隙落地也挡得住
+        if is_claimed(&tx, &meta.key)? {
+            return Ok(false);
+        }
         let cur: Option<(String, i64)> = tx
             .query_row(
                 "SELECT file_path, file_mtime FROM sessions WHERE key = ?1",
@@ -776,7 +791,10 @@ impl Store {
         let mut conn = self.write.lock().unwrap();
         let tx = conn.transaction()?;
         for (meta, mtime) in metas {
-            upsert_session(&tx, meta, *mtime)?;
+            // quick 路径也是写库路径,认领的替身同样挡在门外
+            if !is_claimed(&tx, &meta.key)? {
+                upsert_session(&tx, meta, *mtime)?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -981,9 +999,7 @@ impl Store {
                     |r| r.get(0),
                 )
                 .optional()?;
-            clear_session_rows(&tx, key)?;
-            tx.execute("DELETE FROM titles_fts WHERE key = ?1", params![key])?;
-            tx.execute("DELETE FROM sessions WHERE key = ?1", params![key])?;
+            delete_session_row(&tx, key)?;
             if tombstone {
                 if let Some(fp) = file_path.or_else(|| {
                     recorded
@@ -1513,6 +1529,81 @@ impl Store {
         .optional()
         .map(|o| o.is_some())
         .unwrap_or(false)
+    }
+
+    /// 被外壳产品认领的全部会话 key(见 claimed_sessions 表)。scanner 在枚举时一次
+    /// 取齐,跳过这些文件的解析;写入闸门另在事务里逐条查
+    pub fn claimed_keys(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare_cached("SELECT key FROM claimed_sessions")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// 单条查询版,watcher 的增量路由用(与 is_key_tombstoned 同位置)
+    pub fn is_key_claimed(&self, key: &str) -> bool {
+        is_claimed(&self.read.lock().unwrap(), key).unwrap_or(false)
+    }
+
+    /// 库里持有认领的 agent。roster 里已经没有的认领方(location 全删、停用)要整组
+    /// 撤销,否则它藏起来的替身就一直藏着
+    pub fn claimants(&self) -> Result<Vec<AgentId>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare_cached("SELECT DISTINCT claimant FROM claimed_sessions")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let names: Vec<String> = rows.collect::<rusqlite::Result<_>>()?;
+        Ok(names.iter().filter_map(|n| AgentId::from_str(n)).collect())
+    }
+
+    /// 用某个认领方的全量快照原子替换它的认领,并在同一事务里删掉已经入库的替身
+    /// (认领之前扫进来的那些——清法与 remove_sessions 相同,不留墓碑:认领撤销后
+    /// 替身要能回来)。返回库是否变了
+    pub fn replace_claims(&self, claimant: AgentId, keys: &[String]) -> Result<bool> {
+        let wanted: std::collections::BTreeSet<&str> = keys.iter().map(String::as_str).collect();
+        let unchanged = |conn: &Connection| -> Result<bool> {
+            let mut stmt = conn.prepare_cached(
+                "SELECT key FROM claimed_sessions WHERE claimant = ?1 ORDER BY key",
+            )?;
+            let held: Vec<String> = stmt
+                .query_map(params![claimant.as_str()], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(held.iter().map(String::as_str).eq(wanted.iter().copied()))
+        };
+        // 认领方每存一次盘、每轮扫描都会走到这里,而认领集合几乎从不变:在读连接上比一眼
+        // 就回,不碰写锁。集合没变时库里也不会冒出替身——写入闸门一直挡着
+        if unchanged(&self.read.lock().unwrap())? {
+            return Ok(false);
+        }
+        let mut conn = self.write.lock().unwrap();
+        let tx = conn.transaction()?;
+        // 并发的另一轮可能刚写完同一份
+        if unchanged(&tx)? {
+            return Ok(false);
+        }
+        tx.execute(
+            "DELETE FROM claimed_sessions WHERE claimant = ?1",
+            params![claimant.as_str()],
+        )?;
+        {
+            let mut insert = tx.prepare_cached(
+                "INSERT OR IGNORE INTO claimed_sessions(key, claimant) VALUES (?1, ?2)",
+            )?;
+            for key in &wanted {
+                insert.execute(params![key, claimant.as_str()])?;
+            }
+        }
+        let indexed: Vec<String> = tx
+            .prepare_cached(
+                "SELECT s.key FROM sessions s JOIN claimed_sessions c ON c.key = s.key
+                 WHERE c.claimant = ?1",
+            )?
+            .query_map(params![claimant.as_str()], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for key in &indexed {
+            delete_session_row(&tx, key)?;
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     pub fn list_sessions(&self, f: &SessionFilter) -> Result<(Vec<SessionMeta>, i64)> {
@@ -3025,6 +3116,25 @@ fn clear_session_rows(tx: &rusqlite::Transaction<'_>, key: &str) -> Result<()> {
         .execute(params![key])?;
     tx.prepare_cached("DELETE FROM wake_lookups WHERE session_key = ?1")?
         .execute(params![key])?;
+    Ok(())
+}
+
+/// 认领检查:写入闸门(write_session_guarded / write_meta_only,在写事务里)与
+/// is_key_claimed(读连接)共用
+fn is_claimed(conn: &Connection, key: &str) -> Result<bool> {
+    Ok(conn
+        .prepare_cached("SELECT 1 FROM claimed_sessions WHERE key = ?1")?
+        .query_row(params![key], |_| Ok(()))
+        .optional()?
+        .is_some())
+}
+
+/// 从库里删掉一条会话:派生行、标题索引与会话行本身。删除(remove_sessions)与认领
+/// (replace_claims)共用,墓碑由调用方决定
+fn delete_session_row(tx: &rusqlite::Transaction<'_>, key: &str) -> Result<()> {
+    clear_session_rows(tx, key)?;
+    tx.execute("DELETE FROM titles_fts WHERE key = ?1", params![key])?;
+    tx.execute("DELETE FROM sessions WHERE key = ?1", params![key])?;
     Ok(())
 }
 

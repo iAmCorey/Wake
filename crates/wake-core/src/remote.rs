@@ -16,7 +16,7 @@
 //! ①openrsync(macOS 15+ 的 /usr/bin/rsync)做发送端时,某个源连父目录
 //! 都不存在会让它中止整份文件列表,排在后面的源全部静默不传,退出码却
 //! 只是 23;②rsync 家族只要发送端遇到任何 I/O 错误(缺源即算)就整体跳过
-//! 删除阶段——没有哪台机器十九家全装,`--delete` 就永远不会生效。
+//! 删除阶段——没有哪台机器二十家全装,`--delete` 就永远不会生效。
 //!
 //! 同步跑在**独立于扫描的线程**(Workbench::spawn_remote_sync):本地扫描
 //! 不等网络,不可达 host 只拖慢自己;缓存落盘由 watcher 增量收编,同步
@@ -49,7 +49,7 @@ pub struct RemoteAgentLayout {
     pub exclude: &'static [&'static str],
 }
 
-/// 十九家的远程布局。远程主机按 Linux/macOS 默认路径假设(两平台一致,
+/// 二十家的远程布局。远程主机按 Linux/macOS 默认路径假设(两平台一致,
 /// 均为 home 相对;OpenCode 的 XDG 变体、CODEX_HOME 这类 env 覆盖在远端
 /// 探测不到,阶段 1 不支持非默认远程布局)。
 pub const REMOTE_LAYOUTS: &[RemoteAgentLayout] = &[
@@ -213,6 +213,35 @@ pub const REMOTE_LAYOUTS: &[RemoteAgentLayout] = &[
             ".zcode/cli/memories",
         ],
         exclude: &[],
+    },
+    RemoteAgentLayout {
+        agent: AgentId::CraftAgents,
+        // 工作区集合层(远端建在默认位置之外的工作区同步不到)。只要每个会话的
+        // session.jsonl 与 meta/ 里的回合锚点:工作区的 sources/ 是源配置(可能带 OAuth
+        // client secret;凭证本体 credentials.enc 在 home 直属、不在白名单里),
+        // automations.json 可能带 webhook 头;会话目录里的附件 / 下载 / 数据 / 长回复 /
+        // 计划 / 缩小过的图片(tmp)/ 源服务存下的大响应(responses)与引擎原料
+        // (.pi-sessions、.pi-agent——Pi 的 agentDir 默认放 auth.json)量大且不读。模式带
+        // 层级:不带 `/` 的 rsync 模式按文件名全树匹配,`data` / `sources` 这种泛名会把
+        // 同名的工作区整个漏掉(默认位置下叫 "Data" 的工作区目录就是 data/)
+        mount: ".craft-agent/workspaces",
+        sync_paths: &[".craft-agent/workspaces"],
+        exclude: &[
+            "workspaces/*/sources",
+            "workspaces/*/skills",
+            "workspaces/*/automations.json",
+            "workspaces/*/events.jsonl",
+            "workspaces/*/sessions/*/attachments",
+            "workspaces/*/sessions/*/downloads",
+            "workspaces/*/sessions/*/data",
+            "workspaces/*/sessions/*/long_responses",
+            "workspaces/*/sessions/*/plans",
+            "workspaces/*/sessions/*/tmp",
+            "workspaces/*/sessions/*/responses",
+            "workspaces/*/sessions/*/.pi-sessions",
+            "workspaces/*/sessions/*/.pi-agent",
+            "session.jsonl.tmp",
+        ],
     },
 ];
 
@@ -655,7 +684,9 @@ mod tests {
         );
         // 目标在最后
         assert_eq!(args.last().unwrap(), "/tmp/cache/devbox");
-        // 各家声明的 exclude 全部落到命令行(OpenClaw 的凭证靠它挡)
+        // 各家声明的 exclude 全部落到命令行(OpenClaw 的凭证靠它挡)。`/` 在字符集里:
+        // exclude 是单独一个 argv 交给本地 rsync、经协议传给发送端,不过任何 shell;
+        // 带层级的模式(Craft 的 workspaces/*/sources)只匹配那一层,不误伤同名目录
         for pat in REMOTE_LAYOUTS.iter().flat_map(|l| l.exclude.iter()) {
             assert!(
                 args.contains(&format!("--exclude={pat}")),
@@ -663,10 +694,15 @@ mod tests {
             );
             assert!(
                 pat.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '*')),
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '*' | '/')),
                 "exclude {pat:?} needs quoting"
+            );
+            assert!(
+                !pat.starts_with('/'),
+                "exclude {pat:?} 锚在传输根上,别家的树对不上"
             );
         }
         assert!(args.contains(&"--exclude=openclaw-agent.sqlite*".to_string()));
+        assert!(args.contains(&"--exclude=workspaces/*/sources".to_string()));
     }
 }

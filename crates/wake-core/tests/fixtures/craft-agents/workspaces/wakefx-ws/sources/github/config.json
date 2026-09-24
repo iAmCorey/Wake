@@ -1,0 +1,7 @@
+{
+  "slug": "github",
+  "type": "api",
+  "api": {
+    "googleOAuthClientSecret": "NOT-A-REAL-SECRET"
+  }
+}

@@ -3,6 +3,7 @@ pub mod claude;
 pub mod codebuddy;
 pub mod codex;
 pub mod copilot;
+pub mod craft;
 pub mod cursor;
 pub mod cursor_ide;
 pub mod dsh;
@@ -153,9 +154,11 @@ pub trait AgentAdapter: Send + Sync {
     fn parent_links(&self) -> Option<Vec<(String, String)>> {
         Some(Vec::new())
     }
-    /// watcher 事件是否会改变父子关系快照。关系边车不是会话主文件，不能塞进
-    /// `file_ref`；命中后 watcher 会单独刷新同 agent 的所有关系快照。
-    fn is_parent_link_event(&self, _path: &Path) -> bool {
+    /// watcher 事件是否会改变本家的跨会话快照(`parent_links` / `claimed_sessions`)。
+    /// 这类文件未必是 `file_ref` 收的会话主文件(Grok 的关系边车、Craft 隐藏会话的
+    /// 首行与回合锚点),命中后 watcher 在写库前刷新认领、写库后刷新父子关系——
+    /// 不论事件种类(删除也算)
+    fn is_snapshot_event(&self, _path: &Path) -> bool {
         false
     }
     /// 本家会话文件所在的根位置(目录,或 SQLite 型的库文件),**不论当前存不存在**。
@@ -164,7 +167,7 @@ pub trait AgentAdapter: Send + Sync {
     /// 拥有本家 session 文件的位置",凭据/配置/索引这类不产生会话的文件不列。
     /// 新增 adapter 必须实现:没有默认值,漏了编译就过不去
     fn data_roots(&self) -> Vec<std::path::PathBuf>;
-    /// 文件监听根目录。默认 = data_roots 中现存的目录,十九家实测全部吻合:
+    /// 文件监听根目录。默认 = data_roots 中现存的目录,二十家实测全部吻合:
     /// 目录型给出自己的 root,SQLite 型的根是库文件、天然筛空(watcher 只认
     /// .jsonl,库变更靠启动/手动刷新),codex 的 sessions + archived 一并覆盖。
     /// 只有当监听范围确实不同于数据根时才覆写——否则一次根路径搬迁
@@ -209,6 +212,29 @@ pub trait AgentAdapter: Send + Sync {
     fn parent_links_global(&self) -> bool {
         false
     }
+    /// `parent_links` 的边写在**子会话**自己的文件里(Craft 的首行 parentSessionId / 分支来源),
+    /// 不是长在 parent 那个 location 里的边车:多 location 下 scanner 改认"报边者拥有 child 的
+    /// 胜出文件"——落选的旧副本里过期的关系不采纳,parent 归别的 location 时边也不丢。
+    /// 远程装饰器必须转发
+    fn parent_links_in_child(&self) -> bool {
+        false
+    }
+    /// 本家会话在**别家**目录里的替身。外壳产品(Craft Agents)跑的是别家的引擎,
+    /// 引擎自己也往自家目录落了一份转录(Claude Agent SDK → `~/.claude/projects`),
+    /// 同一段对话就会以两家身份各列一次。返回那些替身的 `(别家, 别家 native id)`:
+    /// scanner 按本实例的 host 拼成会话 key(`session_key` 单点,远程装饰器因此照原样
+    /// 转发),不索引它们、已入库的删掉;本家会话消失后认领随之撤销,替身在下一轮扫描
+    /// 回来——Wake 只在原件也在索引里时才藏副本。要现读当前状态(或按文件戳缓存):
+    /// scanner 不保证之前调过 begin_scan。**`None` 是"这一刻读不出来"**,scanner 保留库里
+    /// 这一家的认领(与 parent_links 同一纪律)
+    fn claimed_sessions(&self) -> Option<Vec<(AgentId, String)>> {
+        Some(Vec::new())
+    }
+    /// 是否认领别家会话(见 claimed_sessions)。能力位与 manages_parent_links 同理:
+    /// 只有它为 true 的家参与认领对账,其余家不会每轮往表里写一遍空集
+    fn manages_claims(&self) -> bool {
+        false
+    }
 }
 
 /// 入库前的自定义根归一化:把用户选中的目录整形成本家"该存哪一层"的形态。
@@ -220,6 +246,7 @@ pub fn normalize_custom_root(agent: AgentId, dir: std::path::PathBuf) -> std::pa
     match agent {
         AgentId::Codex => codex::normalize_custom_root(dir),
         AgentId::Zcode => zcode::normalize_custom_root(dir),
+        AgentId::CraftAgents => craft::normalize_custom_root(dir),
         _ => dir,
     }
 }
@@ -239,7 +266,7 @@ pub(crate) fn env_dir(key: &str) -> Option<std::path::PathBuf> {
 
 /// 各家数据根共用的 HOME。**全部 adapter 必须走这里**,不要直接
 /// `dirs::home_dir()`——`WAKE_HOME` 是整组 adapter 的统一改道开关:
-/// 契约测试靠它把十九家指向 fixture 目录,而 `dirs::home_dir()` 只在
+/// 契约测试靠它把二十家指向 fixture 目录,而 `dirs::home_dir()` 只在
 /// POSIX 上看 `$HOME`,Windows 上走 SHGetKnownFolderPath、无论如何都指向
 /// 真实用户目录(于是 Windows 上的契约测试全部落空,2026-08-25 review)。
 /// 对用户它顺带是便携安装/多档案切换的手动开关。
@@ -247,7 +274,7 @@ pub(crate) fn home_dir() -> Option<std::path::PathBuf> {
     env_dir("WAKE_HOME").or_else(dirs::home_dir)
 }
 
-/// 全量十九家 roster,**不按 detect 过滤**。这是全应用唯一的构造点:
+/// 全量二十家 roster,**不按 detect 过滤**。这是全应用唯一的构造点:
 /// scanner/watcher/resume/Session locations 面板共享 Workbench 启动时的
 /// 同一份实例。缺根的家由各自 list_session_files 降级为 Ok(空)(scanner
 /// 对 Err 会 `?` 截断整轮,新 adapter 必须维持这条降级约定,contract 测试
@@ -281,6 +308,7 @@ pub fn create_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(codebuddy::CodebuddyAdapter::new()),
         Box::new(codebuddy::CodebuddyAdapter::workbuddy()),
         Box::new(zcode::ZcodeAdapter::new()),
+        Box::new(craft::CraftAdapter::new()),
     ]
 }
 
@@ -546,7 +574,7 @@ fn wake_lookups_from_messages(messages: &[TranscriptMessage]) -> Vec<WakeLookup>
 }
 
 impl ParsedSession {
-    /// 十八家 parse_session 的唯一出口:解析层只产 meta + messages,入库派生
+    /// 各家 parse_session 的唯一出口:解析层只产 meta + messages,入库派生
     /// (FTS 单元、Wake 调用记录)全在这里——再加派生字段不用碰任何 adapter
     pub(crate) fn derive(
         meta: SessionMeta,

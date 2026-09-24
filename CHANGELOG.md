@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- New: Craft Agents sessions are indexed from its workspaces — titles, models, tool calls and token counts, with archived sessions, sub-tasks and branches, whether the session ran on a Claude connection or on ChatGPT, Copilot or Google. The copy that a Claude connection also leaves in Claude Code's history is hidden while the Craft session exists, so each conversation is listed once. Workspaces kept outside `~/.craft-agent/workspaces` can be added in Settings → Session locations. Read-only, and no Open In (#44, thanks @qiajue)
+
 ## [0.8.1] — 2026-09-23
 
 - New: `wake-cli refresh` updates an existing index from the terminal, so a scheduled task (launchd, systemd timer) keeps search and session lists fresh while Wake is closed; it steps aside while Wake has its window open, and Wake waits for a running refresh before opening the index (#43, thanks @aka-kika)

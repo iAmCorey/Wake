@@ -132,7 +132,7 @@ All five tools are read-only and return Markdown text (`content[0].text`). Param
 | Parameter | Type | Meaning |
 |---|---|---|
 | `project` | string | Scope to one project. Pass an absolute path — the agent's working directory is ideal — or a project name. Path matching is three-tier: an exact match of an indexed project path; otherwise the longest indexed project that contains the path (you are in a subdirectory); otherwise every indexed project below the path (a monorepo root or a parent folder). A bare name matches the project name case-insensitively. When nothing matches, the reply lists the known projects instead of erroring. |
-| `agents` | string[] | Only these agents. Ids: `claude-code`, `codex`, `grok`, `dsh`, `cursor`, `opencode`, `pi`, `omp`, `kiro`, `kimi`, `gemini`, `copilot`, `antigravity`, `qoder`, `hermes`, `openclaw`, `codebuddy`, `workbuddy`, `zcode`. Display names (`"Claude Code"`, `"Gemini CLI"`) and a few aliases (`claude`, `deepseek`, `opencode2`) are accepted too. |
+| `agents` | string[] | Only these agents. Ids: `claude-code`, `codex`, `grok`, `dsh`, `cursor`, `opencode`, `pi`, `omp`, `kiro`, `kimi`, `gemini`, `copilot`, `antigravity`, `qoder`, `hermes`, `openclaw`, `codebuddy`, `workbuddy`, `zcode`, `craft-agents`. Display names (`"Claude Code"`, `"Gemini CLI"`) and a few aliases (`claude`, `deepseek`, `opencode2`, `craft`) are accepted too. |
 | `since` | string | Only sessions updated at or after this time. Relative: `30m`, `24h`, `7d`, `2w`. Absolute: `2026-09-01`, `2026-09-01 09:30`, `2026-09-01T09:30:00Z`. Naive date-times are read in local time. |
 | `limit` | integer | Maximum items to return; values outside the allowed range are clamped. |
 

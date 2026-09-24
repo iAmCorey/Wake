@@ -50,7 +50,7 @@ impl RemoteAdapter {
     }
 }
 
-/// 对一个 host 构造整组远程实例:十九家模板 × `with_custom_root`(缓存内
+/// 对一个 host 构造整组远程实例:二十家模板 × `with_custom_root`(缓存内
 /// 挂载点,见 remote::REMOTE_LAYOUTS)× 装饰器。追加进 roster 的 active 尾部
 /// (不进 Session locations 面板)。`templates` 由 roster 唯一构造点传入
 /// (不变量 8:本模块不得自行二次 create_adapters());产物的数据根 100%
@@ -185,8 +185,8 @@ impl AgentAdapter for RemoteAdapter {
         )
     }
 
-    fn is_parent_link_event(&self, path: &Path) -> bool {
-        self.inner.is_parent_link_event(path)
+    fn is_snapshot_event(&self, path: &Path) -> bool {
+        self.inner.is_snapshot_event(path)
     }
 
     fn data_roots(&self) -> Vec<std::path::PathBuf> {
@@ -215,6 +215,19 @@ impl AgentAdapter for RemoteAdapter {
 
     fn parent_links_global(&self) -> bool {
         self.inner.parent_links_global()
+    }
+
+    fn parent_links_in_child(&self) -> bool {
+        self.inner.parent_links_in_child()
+    }
+
+    fn manages_claims(&self) -> bool {
+        self.inner.manages_claims()
+    }
+
+    fn claimed_sessions(&self) -> Option<Vec<(AgentId, String)>> {
+        // 给的是 (别家, native id),host 段由 scanner 按本实例的 host 拼
+        self.inner.claimed_sessions()
     }
 
     fn excluding_data_roots(&self, roots: &[std::path::PathBuf]) -> Option<Box<dyn AgentAdapter>> {
