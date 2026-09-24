@@ -97,6 +97,17 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
                 .detach();
             theme::sync_appearance(Some(window), cx);
 
+            // Linux/Wayland 合成器(如 GNOME Mutter)发送 xdg_toplevel.close 时，
+            // 必须由 on_window_should_close 处理。在 Linux 下关闭主窗口即退出整应用，
+            // 先 flush 窗口状态然后退出进程；macOS/Windows 下返回 true 允许关窗。
+            window.on_window_should_close(cx, |_, cx| {
+                if cfg!(target_os = "linux") {
+                    main_window::exit_process(cx);
+                } else {
+                    true
+                }
+            });
+
             let workbench = cx.new(|cx| Workbench::new(window, cx));
             window.focus(&workbench.read(cx).focus_handle(cx), cx);
             cx.new(|cx| {
@@ -189,12 +200,12 @@ fn show_main_window_now(
 /// 窗口级操作(关/最小化/缩放/全屏)从全局监听器发起时,目标窗口正处在派发
 /// 这个 action 的 update 中(键位与菜单两条路都如此),被借出的窗口不能再次
 /// update——返回 Err 被 .ok() 吞掉就是"⌘W 没反应"。推迟到本轮 update 结束再动
-fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window) + 'static) {
+fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window, &mut App) + 'static) {
     let Some(w) = cx.active_window() else {
         return;
     };
     cx.defer(move |cx| {
-        w.update(cx, |_, window, _| f(window)).ok();
+        w.update(cx, |_, window, cx| f(window, cx)).ok();
     });
 }
 
@@ -316,7 +327,13 @@ fn main() {
         i18n::init();
         theme::sync_appearance(None, cx);
 
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &Quit, cx| {
+            if cfg!(target_os = "linux") {
+                main_window::exit_process(cx);
+            } else {
+                cx.quit();
+            }
+        });
         // 退出前把主窗几何落盘(节流写盘可能还没触发);Dock 的 Quit、注销关机
         // 都走这里,不只 ⌘Q
         cx.on_app_quit(|cx| {
@@ -324,10 +341,23 @@ fn main() {
             async {}
         })
         .detach();
-        cx.on_action(|_: &CloseWindow, cx| with_active_window(cx, |w| w.remove_window()));
-        cx.on_action(|_: &Minimize, cx| with_active_window(cx, |w| w.minimize_window()));
-        cx.on_action(|_: &Zoom, cx| with_active_window(cx, |w| w.zoom_window()));
-        cx.on_action(|_: &ToggleFullScreen, cx| with_active_window(cx, |w| w.toggle_fullscreen()));
+        cx.on_action(|_: &CloseWindow, cx| {
+            with_active_window(cx, |w, cx| {
+                if cfg!(target_os = "linux") {
+                    let is_main = cx
+                        .try_global::<MainWindow>()
+                        .map(|m| AnyWindowHandle::from(m.0) == w.window_handle())
+                        .unwrap_or(false);
+                    if is_main {
+                        main_window::exit_process(cx);
+                    }
+                }
+                w.remove_window();
+            });
+        });
+        cx.on_action(|_: &Minimize, cx| with_active_window(cx, |w, _| w.minimize_window()));
+        cx.on_action(|_: &Zoom, cx| with_active_window(cx, |w, _| w.zoom_window()));
+        cx.on_action(|_: &ToggleFullScreen, cx| with_active_window(cx, |w, _| w.toggle_fullscreen()));
         cx.on_action(|_: &Hide, cx| cx.hide());
         cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
         cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
@@ -345,4 +375,5 @@ fn main() {
         open_main_window_or_exit(cx, "open");
         cx.activate(true);
     });
+    std::process::exit(0);
 }

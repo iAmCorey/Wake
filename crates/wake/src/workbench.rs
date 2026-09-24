@@ -3063,6 +3063,7 @@ impl Workbench {
                     })
                     .detach();
                 crate::theme::sync_appearance(Some(window), cx);
+                window.on_window_should_close(cx, |_, _| true);
                 let settings = cx.new(|cx| SettingsView::new(settings_workbench, window, cx));
                 window.focus(&settings.read(cx).focus_handle(cx), cx);
                 cx.new(|cx| Root::new(settings, window, cx))
@@ -5541,7 +5542,17 @@ impl Workbench {
             // 压平 titlebar 靠 theme.rs 的 title_bar/title_bar_border token；主窗口
             // 使用 44px 高度，与详情顶部行共享同一垂直节奏。
             .when(show_titlebar, |this| {
-                this.child(TitleBar::new().h(WINDOW_TITLEBAR_HEIGHT))
+                this.child(
+                    TitleBar::new()
+                        .h(WINDOW_TITLEBAR_HEIGHT)
+                        .on_close_window(|_, window, cx| {
+                            if cfg!(target_os = "linux") {
+                                crate::main_window::exit_process(cx);
+                            } else {
+                                window.remove_window();
+                            }
+                        }),
+                )
             })
             .child(
                 div()

@@ -184,6 +184,15 @@ pub fn flush(cx: &mut App) {
     }
 }
 
+/// 立即提交主窗几何并安全退出进程。
+///
+/// 用于 Linux/Wayland 下关闭主窗口时绕过底层合成器与 calloop 事件循环因缺 wakeup
+/// 导致的假死与未响应问题。
+pub fn exit_process(cx: &mut App) -> ! {
+    flush(cx);
+    std::process::exit(0);
+}
+
 fn load() -> Option<SavedWindow> {
     serde_json::from_str(&prefs::read("window.json")?).ok()
 }

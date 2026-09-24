@@ -369,4 +369,29 @@ mod tests {
         let claimed = fx.store.claimed_keys().unwrap();
         assert!(!claimed.contains("claude-code:sdk-1"), "{claimed:?}");
     }
+
+    use crate::adapters::create_adapter_roster_for;
+    use crate::scanner::ScanProgress;
+    use tempfile::tempdir;
+
+    struct DummyEvents;
+    impl ScanEvents for DummyEvents {
+        fn on_progress(&self, _progress: &ScanProgress) {}
+        fn on_sessions_changed(&self) {}
+        fn on_rescan_needed(&self) {}
+    }
+
+    #[test]
+    fn test_watcher_lifecycle_drop() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(Store::open(&dir.path().join("test.db")).unwrap());
+        let roster = create_adapter_roster_for(&store);
+        let start = std::time::Instant::now();
+        let watcher = start_watcher(Arc::new(roster.active), store, Arc::new(DummyEvents));
+        if let Some(w) = watcher {
+            drop(w);
+        }
+        let elapsed = start.elapsed();
+        assert!(elapsed < Duration::from_secs(5));
+    }
 }
