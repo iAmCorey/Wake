@@ -49,6 +49,12 @@ use std::path::{Path, PathBuf};
 /// 会话与正文的唯一来源,相对数据根
 const DB_REL: &str = "cli/sessions.db";
 
+/// 数据根下的库文件,按段拼:`join(DB_REL)` 在 Windows 上会留下正斜杠,虚拟路径
+/// 与别处按段拼出的同一个库字符串对不上
+fn db_in(root: &Path) -> PathBuf {
+    root.join(DB_REL.split('/').collect::<PathBuf>())
+}
+
 pub struct DevinAdapter {
     db: PathBuf,
     /// 枚举查询带全表相关子查询,按库 mtime 缓存一轮扫描内的重复调用
@@ -105,10 +111,10 @@ impl DevinAdapter {
         let hit = xdg
             .iter()
             .chain([&local, &app_support])
-            .find(|dir| dir.join(DB_REL).is_file())
+            .find(|dir| db_in(dir).is_file())
             .cloned();
         let root = hit.unwrap_or_else(|| xdg.unwrap_or(local));
-        Self::with_db(root.join(DB_REL))
+        Self::with_db(db_in(&root))
     }
 
     fn with_db(db: PathBuf) -> Self {
@@ -513,7 +519,7 @@ impl AgentAdapter for DevinAdapter {
         let db = if dir.file_name().is_some_and(|n| n == "sessions.db") {
             dir
         } else {
-            dir.join(DB_REL)
+            db_in(&dir)
         };
         Box::new(Self::with_db(db))
     }

@@ -344,7 +344,12 @@ pub fn stage_sidecars(home: &Path) -> Sidecars {
     fs::create_dir_all(zcode_tasks_db.parent().unwrap()).expect("mkdir .zcode/v2");
     build_zcode_tasks_db(&zcode_tasks_db);
 
-    let devin_db = home.join(".local/share/devin/cli/sessions.db");
+    let devin_db = home
+        .join(".local")
+        .join("share")
+        .join("devin")
+        .join("cli")
+        .join("sessions.db");
     fs::create_dir_all(devin_db.parent().unwrap()).expect("mkdir devin cli dir");
     build_devin_db(&devin_db);
 
