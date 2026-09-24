@@ -408,7 +408,7 @@ impl AgentAdapter for GrokAdapter {
         Some(grok_group::parent_links(&self.group_ctx()))
     }
 
-    fn is_parent_link_event(&self, path: &Path) -> bool {
+    fn is_snapshot_event(&self, path: &Path) -> bool {
         path.strip_prefix(&self.root).ok().is_some_and(|relative| {
             relative
                 .components()

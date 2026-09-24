@@ -1825,3 +1825,233 @@ fn local_and_remote_copies_of_same_native_id_both_survive() {
     assert!(store.get_session(&local_key).unwrap().is_some());
     assert!(store.get_session(&remote_key).unwrap().is_some());
 }
+
+/// Craft fixture 认领的几份引擎转录:A 首行里的当前 SDK 会话、A 锚点边车里更早的一份、
+/// 子任务 E 的
+const CRAFT_CLAIMED: [&str; 3] = [
+    "c1a0de00-aaaa-4bbb-8ccc-000000000001",
+    "c1a0de00-aaaa-4bbb-8ccc-00000000000a",
+    "c1a0de00-aaaa-4bbb-8ccc-000000000005",
+];
+/// 谁都不认领的普通 Claude Code 会话(对照组)
+const UNCLAIMED: &str = "11111111-aaaa-bbbb-cccc-000000000001";
+
+/// Claude projects 树里摆出这几个 id 的转录(内容借 fixture 的一份,key 取文件名)
+fn stage_claude_transcripts(projects: &Path, ids: &[&str]) {
+    let proj = projects.join("-Users-tester-Github-wakefx");
+    std::fs::create_dir_all(&proj).unwrap();
+    let transcript = common::fixture(&format!(
+        "claude/projects/-Users-tester-Github-wakefx/{UNCLAIMED}.jsonl"
+    ));
+    for id in ids {
+        std::fs::copy(&transcript, proj.join(format!("{id}.jsonl"))).unwrap();
+    }
+}
+
+/// Craft Agents 的 Claude 后端跑的是 Claude Agent SDK,引擎在 `~/.claude/projects` 里另落
+/// 一份转录:同一段对话会以 Claude Code 身份再列一次。Craft 会话认领它(首行的
+/// sdkSessionId + 回合锚点边车里出现过的 id,隐藏的 mini 会话也认领),替身不入库、
+/// 已入库的出库;原件没了(会话被删、Craft 的 location 整个移除)认领撤销,替身回来
+#[test]
+fn craft_claims_hide_claude_engine_copies_until_the_original_goes() {
+    use wake_core::adapters::claude::ClaudeAdapter;
+    use wake_core::adapters::craft::CraftAdapter;
+
+    let home = tempfile::tempdir().unwrap();
+    let projects = home.path().join("claude-projects");
+    let claimed = CRAFT_CLAIMED;
+    stage_claude_transcripts(&projects, &[&claimed[..], &[UNCLAIMED]].concat());
+    let craft_root = home.path().join("workspaces");
+    common::copy_tree(&common::fixture("craft-agents/workspaces"), &craft_root);
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    let claude = || ClaudeAdapter::new().with_custom_root(projects.clone());
+    let craft = || CraftAdapter::new().with_custom_root(craft_root.clone());
+    let claude_key = |id: &str| format!("claude-code:{id}");
+    let indexed = |key: &str| store.get_session(key).unwrap().is_some();
+
+    // 装 Craft 之前:引擎那几份就是普通的 Claude Code 会话
+    run_scan(&[claude()], &store, &Recorder::new(), true).unwrap();
+    assert!(claimed.iter().all(|id| indexed(&claude_key(id))));
+
+    // 加上 Craft:替身出库,Craft 会话进库,对照组不受影响
+    let events = Recorder::new();
+    run_scan(&[claude(), craft()], &store, &events, false).unwrap();
+    for id in claimed {
+        assert!(!indexed(&claude_key(id)), "{id} 的引擎副本还挂着");
+    }
+    assert!(indexed(&claude_key(UNCLAIMED)));
+    assert!(indexed("craft-agents:ws_f1x7e5a0/260801-brave-otter"));
+    assert!(events.changed() > 0, "替身出库要通知列表刷新");
+    let keys = store.claimed_keys().unwrap();
+    for id in [
+        "c1a0de00-aaaa-4bbb-8ccc-000000000003", // 分支
+        "c1a0de00-aaaa-4bbb-8ccc-000000000004", // 隐藏的 mini 会话:不进列表但照样认领
+    ] {
+        assert!(keys.contains(&claude_key(id)), "{id} 没被认领");
+    }
+    assert!(
+        !keys.iter().any(|k| k.contains("01a0d3b2")),
+        "Pi 后端的会话不该认领 Claude 的 key: {keys:?}"
+    );
+    // 子任务与分支挂在原会话下
+    for child in ["260805-calm-reed", "260803-bold-pine"] {
+        assert_eq!(
+            store
+                .parent_key_of(&format!("craft-agents:ws_f1x7e5a0/{child}"))
+                .unwrap()
+                .as_deref(),
+            Some("craft-agents:ws_f1x7e5a0/260801-brave-otter"),
+            "{child}"
+        );
+    }
+
+    // 引擎那份还在长(Craft 里继续聊):watcher 的增量也不许把它写回来
+    let engine = projects
+        .join("-Users-tester-Github-wakefx")
+        .join(format!("{}.jsonl", claimed[0]));
+    let r = claude().file_ref(&engine).expect("engine transcript ref");
+    scan_files(&[claude(), craft()], &store, &Recorder::new(), vec![r]);
+    assert!(!indexed(&claude_key(claimed[0])));
+
+    // 在 Craft 里删掉原会话:认领撤销,它的两份引擎副本在这一轮扫描就回来
+    std::fs::remove_dir_all(craft_root.join("wakefx-ws/sessions/260801-brave-otter")).unwrap();
+    run_scan(&[claude(), craft()], &store, &Recorder::new(), false).unwrap();
+    assert!(indexed(&claude_key(claimed[0])));
+    assert!(indexed(&claude_key(claimed[1])));
+    assert!(
+        !indexed(&claude_key(claimed[2])),
+        "子任务还在,它的副本仍被认领"
+    );
+
+    // Craft 整个不在 roster 里了(location 移除):认领方消失,剩下的替身全部放回
+    run_scan(&[claude()], &store, &Recorder::new(), false).unwrap();
+    assert!(indexed(&claude_key(claimed[2])));
+    assert!(store.claimed_keys().unwrap().is_empty());
+}
+
+/// 远程镜像:认领的 key 按**报认领的实例**的 host 拼(`claude-code:devbox:<id>`),只藏
+/// 同一台机器上的替身;本机同 id 的 Claude 会话(不同 host 是另一条会话)不受影响
+#[test]
+fn craft_claims_on_a_remote_host_carry_that_host() {
+    use wake_core::adapters::claude::ClaudeAdapter;
+    use wake_core::adapters::craft::CraftAdapter;
+    use wake_core::adapters::remote::RemoteAdapter;
+
+    let home = tempfile::tempdir().unwrap();
+    let local = home.path().join("local-claude");
+    let mirror = home.path().join("devbox-claude");
+    stage_claude_transcripts(&local, &CRAFT_CLAIMED);
+    stage_claude_transcripts(&mirror, &CRAFT_CLAIMED);
+    let craft_mirror = home.path().join("devbox-workspaces");
+    common::copy_tree(&common::fixture("craft-agents/workspaces"), &craft_mirror);
+    let mirror_prefix = craft_mirror.to_string_lossy().to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    let adapters: Vec<Box<dyn AgentAdapter>> = vec![
+        ClaudeAdapter::new().with_custom_root(local),
+        Box::new(RemoteAdapter::new(
+            ClaudeAdapter::new().with_custom_root(mirror),
+            "devbox",
+        )),
+        Box::new(RemoteAdapter::new(
+            CraftAdapter::new().with_custom_root(craft_mirror),
+            "devbox",
+        )),
+    ];
+    run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+
+    let indexed = |key: &str| store.get_session(key).unwrap().is_some();
+    for id in CRAFT_CLAIMED {
+        assert!(
+            !indexed(&format!("claude-code:devbox:{id}")),
+            "devbox 上的替身没藏"
+        );
+        assert!(indexed(&format!("claude-code:{id}")), "本机那份被误藏");
+    }
+    assert!(indexed(
+        "craft-agents:devbox:ws_f1x7e5a0/260801-brave-otter"
+    ));
+    assert!(store
+        .claimed_keys()
+        .unwrap()
+        .contains(&format!("claude-code:devbox:{}", CRAFT_CLAIMED[0])));
+    // 没设工作目录的会话归到工作区:取首行记的工作区路径,不是文件此刻所在的本机缓存目录
+    //(拿缓存目录当项目,按远端的工作区路径就筛不到它)
+    let lake = store
+        .get_session("craft-agents:devbox:ws_f1x7e5a0/260802-quiet-lake")
+        .unwrap()
+        .expect("lake indexed");
+    assert!(
+        !lake.project_path.starts_with(&mirror_prefix),
+        "{}",
+        lake.project_path
+    );
+    assert_eq!(lake.project_name, "wakefx-ws");
+}
+
+/// 合成一条 craft 会话(首行 + 一句用户消息),返回它的 session.jsonl
+fn craft_session(workspace: &Path, session: &str, parent: Option<&str>) -> std::path::PathBuf {
+    let dir = workspace.join("sessions").join(session);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut header = serde_json::json!({ "id": session, "createdAt": 1786200000000i64 });
+    if let Some(parent) = parent {
+        header["parentSessionId"] = serde_json::json!(parent);
+    }
+    let line = serde_json::json!({
+        "id": "m1", "type": "user", "content": format!("hello from {session}"),
+        "timestamp": 1786200000000i64
+    });
+    let path = dir.join("session.jsonl");
+    std::fs::write(&path, format!("{header}\n{line}\n")).unwrap();
+    path
+}
+
+/// Craft 的父子关系写在子会话自己的首行里:多 location 下按**子会话的胜出文件**认边。
+/// Grok 那条"报边者必须拥有 parent"(边车长在 parent 的 location 里)套在这里两头都错:
+/// 父会话胜出文件在 A、子会话只在 B,边会被丢掉;A 里还躺着子会话一份更旧的备份、写着
+/// 早已不成立的关系,A 拥有 parent,旧关系反被采纳
+#[test]
+fn craft_parent_links_follow_the_childs_winning_copy() {
+    use wake_core::adapters::craft::CraftAdapter;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (a, b) = (tmp.path().join("a/notes"), tmp.path().join("b/notes"));
+    for ws in [&a, &b] {
+        std::fs::create_dir_all(ws).unwrap();
+        // 同一个工作区的两份(一份是备份):工作区 id 相同,会话 key 也就相同
+        std::fs::write(ws.join("config.json"), r#"{"id":"ws_same0000"}"#).unwrap();
+    }
+    craft_session(&a, "260901-parent", None);
+    craft_session(&b, "260902-child", Some("260901-parent"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    let adapters: Vec<Box<dyn AgentAdapter>> = vec![
+        CraftAdapter::new().with_custom_root(a.clone()),
+        CraftAdapter::new().with_custom_root(b.clone()),
+    ];
+    let child = "craft-agents:ws_same0000/260902-child";
+    let parent_of = || store.parent_key_of(child).unwrap();
+    run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+    assert_eq!(
+        parent_of().as_deref(),
+        Some("craft-agents:ws_same0000/260901-parent"),
+        "父会话在另一个 location 也要挂上"
+    );
+
+    // B 里那份改写成没有父会话;A 里多出一份更旧的、还写着旧关系的副本
+    let stale = craft_session(&a, "260902-child", Some("260901-parent"));
+    std::fs::File::options()
+        .write(true)
+        .open(&stale)
+        .and_then(|f| {
+            f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+        })
+        .unwrap();
+    craft_session(&b, "260902-child", None);
+    run_scan(&adapters, &store, &Recorder::new(), false).unwrap();
+    assert_eq!(parent_of(), None, "落选副本里的旧关系不该被采纳");
+}

@@ -837,7 +837,9 @@ fn parse_rollout(path: &Path, decode_images: bool) -> Result<CodexParse> {
     // 它一非空就会在 has_real 为假时被选中,一条标记足以把子线程自己的
     // response_item 整条流挤掉(只跑了工具、还没出正文的子代理正是这形态)
     if let Some((cut, cut_fallback)) = inherited {
-        collapse_inherited(&mut messages, cut);
+        // fork_turns 复制进来的父线程历史(实测复制的是真实 message 行,不是打包成
+        // 一条的 "Codex agent history" 块,`is_injected_user_content` 拦不住)
+        collapse_inherited(&mut messages, cut, "thread");
         event_fallback.drain(..cut_fallback.min(event_fallback.len()));
     }
 
@@ -866,33 +868,6 @@ fn parse_rollout(path: &Path, decode_images: bool) -> Result<CodexParse> {
         unknown_lines,
         spawn,
     })
-}
-
-/// `spawn_agent` 的 `fork_turns` 会把父线程的历史逐条复制进子线程的 rollout
-/// (实测 `fork_turns:"all"` 复制的是真实 message 行,不是打包成一条的
-/// "Codex agent history" 块,`is_injected_user_content` 拦不住)。原样入库
-/// 就是:子线程偷走父线程的标题、父线程每一轮在 FTS 里出现两次、Insights
-/// 的 prompt 数翻倍。折成一条 Meta——Meta 不进 FTS、不算 message_count、
-/// 不参与标题推导,GUI / 导出 / MCP 也都跳过它——留一条而不是整段删掉,
-/// 是为了"这里原本有东西"不至于无声消失;内容本体就在上一层的父会话里。
-fn collapse_inherited(messages: &mut Vec<TranscriptMessage>, cut: usize) {
-    if cut == 0 {
-        return;
-    }
-    let turns = messages[..cut]
-        .iter()
-        .filter(|m| m.kind == MessageKind::Text)
-        .count();
-    let ts = messages[..cut]
-        .iter()
-        .find_map(|m| m.timestamp)
-        .unwrap_or_default();
-    let text = format!(
-        "── {turns} message{} inherited from the parent thread ──",
-        crate::text::plural(turns as i64)
-    );
-    let marker = mk_msg(Role::System, MessageKind::Meta, &text, ts);
-    messages.splice(..cut, std::iter::once(marker));
 }
 
 /// Codex Desktop 会把文件清单包在真实提问外面，并在正文写入指向临时文件

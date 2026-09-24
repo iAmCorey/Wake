@@ -18,6 +18,7 @@ use wake_core::adapters::claude::ClaudeAdapter;
 use wake_core::adapters::codebuddy::CodebuddyAdapter;
 use wake_core::adapters::codex::CodexAdapter;
 use wake_core::adapters::copilot::CopilotAdapter;
+use wake_core::adapters::craft::CraftAdapter;
 use wake_core::adapters::cursor::CursorAdapter;
 use wake_core::adapters::cursor_ide::CursorIdeAdapter;
 use wake_core::adapters::devin::DevinAdapter;
@@ -1806,10 +1807,10 @@ fn grok_parse_contract() {
         "grok:77777777-aaaa-bbbb-cccc-000000000007".into(),
     )));
     let parent_meta = fixture("grok/sessions/%2FUsers%2Ftester%2FGithub%2Fwakefx/77777777-aaaa-bbbb-cccc-000000000007/subagents/child-fixture/meta.json");
-    assert!(adapter.is_parent_link_event(&parent_meta));
+    assert!(adapter.is_snapshot_event(&parent_meta));
     // file_ref 是公开 API:只认 updates.jsonl,native_id 取会话目录名
     let path = fixture("grok/sessions/%2FUsers%2Ftester%2FGithub%2Fwakefx/77777777-aaaa-bbbb-cccc-000000000007/updates.jsonl");
-    assert!(!adapter.is_parent_link_event(&path));
+    assert!(!adapter.is_snapshot_event(&path));
     let r = adapter.file_ref(&path).expect("grok file_ref");
     assert_eq!(r.native_id, "77777777-aaaa-bbbb-cccc-000000000007");
     assert!(adapter
@@ -2258,6 +2259,14 @@ fn seq_contract_holds_for_all_agents() {
             db_ref(AgentId::Zcode, &env.zcode_db, "zc-0001"),
         ),
         (
+            CraftAdapter::new().with_custom_root(fixture("craft-agents")),
+            craft_ref("260801-brave-otter"),
+        ),
+        (
+            CraftAdapter::new().with_custom_root(fixture("craft-agents")),
+            craft_ref("260803-bold-pine"),
+        ),
+        (
             Box::new(DevinAdapter::new()),
             db_ref(AgentId::Devin, &env.devin_db, "dv-0001"),
         ),
@@ -2269,6 +2278,352 @@ fn seq_contract_holds_for_all_agents() {
     for (adapter, r) in &checks {
         assert_seq_contract(adapter.as_ref(), r);
     }
+}
+
+fn craft_session_dir(session: &str) -> PathBuf {
+    fixture("craft-agents/workspaces/wakefx-ws/sessions").join(session)
+}
+
+fn craft_ref(session: &str) -> SessionFileRef {
+    fs_ref(
+        AgentId::CraftAgents,
+        &craft_session_dir(session).join("session.jsonl"),
+        &format!("ws_f1x7e5a0/{session}"),
+    )
+}
+
+#[test]
+fn craft_agents_parse_contract() {
+    setup();
+    let adapter = CraftAdapter::new().with_custom_root(fixture("craft-agents"));
+    // 选中 `.craft-agent` 本身、工作区集合、单个工作区,枚举出同一批会话。隐藏的 mini
+    // 编辑会话(260804)不进列表;原子写的 .tmp、Pi 引擎的 .pi-sessions/ 都不是会话
+    let listed = adapter.list_session_files().expect("craft list");
+    let ids: Vec<String> = listed.iter().map(|r| r.native_id.clone()).collect();
+    assert_eq!(
+        ids,
+        [
+            "ws_f1x7e5a0/260801-brave-otter",
+            "ws_f1x7e5a0/260802-quiet-lake",
+            "ws_f1x7e5a0/260803-bold-pine",
+            "ws_f1x7e5a0/260805-calm-reed",
+        ]
+    );
+    for root in [
+        fixture("craft-agents/workspaces"),
+        fixture("craft-agents/workspaces/wakefx-ws"),
+    ] {
+        let again: Vec<String> = CraftAdapter::new()
+            .with_custom_root(root)
+            .list_session_files()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.native_id)
+            .collect();
+        assert_eq!(again, ids);
+    }
+    let otter = craft_session_dir("260801-brave-otter");
+    assert!(adapter.file_ref(&otter.join("session.jsonl.tmp")).is_none());
+    assert!(adapter
+        .file_ref(&craft_session_dir("260802-quiet-lake").join(
+            ".pi-sessions/2026-08-09T09-00-00-000Z_01a0d3b2-0000-7000-8000-000000000002.jsonl"
+        ))
+        .is_none());
+    assert!(
+        adapter
+            .file_ref(&craft_session_dir("260804-tiny-fern").join("session.jsonl"))
+            .is_none(),
+        "隐藏的 mini 会话不进列表"
+    );
+
+    // Claude 后端的主会话:标题是 craft 的 name,项目是用户设的工作目录,活动时间取
+    // lastMessageAt(lastUsedAt 连"点开看一眼"都会刷新)
+    let r = craft_ref("260801-brave-otter");
+    let s = adapter.parse_session(&r).expect("craft parse_session");
+    let t = adapter
+        .parse_transcript(&r)
+        .expect("craft parse_transcript");
+    assert_eq!(s.meta.key, "craft-agents:ws_f1x7e5a0/260801-brave-otter");
+    assert_eq!(s.meta.title, "Fix QR scanner crash");
+    assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx");
+    assert_eq!(s.meta.model.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(s.meta.tokens_used, Some(1500));
+    assert_eq!(s.meta.created_at, 1786200000000);
+    assert_eq!(s.meta.updated_at, 1786200060000);
+    assert_eq!(s.meta.message_count, 3);
+    assert_eq!(s.unknown_line_count, 1, "词汇表外的行计数(漂移金丝雀)");
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+            (Role::System, MessageKind::Meta), // 压缩完成
+            (Role::User, MessageKind::Meta),   // 只给模型看的推动消息
+        ]
+    );
+    assert!(t.mainline[0].text.contains("crashes on unmount"));
+    assert!(t.mainline[0].text.contains("[Attached file: crash.png]"));
+    // 工具挂在发起它的那段助手话上;子代理(Task)内部的工具与话不进主线
+    let tools = &t.mainline[1].tool_calls;
+    assert_eq!(
+        tools.iter().map(|tc| tc.name.as_str()).collect::<Vec<_>>(),
+        ["Read", "Bash"]
+    );
+    assert!(tools[0]
+        .output
+        .as_deref()
+        .unwrap_or_default()
+        .contains("useEffect"));
+    assert!(!tools[0].is_error);
+    assert!(tools[1].is_error);
+    let bash_input = tools[1].input.as_deref().unwrap_or_default();
+    assert!(!bash_input.contains("{{SESSION_PATH}}"), "{bash_input}");
+    assert!(bash_input.contains("260801-brave-otter/plans/notes.md"));
+    assert!(!t.mainline.iter().any(|m| m.text.contains("Subagent notes")));
+
+    // Pi 后端(连 ChatGPT 的那种):模型剥掉 pi/ 前缀;没设工作目录就归到工作区本身——
+    // 取首行记的工作区路径(~ 形态按家目录展开),不是文件此刻所在的位置;归档与
+    // "自动化建的"如实带上
+    let lake = adapter.parse_session(&listed[1]).unwrap().meta;
+    assert_eq!(lake.model.as_deref(), Some("gpt-6-astra"));
+    assert_eq!(
+        lake.tokens_used,
+        Some(1000),
+        "totalTokens 为 0 时退回 input + output"
+    );
+    assert!(lake.archived);
+    assert_eq!(lake.source.as_deref(), Some("automation"));
+    assert_eq!(
+        lake.project_path,
+        wake_core::adapters::expand_tilde("~/.craft-agent/workspaces/wakefx-ws")
+    );
+    assert_eq!(lake.project_name, "wakefx-ws");
+
+    // 分支:从父会话复制来的那段折成一条标记;标题取分支自己的第一句,不拿父会话的
+    // 预览顶替;紧跟分叉点的工具起一条新的承载,不挂到被折掉的父会话消息上
+    let pine = adapter.parse_transcript(&listed[2]).unwrap();
+    assert_eq!(
+        roles_kinds(&pine.mainline),
+        vec![
+            (Role::System, MessageKind::Meta),
+            (Role::Assistant, MessageKind::Text),
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+        ]
+    );
+    assert!(pine.mainline[0].text.contains("2 messages inherited"));
+    assert_eq!(pine.mainline[1].tool_calls.len(), 1);
+    assert_eq!(pine.meta.title, "Try the camera module instead");
+
+    // 子任务:计划(SubmitPlan 交上来的 Markdown)是助手正文,授权请求与报错是系统事件
+    let reed = adapter.parse_transcript(&listed[3]).unwrap();
+    assert_eq!(
+        roles_kinds(&reed.mainline),
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+            (Role::System, MessageKind::Meta),
+            (Role::System, MessageKind::Meta),
+        ]
+    );
+    assert!(reed.mainline[1].text.contains("Regression test plan"));
+    // lastMessageAt 只跟到用户那句;之后的计划 / 报错也是活动
+    assert_eq!(reed.meta.updated_at, 1786700004000);
+
+    // 子任务与分支挂回原会话
+    assert!(adapter.manages_parent_links());
+    let mut links = adapter.parent_links().unwrap();
+    links.sort();
+    let otter_key = "craft-agents:ws_f1x7e5a0/260801-brave-otter".to_string();
+    assert_eq!(
+        links,
+        vec![
+            (
+                "craft-agents:ws_f1x7e5a0/260803-bold-pine".to_string(),
+                otter_key.clone()
+            ),
+            (
+                "craft-agents:ws_f1x7e5a0/260805-calm-reed".to_string(),
+                otter_key
+            ),
+        ]
+    );
+
+    // 认领 Claude 引擎的转录:首行的 sdkSessionId、锚点边车里更早的那份、隐藏会话的;
+    // Pi 后端的 sdkSessionId 是 Pi 自己的 id,不认
+    assert!(adapter.manages_claims());
+    let claims = adapter.claimed_sessions().unwrap();
+    assert!(claims
+        .iter()
+        .all(|(agent, _)| *agent == AgentId::ClaudeCode));
+    assert_eq!(
+        claims.iter().map(|(_, id)| id.as_str()).collect::<Vec<_>>(),
+        [
+            "c1a0de00-aaaa-4bbb-8ccc-000000000001",
+            "c1a0de00-aaaa-4bbb-8ccc-000000000003",
+            "c1a0de00-aaaa-4bbb-8ccc-000000000004",
+            "c1a0de00-aaaa-4bbb-8ccc-000000000005",
+            "c1a0de00-aaaa-4bbb-8ccc-00000000000a",
+        ],
+        "排好序、去过重(锚点边车里又出现了一次首行那份)"
+    );
+    // 快照事件:任何会话的首行(含隐藏会话)与回合锚点边车,别的文件不算
+    assert!(adapter.is_snapshot_event(&craft_session_dir("260804-tiny-fern").join("session.jsonl")));
+    assert!(adapter.is_snapshot_event(&otter.join("meta/claude-turn-anchors.json")));
+    assert!(!adapter.is_snapshot_event(&otter.join("attachments/crash.png")));
+}
+
+/// 合成一条 craft 会话:首行 + 一句用户消息
+fn write_craft_session(workspace: &Path, session: &str, header: serde_json::Value) {
+    let dir = workspace.join("sessions").join(session);
+    fs::create_dir_all(&dir).unwrap();
+    let mut header = header;
+    header["id"] = serde_json::json!(session);
+    let line = serde_json::json!({
+        "id": "m1", "type": "user", "content": "hello", "timestamp": 1786200000000i64
+    });
+    fs::write(dir.join("session.jsonl"), format!("{header}\n{line}\n")).unwrap();
+}
+
+#[test]
+fn craft_keys_are_namespaced_by_the_workspace_id() {
+    // 会话 id 只在工作区内唯一:两个同名文件夹的工作区同一天各生成一条同名会话,key 不能撞
+    // (撞了会被 scanner 当成副本吞掉一条);命名空间取工作区 config.json 的 id,没有
+    // config.json 或 id 缺席才退回目录名
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a/notes");
+    let b = tmp.path().join("b/notes");
+    let bare = tmp.path().join("c/bare");
+    let idless = tmp.path().join("d/idless");
+    for ws in [&a, &b, &bare, &idless] {
+        write_craft_session(ws, "260901-same-name", serde_json::json!({}));
+    }
+    fs::write(
+        a.join("config.json"),
+        r#"{"id":"ws_aaaa1111","slug":"notes"}"#,
+    )
+    .unwrap();
+    fs::write(
+        b.join("config.json"),
+        r#"{"id":"ws_bbbb2222","slug":"notes"}"#,
+    )
+    .unwrap();
+    fs::write(idless.join("config.json"), r#"{"slug":"idless"}"#).unwrap();
+    let native_of = |ws: &Path| -> Vec<String> {
+        CraftAdapter::new()
+            .with_custom_root(ws.to_path_buf())
+            .list_session_files()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.native_id)
+            .collect()
+    };
+    assert_eq!(native_of(&a), ["ws_aaaa1111/260901-same-name"]);
+    assert_eq!(native_of(&b), ["ws_bbbb2222/260901-same-name"]);
+    assert_eq!(native_of(&bare), ["bare/260901-same-name"]);
+    assert_eq!(native_of(&idless), ["idless/260901-same-name"]);
+
+    // 父子关系两端都在同一个命名空间里拼
+    write_craft_session(
+        &a,
+        "260902-child",
+        serde_json::json!({"parentSessionId": "260901-same-name"}),
+    );
+    let adapter = CraftAdapter::new().with_custom_root(a.clone());
+    assert_eq!(
+        adapter.parent_links().unwrap(),
+        [(
+            "craft-agents:ws_aaaa1111/260902-child".to_string(),
+            "craft-agents:ws_aaaa1111/260901-same-name".to_string()
+        )]
+    );
+    // config.json 写坏了:沿用上次读到的 id,不退回目录名换 key
+    fs::write(a.join("config.json"), "{ not json").unwrap();
+    assert_eq!(
+        adapter.list_session_files().unwrap()[0].native_id,
+        "ws_aaaa1111/260901-same-name"
+    );
+    // 没读到过就不知道:这一刻不列,别拿目录名顶
+    assert!(CraftAdapter::new()
+        .with_custom_root(a)
+        .list_session_files()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn craft_snapshots_tell_unreadable_from_absent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    let claude = |n: u8| format!("c1a0de00-0000-4000-8000-0000000000{n:02}");
+    write_craft_session(
+        &ws,
+        "260901-one",
+        serde_json::json!({"sdkSessionId": claude(1)}),
+    );
+    write_craft_session(
+        &ws,
+        "260902-two",
+        serde_json::json!({"sdkSessionId": claude(2)}),
+    );
+    let ids = |adapter: &dyn AgentAdapter| -> Option<Vec<String>> {
+        Some(
+            adapter
+                .claimed_sessions()?
+                .into_iter()
+                .map(|(_, id)| id)
+                .collect(),
+        )
+    };
+    let adapter = CraftAdapter::new().with_custom_root(ws.clone());
+    assert_eq!(ids(adapter.as_ref()).unwrap(), [claude(1), claude(2)]);
+
+    // 首行写坏了(不是 JSON):craft 自己也列不出,当它没有——快照照样完整
+    let two = ws.join("sessions/260902-two/session.jsonl");
+    fs::write(&two, "{ torn\n").unwrap();
+    assert_eq!(ids(adapter.as_ref()).unwrap(), [claude(1)]);
+    // 原子写的空档(正本已删、.tmp 还没改名过来):沿用上次读到的,认领不撤
+    let one = ws.join("sessions/260901-one/session.jsonl");
+    let parked = one.with_extension("jsonl.tmp");
+    fs::rename(&one, &parked).unwrap();
+    assert_eq!(ids(adapter.as_ref()).unwrap(), [claude(1)]);
+    fs::rename(&parked, &one).unwrap();
+
+    // 读不出来(权限)又没读到过:整份快照交回 None,scanner 保留库里的认领与父子关系;
+    // 读到过的沿用上次那份
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&one, fs::Permissions::from_mode(0o000)).unwrap();
+        // root 跑测试时权限拦不住,这一段没有意义
+        if fs::File::open(&one).is_err() {
+            assert_eq!(ids(adapter.as_ref()).unwrap(), [claude(1)]);
+            let fresh = CraftAdapter::new().with_custom_root(ws.clone());
+            assert!(fresh.claimed_sessions().is_none());
+            assert!(fresh.parent_links().is_none());
+            assert!(
+                fresh.list_session_files().unwrap().is_empty(),
+                "没读到过首行的会话不列:分不清它是不是隐藏会话"
+            );
+        }
+        fs::set_permissions(&one, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+}
+
+#[test]
+fn craft_custom_root_lifts_a_chosen_sessions_dir_to_its_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("Notes");
+    fs::create_dir_all(workspace.join("sessions")).unwrap();
+    let normalize =
+        |dir: PathBuf| wake_core::adapters::normalize_custom_root(AgentId::CraftAgents, dir);
+    assert_eq!(normalize(workspace.join("sessions")), workspace);
+    assert_eq!(normalize(workspace.clone()), workspace);
+    // 一个恰好叫 sessions 的工作区(底下还有自己的 sessions/)不上提
+    let odd = tmp.path().join("sessions");
+    fs::create_dir_all(odd.join("sessions")).unwrap();
+    assert_eq!(normalize(odd.clone()), odd);
 }
 
 /// 旧版转录取假 HOME 里 stage_sidecars 拷入的那份(file_ref 只认自己根下的路径)

@@ -145,6 +145,9 @@ pub fn agent_bin(agent: AgentId) -> Option<&'static str> {
         // ZCode 同样是桌面 app;app 内的 zcode.cjs 是常驻运行时的一部分、
         // 持有 db.sqlite 的写锁,外面再起一个不安全
         AgentId::Zcode => None,
+        // Craft Agents 是桌面 app;它的 craft-cli 只会连一台在跑的 Craft server
+        // 发消息,不是能在终端里接着聊的界面
+        AgentId::CraftAgents => None,
         AgentId::Devin => Some("devin"),
     }
 }
@@ -195,6 +198,9 @@ fn resume_args(meta: &SessionMeta) -> Option<(Vec<String>, bool)> {
         AgentId::Workbuddy => None,
         // ZCode:没有 CLI,`zcode://` scheme 的参数未公开——不画 Open In
         AgentId::Zcode => None,
+        // Craft Agents:`craftagents://` 能定位会话,但要带全局 config.json 里的
+        // 工作区 id(那个文件存着 server token,不读);也不是终端命令——不画 Open In
+        AgentId::CraftAgents => None,
         // Devin 会话按 cwd 分桶(`devin list` 只列当前目录),`--resume <id>`
         // 在原项目目录启动
         AgentId::Devin => Some((vec!["--resume".into(), id.into()], true)),

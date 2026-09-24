@@ -62,6 +62,7 @@ brands!(
     "codebuddy",
     "workbuddy",
     "zcode",
+    "craft-agents",
     "devin",
 );
 

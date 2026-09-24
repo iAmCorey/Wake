@@ -223,6 +223,7 @@ pub fn stage_dir_fixtures(home: &Path) {
         ("qoder", ".qoder"),
         ("codebuddy", ".codebuddy"),
         ("codebuddy", ".workbuddy"),
+        ("craft-agents", ".craft-agent"),
     ] {
         copy_tree(&fixture(src), &home.join(dst));
     }

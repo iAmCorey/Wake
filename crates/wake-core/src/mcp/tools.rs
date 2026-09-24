@@ -380,6 +380,7 @@ fn parse_agent(s: &str) -> Option<AgentId> {
             "claude" => Some(AgentId::ClaudeCode),
             "deepseek" => Some(AgentId::Dsh),
             "opencode2" | "opencodenext" => Some(AgentId::Opencode),
+            "craft" => Some(AgentId::CraftAgents),
             _ => None,
         })
 }

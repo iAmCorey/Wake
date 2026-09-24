@@ -1,7 +1,7 @@
 use crate::adapters::AgentAdapter;
 use crate::db::Store;
 use crate::models::*;
-use crate::scanner::{refresh_parent_links, scan_files, ScanEvents};
+use crate::scanner::{refresh_claims, refresh_parent_links, scan_files, ScanEvents};
 use notify::{RecursiveMode, Watcher};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -111,6 +111,94 @@ pub fn promote_survivors(
     }
 }
 
+/// 一批去抖后的事件落库。从监听线程里拆出来,测试可以不经文件系统通知、直接喂
+/// 构造好的事件(通知的到达时序三平台各不相同,拿真通知测会很脆)。`roots` 是
+/// (监听根, 实例下标),路径归属按最长匹配根(resolve_watch_agent)。
+///
+/// **事件种类不作数,按处理这一刻的现状裁决**:文件在就重解析,不在就出库。先 unlink
+/// 再 rename 的原子替换(Craft Agents 为兼容 Windows 就这么存会话)会先报一条 Remove,
+/// rename 的事件还可能落进下一批;改名走掉的旧路径报的又是改名而不是删除——按种类
+/// 分派,前者让会话在列表里闪没、正在看的详情被踢掉,后者让库里的行一直指着不存在的
+/// 路径,直到下次全量扫描
+pub(crate) fn process_batch(
+    adapters: &[Box<dyn AgentAdapter>],
+    store: &Arc<Store>,
+    events: &dyn ScanEvents,
+    roots: &[(PathBuf, usize)],
+    batch: Vec<notify::Result<notify::Event>>,
+) {
+    let mut present: HashMap<PathBuf, usize> = HashMap::new();
+    let mut gone: HashSet<PathBuf> = HashSet::new();
+    let mut snapshot_agents: HashSet<AgentId> = HashSet::new();
+    let mut rescan = false;
+    for ev in batch {
+        let Ok(ev) = ev.inspect_err(|e| eprintln!("watcher: notify error: {e}")) else {
+            continue;
+        };
+        // 后端丢过事件(FSEvents MustScanSubDirs / inotify Q_OVERFLOW):
+        // 这条不指向具体会话文件——macOS 挂的是出事的目录、Linux 干脆
+        // 无路径——按路径处理会被 file_ref 静默丢弃,改由整轮增量兜底
+        if ev.need_rescan() {
+            rescan = true;
+            continue;
+        }
+        for path in ev.paths {
+            let owner_ix = resolve_watch_agent(roots, &path);
+            if let Some(adapter) = owner_ix.and_then(|ix| adapters.get(ix)) {
+                if adapter.is_snapshot_event(&path) {
+                    snapshot_agents.insert(adapter.agent());
+                }
+            }
+            if path.exists() {
+                gone.remove(&path);
+                if let Some(ix) = owner_ix {
+                    present.insert(path, ix);
+                }
+            } else {
+                present.remove(&path);
+                gone.insert(path);
+            }
+        }
+    }
+
+    let removed_keys: Vec<String> = gone
+        .iter()
+        .filter_map(|path| store.remove_by_path(&path.to_string_lossy()).ok().flatten())
+        .collect();
+    if !removed_keys.is_empty() {
+        events.on_sessions_changed();
+    }
+    promote_survivors(adapters, store, events, &removed_keys);
+    // 认领方的快照变了(会话存盘或删掉,隐藏会话与回合锚点也算):写库之前对账——同一批里
+    // 引擎那份转录的写入才会被闸门挡住,原件没了的认领随之撤销
+    if adapters
+        .iter()
+        .any(|a| a.manages_claims() && snapshot_agents.contains(&a.agent()))
+    {
+        refresh_claims(adapters, store, events);
+    }
+
+    // 路径是否本 agent 的会话文件、native_id 怎么取,统一问**拥有
+    // 该根的实例**(下标即 roots 表登记的归属)
+    let refs: Vec<SessionFileRef> = present
+        .into_iter()
+        .filter_map(|(path, ix)| adapters.get(ix).and_then(|a| a.file_ref(&path)))
+        .collect();
+    let scanned_agents: HashSet<AgentId> = refs.iter().map(|reference| reference.agent).collect();
+    if !refs.is_empty() {
+        scan_files(adapters, store, events, refs);
+    }
+    // scan_files 已经为它扫到的家刷过父子关系
+    snapshot_agents.retain(|agent| !scanned_agents.contains(agent));
+    if !snapshot_agents.is_empty() {
+        let agents: Vec<AgentId> = snapshot_agents.into_iter().collect();
+        refresh_parent_links(adapters, store, events, &agents);
+    }
+    if rescan {
+        events.on_rescan_needed();
+    }
+}
+
 pub fn start_watcher(
     adapters: Arc<Vec<Box<dyn AgentAdapter>>>,
     store: Arc<Store>,
@@ -140,10 +228,6 @@ pub fn start_watcher(
     }
 
     let thread = std::thread::spawn(move || {
-        let resolve_ix = |path: &Path| resolve_watch_agent(&roots, path);
-
-        let mut pending: HashMap<PathBuf, usize> = HashMap::new();
-        let mut removed: Vec<PathBuf> = Vec::new();
         loop {
             // 等首个事件(阻塞),然后 800ms 窗口收敛
             let first = match rx.recv() {
@@ -160,64 +244,7 @@ pub fn start_watcher(
                     break;
                 }
             }
-
-            let mut parent_link_agents = HashSet::new();
-            let mut rescan = false;
-            for ev in batch {
-                let Ok(ev) = ev.inspect_err(|e| eprintln!("watcher: notify error: {e}")) else {
-                    continue;
-                };
-                // 后端丢过事件(FSEvents MustScanSubDirs / inotify Q_OVERFLOW):
-                // 这条不指向具体会话文件——macOS 挂的是出事的目录、Linux 干脆
-                // 无路径——按路径处理会被 file_ref 静默丢弃,改由整轮增量兜底
-                if ev.need_rescan() {
-                    rescan = true;
-                    continue;
-                }
-                for path in ev.paths {
-                    let owner_ix = resolve_ix(&path);
-                    if let Some(adapter) = owner_ix.and_then(|ix| adapters.get(ix)) {
-                        if adapter.is_parent_link_event(&path) {
-                            parent_link_agents.insert(adapter.agent());
-                        }
-                    }
-                    if matches!(ev.kind, notify::EventKind::Remove(_)) {
-                        pending.remove(&path);
-                        removed.push(path.clone());
-                    } else if let Some(ix) = owner_ix {
-                        pending.insert(path.clone(), ix);
-                    }
-                }
-            }
-
-            let mut removed_keys: Vec<String> = Vec::new();
-            for path in removed.drain(..) {
-                if let Ok(Some(key)) = store.remove_by_path(&path.to_string_lossy()) {
-                    removed_keys.push(key);
-                }
-                events.on_sessions_changed();
-            }
-            promote_survivors(&adapters, &store, events.as_ref(), &removed_keys);
-
-            // 路径是否本 agent 的会话文件、native_id 怎么取,统一问**拥有
-            // 该根的实例**(下标即 roots 表登记的归属)
-            let refs: Vec<SessionFileRef> = pending
-                .drain()
-                .filter_map(|(path, ix)| adapters.get(ix).and_then(|a| a.file_ref(&path)))
-                .collect();
-            let scanned_agents: HashSet<AgentId> =
-                refs.iter().map(|reference| reference.agent).collect();
-            if !refs.is_empty() {
-                scan_files(&adapters, &store, events.as_ref(), refs);
-            }
-            parent_link_agents.retain(|agent| !scanned_agents.contains(agent));
-            if !parent_link_agents.is_empty() {
-                let agents: Vec<AgentId> = parent_link_agents.into_iter().collect();
-                refresh_parent_links(&adapters, &store, events.as_ref(), &agents);
-            }
-            if rescan {
-                events.on_rescan_needed();
-            }
+            process_batch(&adapters, &store, events.as_ref(), &roots, batch);
         }
     });
 
@@ -226,4 +253,120 @@ pub fn start_watcher(
         thread: Some(thread),
         watched,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::craft::CraftAdapter;
+    use crate::scanner::NullEvents;
+    use notify::event::{CreateKind, EventKind, ModifyKind, RemoveKind, RenameMode};
+
+    /// Craft 的会话首行(Claude 后端,引擎转录 id = `sdk`)+ 一句用户话
+    fn header(name: &str, sdk: &str, hidden: bool) -> String {
+        format!(
+            "{{\"id\":\"s\",\"name\":\"{name}\",\"sdkSessionId\":\"{sdk}\",\"hidden\":{hidden},\"model\":\"claude-opus-5-5\",\"createdAt\":1786200000000}}\n\
+             {{\"id\":\"m1\",\"type\":\"user\",\"content\":\"hello\",\"timestamp\":1786200001000}}\n"
+        )
+    }
+
+    struct Fixture {
+        _tmp: tempfile::TempDir,
+        store: Arc<Store>,
+        adapters: Vec<Box<dyn AgentAdapter>>,
+        roots: Vec<(PathBuf, usize)>,
+        root: PathBuf,
+        file: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().join("workspaces");
+            let fx = Self {
+                store: Arc::new(Store::open(&tmp.path().join("wake.db")).unwrap()),
+                adapters: vec![CraftAdapter::new().with_custom_root(root.clone())],
+                roots: vec![(root.clone(), 0)],
+                file: root.join("ws/sessions/260801-brave-otter/session.jsonl"),
+                root,
+                _tmp: tmp,
+            };
+            fx.write(&fx.file, &header("first", "sdk-1", false));
+            fx
+        }
+
+        fn write(&self, path: &Path, content: &str) {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        }
+
+        fn batch(&self, kind: EventKind, path: &Path) {
+            let batch = vec![Ok(notify::Event::new(kind).add_path(path.to_path_buf()))];
+            process_batch(&self.adapters, &self.store, &NullEvents, &self.roots, batch);
+        }
+
+        fn title(&self) -> Option<String> {
+            self.store
+                .get_session("craft-agents:ws/260801-brave-otter")
+                .unwrap()
+                .map(|s| s.title)
+        }
+    }
+
+    /// Craft 存会话是"写 .tmp → 先 unlink 正本 → rename",rename 的事件可能落进下一批。
+    /// 这一批只收到 Remove、而文件已经回来了:当修改处理(重解析),不删会话;
+    /// 文件真没了才出库
+    #[test]
+    fn a_remove_for_a_file_that_is_back_is_a_modification() {
+        let fx = Fixture::new();
+        fx.batch(EventKind::Create(CreateKind::File), &fx.file);
+        assert_eq!(fx.title().as_deref(), Some("first"));
+
+        let tmp = fx.file.with_file_name("session.jsonl.tmp");
+        fx.write(&tmp, &header("second", "sdk-1", false));
+        std::fs::remove_file(&fx.file).unwrap();
+        std::fs::rename(&tmp, &fx.file).unwrap();
+        fx.batch(EventKind::Remove(RemoveKind::File), &fx.file);
+        assert_eq!(
+            fx.title().as_deref(),
+            Some("second"),
+            "一条过时的 Remove 把会话删了,或没按修改重解析"
+        );
+
+        std::fs::remove_file(&fx.file).unwrap();
+        fx.batch(EventKind::Remove(RemoveKind::File), &fx.file);
+        assert_eq!(fx.title(), None);
+    }
+
+    /// 改名走掉的旧路径报的是改名而不是删除:照样按"文件已不在"出库
+    #[test]
+    fn a_path_renamed_away_leaves_the_index() {
+        let fx = Fixture::new();
+        fx.batch(EventKind::Create(CreateKind::File), &fx.file);
+        std::fs::rename(&fx.file, fx.file.with_file_name("session.jsonl.bak")).unwrap();
+        fx.batch(
+            EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+            &fx.file,
+        );
+        assert_eq!(fx.title(), None);
+    }
+
+    /// 认领方(Craft)的会话一存盘就认领它的引擎转录——隐藏的 mini 会话 file_ref 不收,
+    /// 它的首行照样是快照事件;会话被删,认领随之撤销
+    #[test]
+    fn claimant_snapshot_events_keep_claims_current() {
+        let fx = Fixture::new();
+        fx.batch(EventKind::Create(CreateKind::File), &fx.file);
+        let hidden = fx.root.join("ws/sessions/260802-mini-edit/session.jsonl");
+        fx.write(&hidden, &header("mini", "sdk-2", true));
+        fx.batch(EventKind::Create(CreateKind::File), &hidden);
+        let claimed = fx.store.claimed_keys().unwrap();
+        assert!(claimed.contains("claude-code:sdk-1"), "{claimed:?}");
+        assert!(claimed.contains("claude-code:sdk-2"), "{claimed:?}");
+
+        std::fs::remove_dir_all(fx.file.parent().unwrap()).unwrap();
+        fx.batch(EventKind::Remove(RemoveKind::File), &fx.file);
+        let claimed = fx.store.claimed_keys().unwrap();
+        assert!(!claimed.contains("claude-code:sdk-1"), "{claimed:?}");
+    }
 }

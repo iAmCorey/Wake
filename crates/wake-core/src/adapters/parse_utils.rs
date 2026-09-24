@@ -118,6 +118,37 @@ pub fn title_from_messages(messages: &[TranscriptMessage]) -> Option<String> {
         .find(|title| !title.is_empty())
 }
 
+/// 会话开头从父会话原样复制来的那段(Codex `spawn_agent` 的 fork_turns、Craft Agents
+/// 的分支)折成一条 Meta 标记。原样入库就是:子会话偷走父会话的标题、父会话的每一句
+/// 在 FTS 里出现两次、Insights 的 prompt 数翻倍。Meta 不进 FTS、不算 message_count、
+/// 不参与标题推导,GUI / 导出 / MCP 也都跳过它——留一条而不是整段删掉,是为了"这里
+/// 原本有东西"不至于无声消失;内容本体就在父会话里。`parent` 是标记里父会话的叫法
+/// (Codex 说 thread)
+pub fn collapse_inherited(messages: &mut Vec<TranscriptMessage>, cut: usize, parent: &str) {
+    if cut == 0 {
+        return;
+    }
+    let inherited = &messages[..cut];
+    let turns = inherited
+        .iter()
+        .filter(|m| m.kind == MessageKind::Text)
+        .count();
+    let ts = inherited
+        .iter()
+        .find_map(|m| m.timestamp)
+        .unwrap_or_default();
+    let mut marker = text_msg(
+        Role::System,
+        &format!(
+            "── {turns} message{} inherited from the parent {parent} ──",
+            crate::text::plural(turns as i64)
+        ),
+        ts,
+    );
+    marker.kind = MessageKind::Meta;
+    messages.splice(..cut, std::iter::once(marker));
+}
+
 /// `AgentAdapter::file_ref` 的默认实现:非空 .jsonl,stem 即 native_id。
 /// 覆写方可在此结果上做路径过滤或 native_id 改写。
 pub fn default_file_ref(agent: AgentId, path: &std::path::Path) -> Option<SessionFileRef> {

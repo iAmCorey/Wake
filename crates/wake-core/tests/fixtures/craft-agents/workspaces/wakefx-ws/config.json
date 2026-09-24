@@ -1,0 +1,10 @@
+{
+  "id": "ws_f1x7e5a0",
+  "name": "WakeFx",
+  "slug": "wakefx-ws",
+  "defaults": {
+    "permissionMode": "ask"
+  },
+  "createdAt": 1786100000000,
+  "updatedAt": 1786100000000
+}

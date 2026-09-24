@@ -1,0 +1,2 @@
+{"type":"session","version":3,"id":"01a0d3b2-0000-7000-8000-000000000002","timestamp":"2026-08-09T09:00:00.000Z","cwd":"/Users/tester/.craft-agent/workspaces/wakefx-ws"}
+{"type":"message","id":"p1","parentId":null,"timestamp":"2026-08-09T09:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"**USER'S DATE AND TIME: Sunday, August 9, 2026** <session_state>sessionId: 260802-quiet-lake</session_state> Summarise yesterday's merged PRs"}]}}
