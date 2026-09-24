@@ -24,13 +24,14 @@ pub enum AgentId {
     Codebuddy,
     Workbuddy,
     Zcode,
+    Devin,
 }
 
 impl AgentId {
-    /// 全部十九家,**枚举声明序**(= Ord = 用户钉的侧栏展示序;面板成组、
+    /// 全部二十家,**枚举声明序**(= Ord = 用户钉的侧栏展示序;面板成组、
     /// 表单下拉共用同一顺序)。曾误抄 create_adapters 的构造序,下拉与侧栏
     /// 排序当场对不上——契约测试现在卡它与 Ord 一致
-    pub const ALL: [AgentId; 19] = [
+    pub const ALL: [AgentId; 20] = [
         AgentId::ClaudeCode,
         AgentId::Codex,
         AgentId::Grok,
@@ -50,6 +51,7 @@ impl AgentId {
         AgentId::Codebuddy,
         AgentId::Workbuddy,
         AgentId::Zcode,
+        AgentId::Devin,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -73,6 +75,7 @@ impl AgentId {
             AgentId::Codebuddy => "codebuddy",
             AgentId::Workbuddy => "workbuddy",
             AgentId::Zcode => "zcode",
+            AgentId::Devin => "devin",
         }
     }
 
@@ -97,6 +100,7 @@ impl AgentId {
             "codebuddy" => Some(AgentId::Codebuddy),
             "workbuddy" => Some(AgentId::Workbuddy),
             "zcode" => Some(AgentId::Zcode),
+            "devin" => Some(AgentId::Devin),
             _ => None,
         }
     }
@@ -122,6 +126,7 @@ impl AgentId {
             AgentId::Codebuddy => "CodeBuddy",
             AgentId::Workbuddy => "WorkBuddy",
             AgentId::Zcode => "ZCode",
+            AgentId::Devin => "Devin",
         }
     }
 
@@ -204,6 +209,8 @@ impl AgentId {
             AgentId::Workbuddy => "brands/workbuddy.png",
             // 官方 app 图标(黑底白 Z),两模式通用
             AgentId::Zcode => "brands/zcode.png",
+            // 官方 app 图标(蓝图网格白字),两模式通用
+            AgentId::Devin => "brands/devin.png",
         }
     }
 }
@@ -941,7 +948,7 @@ pub const UNTITLED: &str = "Untitled";
 /// 会话 key 的唯一构造点:本地 `{agent}:{native_id}`,远程
 /// `{agent}:{host}:{native_id}`。scanner 的墓碑查询、watcher 的幸存者反查、
 /// 远程装饰器的 key 改写都走这里——"远程 key 长什么样"只此一处知识。
-/// (十九家 adapter 的本地两段构造保留各自 `format!`,它们从不涉及 host。)
+/// (二十家 adapter 的本地两段构造保留各自 `format!`,它们从不涉及 host。)
 pub fn session_key(agent: AgentId, host: &str, native_id: &str) -> String {
     if host.is_empty() {
         format!("{}:{native_id}", agent.as_str())

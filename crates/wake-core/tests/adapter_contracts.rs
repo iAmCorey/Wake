@@ -20,6 +20,7 @@ use wake_core::adapters::codex::CodexAdapter;
 use wake_core::adapters::copilot::CopilotAdapter;
 use wake_core::adapters::cursor::CursorAdapter;
 use wake_core::adapters::cursor_ide::CursorIdeAdapter;
+use wake_core::adapters::devin::DevinAdapter;
 use wake_core::adapters::dsh::DshAdapter;
 use wake_core::adapters::gemini::GeminiAdapter;
 use wake_core::adapters::grok::GrokAdapter;
@@ -49,6 +50,7 @@ struct TestEnv {
     openclaw_db: PathBuf,
     cursor_ide_db: PathBuf,
     zcode_db: PathBuf,
+    devin_db: PathBuf,
     /// 假 HOME 目录本体,持有 TempDir 保证整个测试进程期间不被清理
     _home: tempfile::TempDir,
 }
@@ -92,6 +94,7 @@ fn setup() -> &'static TestEnv {
             openclaw_db: sc.openclaw_db,
             cursor_ide_db: sc.cursor_ide_db,
             zcode_db: sc.zcode_db,
+            devin_db: sc.devin_db,
             _home: home,
         }
     })
@@ -2254,6 +2257,14 @@ fn seq_contract_holds_for_all_agents() {
             Box::new(ZcodeAdapter::new()),
             db_ref(AgentId::Zcode, &env.zcode_db, "zc-0001"),
         ),
+        (
+            Box::new(DevinAdapter::new()),
+            db_ref(AgentId::Devin, &env.devin_db, "dv-0001"),
+        ),
+        (
+            Box::new(DevinAdapter::new()),
+            db_ref(AgentId::Devin, &env.devin_db, "dv-0002"),
+        ),
     ];
     for (adapter, r) in &checks {
         assert_seq_contract(adapter.as_ref(), r);
@@ -2439,6 +2450,156 @@ fn zcode_custom_root_lifts_to_home_before_storing() {
         lone
     );
     let adapter = ZcodeAdapter::new().with_custom_root(lone.clone());
+    assert_eq!(adapter.data_roots(), vec![lone]);
+}
+
+/// Devin:`cli/sessions.db` 单库两表——sessions + message_nodes 森林。hidden=1
+/// 与零正文会话不列;可见转录是从 main_chain_id 叶子沿 parent_node_id 走回
+/// 根的链,重试侧枝不进转录、其 metrics 不进 token 累计;消息级
+/// generation_model 比 sessions.model 权威;system 注入、心跳与 compaction
+/// 请求归 Meta,<summary> 应答折 CompactSummary
+#[test]
+fn devin_parse_contract() {
+    let env = setup();
+    let adapter = DevinAdapter::new();
+    let mut ids: Vec<String> = adapter
+        .list_session_files()
+        .expect("devin list")
+        .into_iter()
+        .map(|r| r.native_id)
+        .collect();
+    ids.sort();
+    // dv-0003 是 hidden 会话、dv-0004 零正文,都不列
+    assert_eq!(ids, vec!["dv-0001", "dv-0002"]);
+    // 虚拟路径 <db>#<id>
+    assert_eq!(
+        adapter.list_session_files().unwrap()[0].file_path,
+        format!("{}#dv-0001", env.devin_db.display())
+    );
+
+    let r = db_ref(AgentId::Devin, &env.devin_db, "dv-0001");
+    let s = adapter.parse_session(&r).expect("devin parse_session");
+    let t = adapter
+        .parse_transcript(&r)
+        .expect("devin parse_transcript");
+    assert_eq!(s.meta.key, "devin:dv-0001");
+    assert_eq!(s.meta.title, "Devin QR fix");
+    assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx");
+    assert_eq!(s.meta.project_name, "wakefx");
+    // 逐消息 generation_model,取最后一条 assistant 的实发模型
+    assert_eq!(s.meta.model.as_deref(), Some("swe-2-max"));
+    // 主链 (200+20+800) + (300+40);重试侧枝 n5 的 550 不进账
+    assert_eq!(s.meta.tokens_used, Some(1360));
+    assert_eq!(s.meta.created_at, 1789000000000);
+    assert_eq!(s.meta.updated_at, 1789000060000);
+    assert_eq!(s.meta.message_count, 3);
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+        ]
+    );
+    assert!(!t.mainline.iter().any(|m| m.text.contains("重试侧枝")));
+    let a = &t.mainline[1];
+    assert_eq!(a.thinking.as_deref(), Some("先读一下组件源码"));
+    assert_eq!(a.model.as_deref(), Some("swe-2-high"));
+    assert_eq!(a.timestamp, Some(1789000008000));
+    assert_eq!(a.tool_calls.len(), 1);
+    assert_eq!(a.tool_calls[0].name, "exec");
+    assert!(a.tool_calls[0].input_preview.contains("rg useEffect"));
+    assert_eq!(
+        a.tool_calls[0].output.as_deref(),
+        Some("src/QrScanner.tsx:12: useEffect(() => watch())")
+    );
+    // seq 契约:FTS 单元的 seq 等于详情页序号(Meta / CompactSummary 不进 FTS)
+    assert_eq!(
+        s.units.iter().map(|u| u.seq).collect::<Vec<_>>(),
+        t.mainline
+            .iter()
+            .filter(|m| m.kind == MessageKind::Text)
+            .map(|m| m.seq)
+            .collect::<Vec<_>>()
+    );
+
+    // 空标题回退首条真人消息;system 注入、心跳、compaction 请求归 Meta,
+    // <summary> 应答折 CompactSummary
+    let r2 = db_ref(AgentId::Devin, &env.devin_db, "dv-0002");
+    let s2 = adapter.parse_session(&r2).unwrap();
+    let t2 = adapter.parse_transcript(&r2).unwrap();
+    assert_eq!(s2.meta.title, "空标题会话取这句");
+    assert_eq!(s2.meta.message_count, 2);
+    assert_eq!(
+        roles_kinds(&t2.mainline),
+        vec![
+            (Role::System, MessageKind::Meta),
+            (Role::User, MessageKind::Meta),
+            (Role::User, MessageKind::Meta),
+            (Role::Assistant, MessageKind::CompactSummary),
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+        ]
+    );
+}
+
+/// 老库没有 hidden / main_chain_id 两列:照常列(无 hidden 不过滤),链退回
+/// 全部节点(无 main_chain_id 就按 created_at,row_id 全列)
+#[test]
+fn devin_degrades_on_old_schema() {
+    setup();
+    let home = tempfile::tempdir().unwrap();
+    let db_dir = home.path().join("cli");
+    fs::create_dir_all(&db_dir).unwrap();
+    let conn = rusqlite::Connection::open(db_dir.join("sessions.db")).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE sessions (id TEXT PRIMARY KEY, working_directory TEXT NOT NULL,
+                               backend_type TEXT NOT NULL, model TEXT NOT NULL,
+                               agent_mode TEXT NOT NULL, created_at INTEGER NOT NULL,
+                               last_activity_at INTEGER NOT NULL, title TEXT);
+        CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY, session_id TEXT NOT NULL,
+                                    node_id INTEGER NOT NULL, parent_node_id INTEGER,
+                                    chat_message TEXT NOT NULL, created_at INTEGER NOT NULL);
+        INSERT INTO sessions VALUES ('old-1','/work/old','windsurf','swe-1','auto',1789000000,1789000001,'old schema');
+        INSERT INTO message_nodes (session_id, node_id, parent_node_id, chat_message, created_at) VALUES
+            ('old-1',1,NULL,'{"role":"user","content":"老库也要能读"}',1789000000),
+            ('old-1',2,1,'{"role":"assistant","content":"在。","metadata":{"generation_model":"swe-1","metrics":{"input_tokens":10,"output_tokens":5}}}',1789000001);
+        "#,
+    )
+    .unwrap();
+    drop(conn);
+
+    let adapter = DevinAdapter::new().with_custom_root(home.path().to_path_buf());
+    let refs = adapter.list_session_files().unwrap();
+    assert_eq!(refs.len(), 1, "老 schema 不得整家消失");
+    let s = adapter.parse_session(&refs[0]).unwrap();
+    assert_eq!(s.meta.title, "old schema");
+    assert_eq!(s.meta.project_path, "/work/old");
+    assert_eq!(s.meta.message_count, 2);
+    assert_eq!(s.meta.tokens_used, Some(15));
+}
+
+/// 自定义 location:`cli/sessions.db` 与 `cli` 层在入库前上提到数据根
+/// (normalize_custom_root),孤立库拷贝原样进构造器
+#[test]
+fn devin_custom_root_normalization() {
+    setup();
+    let root = Path::new("/nowhere/devin-data");
+    for (picked, stored) in [
+        (root.join("cli/sessions.db"), root.to_path_buf()),
+        (root.join("cli"), root.to_path_buf()),
+        (root.to_path_buf(), root.to_path_buf()),
+    ] {
+        assert_eq!(
+            wake_core::adapters::normalize_custom_root(AgentId::Devin, picked),
+            stored
+        );
+    }
+    let adapter = DevinAdapter::new().with_custom_root(root.to_path_buf());
+    assert_eq!(adapter.data_roots(), vec![root.join("cli/sessions.db")]);
+    let lone = PathBuf::from("/backup/sessions.db");
+    let adapter = DevinAdapter::new().with_custom_root(lone.clone());
     assert_eq!(adapter.data_roots(), vec![lone]);
 }
 

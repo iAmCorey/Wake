@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- New: Devin sessions are indexed from its local database (`~/.local/share/devin/cli/sessions.db`, read-only) — titles, models, thinking, tool calls and token counts included; the visible transcript follows each session's main chain, so retries edited out of the conversation and hidden helper sessions stay out. Open In resumes a session with `devin --resume` in its project directory (#46)
+
 ## [0.8.1] — 2026-09-23
 
 - New: `wake-cli refresh` updates an existing index from the terminal, so a scheduled task (launchd, systemd timer) keeps search and session lists fresh while Wake is closed; it steps aside while Wake has its window open, and Wake waits for a running refresh before opening the index (#43, thanks @aka-kika)

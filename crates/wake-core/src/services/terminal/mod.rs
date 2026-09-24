@@ -145,6 +145,7 @@ pub fn agent_bin(agent: AgentId) -> Option<&'static str> {
         // ZCode 同样是桌面 app;app 内的 zcode.cjs 是常驻运行时的一部分、
         // 持有 db.sqlite 的写锁,外面再起一个不安全
         AgentId::Zcode => None,
+        AgentId::Devin => Some("devin"),
     }
 }
 
@@ -194,6 +195,9 @@ fn resume_args(meta: &SessionMeta) -> Option<(Vec<String>, bool)> {
         AgentId::Workbuddy => None,
         // ZCode:没有 CLI,`zcode://` scheme 的参数未公开——不画 Open In
         AgentId::Zcode => None,
+        // Devin 会话按 cwd 分桶(`devin list` 只列当前目录),`--resume <id>`
+        // 在原项目目录启动
+        AgentId::Devin => Some((vec!["--resume".into(), id.into()], true)),
         // Kiro / Gemini CLI 没有按会话 id 续会话的形制
         AgentId::Kiro | AgentId::Gemini => None,
     }

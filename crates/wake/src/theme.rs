@@ -108,6 +108,8 @@ pub fn agent_series_color(agent: wake_core::models::AgentId) -> u32 {
         Workbuddy => 0x0EC8A9,
         // 品牌是黑白的,趋势图里给一档中性石板灰
         Zcode => 0x8B95A5,
+        // 官方图标的蓝色
+        Devin => 0x55A8E8,
     }
 }
 
