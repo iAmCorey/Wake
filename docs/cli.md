@@ -303,7 +303,7 @@ Numeric options outside their range are clamped, not rejected: `--limit 999` on 
 
 ## Agent ids
 
-`claude-code`, `codex`, `grok`, `dsh`, `cursor`, `opencode`, `pi`, `omp`, `kiro`, `kimi`, `gemini`, `copilot`, `antigravity`, `qoder`, `hermes`, `openclaw`, `codebuddy`, `workbuddy`, `zcode`, `craft-agents`. Display names (`"Claude Code"`) and a few aliases (`claude`, `deepseek`, `craft`) work too.
+`claude-code`, `codex`, `grok`, `dsh`, `cursor`, `opencode`, `pi`, `omp`, `kiro`, `kimi`, `gemini`, `copilot`, `antigravity`, `qoder`, `hermes`, `openclaw`, `codebuddy`, `workbuddy`, `zcode`, `craft-agents`, `devin`. Display names (`"Claude Code"`) and a few aliases (`claude`, `deepseek`, `craft`) work too.
 
 ## Session keys and references
 

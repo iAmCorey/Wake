@@ -240,6 +240,7 @@ pub struct Sidecars {
     pub openclaw_db: PathBuf,
     pub cursor_ide_db: PathBuf,
     pub zcode_db: PathBuf,
+    pub devin_db: PathBuf,
 }
 
 /// 侧档与 SQLite 型 fixture 库:copilot/opencode(两代)/antigravity 现建库,
@@ -343,6 +344,15 @@ pub fn stage_sidecars(home: &Path) -> Sidecars {
     fs::create_dir_all(zcode_tasks_db.parent().unwrap()).expect("mkdir .zcode/v2");
     build_zcode_tasks_db(&zcode_tasks_db);
 
+    let devin_db = home
+        .join(".local")
+        .join("share")
+        .join("devin")
+        .join("cli")
+        .join("sessions.db");
+    fs::create_dir_all(devin_db.parent().unwrap()).expect("mkdir devin cli dir");
+    build_devin_db(&devin_db);
+
     Sidecars {
         copilot_db,
         opencode_db,
@@ -353,6 +363,7 @@ pub fn stage_sidecars(home: &Path) -> Sidecars {
         openclaw_db,
         cursor_ide_db,
         zcode_db,
+        devin_db,
     }
 }
 
@@ -899,6 +910,53 @@ pub fn build_zcode_tasks_db(path: &Path) {
         "#,
     )
     .expect("populate zcode tasks fixture db");
+}
+
+/// Devin `<root>/cli/sessions.db` 最小同构库(列集按真机写端):
+/// sessions + message_nodes(node_id/parent_node_id 森林,chat_message JSON,
+/// unix 秒时间戳)。dv-0001 是正常会话:main_chain_id 指向 n4,n5 是挂在
+/// n1 上的重试侧枝——既不该进转录,它的 metrics 也不该进 token 累计;
+/// dv-0002 标题为空(回退首条真人消息),带 system 注入、cache_keepalive
+/// 心跳、compaction 请求与 <summary> 应答;dv-0003 是 hidden 会话不列;
+/// dv-0004 零正文不列
+pub fn build_devin_db(path: &Path) {
+    let conn = rusqlite::Connection::open(path).expect("create devin fixture db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, working_directory TEXT NOT NULL, backend_type TEXT NOT NULL,
+            model TEXT NOT NULL, agent_mode TEXT NOT NULL, created_at INTEGER NOT NULL,
+            last_activity_at INTEGER NOT NULL, title TEXT, main_chain_id INTEGER,
+            hidden INTEGER NOT NULL DEFAULT 0, metadata TEXT
+        );
+        CREATE TABLE message_nodes (
+            row_id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+            node_id INTEGER NOT NULL, parent_node_id INTEGER,
+            chat_message TEXT NOT NULL, created_at INTEGER NOT NULL, metadata TEXT,
+            UNIQUE(session_id, node_id)
+        );
+        INSERT INTO sessions (id, working_directory, backend_type, model, agent_mode,
+                              created_at, last_activity_at, title, main_chain_id, hidden) VALUES
+            ('dv-0001','/Users/tester/Github/wakefx','windsurf','swe-2-max','auto',1789000000,1789000060,'Devin QR fix',4,0),
+            ('dv-0002','/Users/tester/Github/wakefx','windsurf','swe-2-max','auto',1789000100,1789000110,'',6,0),
+            ('dv-0003','/Users/tester/Github/wakefx','windsurf','swe-2-max','auto',1789000200,1789000210,'hidden helper',1,1),
+            ('dv-0004','/Users/tester/Github/wakefx','windsurf','swe-2-max','auto',1789000300,1789000300,'empty',NULL,0);
+        INSERT INTO message_nodes (session_id, node_id, parent_node_id, chat_message, created_at) VALUES
+            ('dv-0001',1,NULL,'{"message_id":"u1","role":"user","content":"Devin 看看二维码扫描为何闪退,是不是 useEffect() 的问题","metadata":{"is_user_input":true,"telemetry":{"source":"user"}}}',1789000005),
+            ('dv-0001',2,1,'{"message_id":"a1","role":"assistant","content":"","thinking":{"thinking":"先读一下组件源码","signature":"sealed.v1.xyz","signature_type":"sealed"},"tool_calls":[{"id":"exec_0","name":"exec","arguments":{"command":"rg useEffect src/QrScanner.tsx"},"index":0,"kind":"function"}],"metadata":{"generation_model":"swe-2-high","metrics":{"input_tokens":200,"output_tokens":20,"cache_read_tokens":800,"cache_creation_tokens":null}}}',1789000008),
+            ('dv-0001',3,2,'{"message_id":"t1","role":"tool","content":"src/QrScanner.tsx:12: useEffect(() => watch())","tool_call_id":"exec_0","metadata":{}}',1789000009),
+            ('dv-0001',4,3,'{"message_id":"a2","role":"assistant","content":"是依赖数组问题,我给出了修复补丁。","metadata":{"generation_model":"swe-2-max","metrics":{"input_tokens":300,"output_tokens":40}}}',1789000012),
+            ('dv-0001',5,1,'{"message_id":"a3-retry","role":"assistant","content":"重试侧枝的另一种回答,不该进主链","metadata":{"generation_model":"swe-2-max","metrics":{"input_tokens":500,"output_tokens":50}}}',1789000020),
+            ('dv-0002',1,NULL,'{"message_id":"s1","role":"system","content":"<system_info>\nworkspace context\n</system_info>","metadata":{"telemetry":{"source":"system"}}}',1789000101),
+            ('dv-0002',2,1,'{"message_id":"u0","role":"user","content":"continue","metadata":{"telemetry":{"source":"cache_keepalive"}}}',1789000102),
+            ('dv-0002',3,2,'{"message_id":"u1","role":"user","content":"Conversation to summarize:\n=== MESSAGE 0 - User ===\n二维码","metadata":{"is_user_input":null,"telemetry":{"source":"user"}}}',1789000103),
+            ('dv-0002',4,3,'{"message_id":"a1","role":"assistant","content":"<summary>\n## Overview\n之前聊过二维码扫描的修复。\n</summary>","metadata":{"telemetry":{"source":"assistant"}}}',1789000104),
+            ('dv-0002',5,4,'{"message_id":"u2","role":"user","content":"空标题会话取这句","metadata":{"is_user_input":true,"telemetry":{"source":"user"}}}',1789000105),
+            ('dv-0002',6,5,'{"message_id":"a2","role":"assistant","content":"好的。","metadata":{"generation_model":"swe-2-max","metrics":{"input_tokens":50,"output_tokens":10}}}',1789000110),
+            ('dv-0003',1,NULL,'{"message_id":"u1","role":"user","content":"Output a summary from the following messages","metadata":{"is_user_input":true,"telemetry":{"source":"user"}}}',1789000205);
+        "#,
+    )
+    .expect("populate devin fixture db");
 }
 
 /// 以某种身份持住索引锁,拿不到就 panic 点名——各测试文件里"扮演 GUI / 另一个

@@ -63,6 +63,8 @@ brands!(
     "workbuddy",
     "zcode",
     "craft-agents",
+    "devin",
+    "devin-light",
 );
 
 fn lookup_product(path: &str) -> Option<&'static [u8]> {

@@ -110,6 +110,9 @@ pub fn agent_series_color(agent: wake_core::models::AgentId) -> u32 {
         Zcode => 0x8B95A5,
         // app 图标像素 "C" 的紫(取自内嵌 PNG),比 Kiro 的电光紫灰、暗
         CraftAgents => 0x9570BE,
+        // 标志是单色的,给一档天蓝(Devin Desktop 的主色系),蓝色家族里离 Gemini、
+        // Cursor 都最远的一档
+        Devin => 0x3BB3F1,
     }
 }
 

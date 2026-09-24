@@ -148,6 +148,7 @@ pub fn agent_bin(agent: AgentId) -> Option<&'static str> {
         // Craft Agents 是桌面 app;它的 craft-cli 只会连一台在跑的 Craft server
         // 发消息,不是能在终端里接着聊的界面
         AgentId::CraftAgents => None,
+        AgentId::Devin => Some("devin"),
     }
 }
 
@@ -200,6 +201,9 @@ fn resume_args(meta: &SessionMeta) -> Option<(Vec<String>, bool)> {
         // Craft Agents:`craftagents://` 能定位会话,但要带全局 config.json 里的
         // 工作区 id(那个文件存着 server token,不读);也不是终端命令——不画 Open In
         AgentId::CraftAgents => None,
+        // Devin 会话按 cwd 分桶(`devin list` 只列当前目录),`--resume <id>`
+        // 在原项目目录启动
+        AgentId::Devin => Some((vec!["--resume".into(), id.into()], true)),
         // Kiro / Gemini CLI 没有按会话 id 续会话的形制
         AgentId::Kiro | AgentId::Gemini => None,
     }

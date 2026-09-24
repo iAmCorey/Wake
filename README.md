@@ -52,6 +52,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and a dozen othe
 | WorkBuddy | `~/.workbuddy/projects/*/*.jsonl` (`WORKBUDDY_CONFIG_DIR` is respected; desktop app, so no resume) | ✅ | — |
 | ZCode | `~/.zcode/cli/db/db.sqlite` + `v2/tasks-index.sqlite` (read-only; `ZCODE_STORAGE_DIR` is respected; desktop app, so no resume) | ✅ | — |
 | Craft Agents | `~/.craft-agent/workspaces/*/sessions/*/session.jsonl` (workspaces kept elsewhere can be added under Session locations; desktop app, so no resume) | ✅ | ✅ |
+| Devin | `~/.local/share/devin/cli/sessions.db` (read-only; `XDG_DATA_HOME` is respected) | ✅ | — |
 
 **Model** = whether Wake shows which LLM a session used (the model the session last used). **Via** = whether Wake shows where the session was started from (CLI, IDE extension, desktop app) — Codex records this in its local data; Hermes and OpenClaw record the channel a session came in through (Telegram, Discord, …); Craft Agents marks sessions its automations started. A "—" means the agent's local data simply doesn't record that field, not a missing feature.
 

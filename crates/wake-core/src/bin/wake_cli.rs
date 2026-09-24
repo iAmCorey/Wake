@@ -186,7 +186,7 @@ fn setup(db: &Option<PathBuf>) -> String {
     // sibling_named 取的就是 current_exe 同级目录,从 wake-cli 调恰好对
     let mcp_bin = mcp::sibling_file("wake-mcp");
     let path = db_path(db);
-    // 只探库,不必为一行提示把二十家 roster 建起来
+    // 只探库,不必为一行提示把二十一家 roster 建起来
     let db_error = Store::open_read_only(&path).err().map(|e| format!("{e:#}"));
     cli::setup_text(&cli::SetupFacts {
         cli_bin: &cli_bin,
