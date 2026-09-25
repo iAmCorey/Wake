@@ -2,9 +2,11 @@
 //! `<数据根>/cli/sessions.db` 全明文 SQLite。数据根服从 XDG——
 //! `$XDG_DATA_HOME/devin`,缺省 `~/.local/share/devin`(macOS 同样走 XDG
 //! 形态,实测);`~/Library/Application Support/devin` 是桌面 Electron 壳的
-//! profile 目录,作为历史候选一并探。候选按序取第一个真有库文件的,都没有
-//! 时回落 XDG 语义下的默认位置(env 候选里真有库才采信,存在但空的目录
-//! 不能遮掉默认根——与其他 adapter 同一约定)。
+//! profile 目录,作为历史候选一并探;Windows 的 Devin Desktop 把库放在
+//! `%APPDATA%\devin`(从 `home_dir()` 派生,与 cursor_ide 同一约定:不走
+//! `dirs::config_dir()`,否则 `WAKE_HOME` 改道对它无效),同样探。候选按序取
+//! 第一个真有库文件的,都没有时回落 XDG 语义下的默认位置(env 候选里真有库
+//! 才采信,存在但空的目录不能遮掉默认根——与其他 adapter 同一约定)。
 //!
 //! `sessions(id,title,working_directory,model,agent_mode,created_at,
 //! last_activity_at,hidden,main_chain_id,…)` + `message_nodes(row_id,
@@ -108,9 +110,13 @@ impl DevinAdapter {
             .join("Library")
             .join("Application Support")
             .join("devin");
+        // Windows 的 Devin Desktop: %APPDATA%\devin。Mac/Linux 上该目录不会
+        // 存在,无条件作候选无害(与 app_support 同理),也让三平台的契约测试
+        // 都能覆盖这条解析
+        let appdata = home.join("AppData").join("Roaming").join("devin");
         let hit = xdg
             .iter()
-            .chain([&local, &app_support])
+            .chain([&local, &app_support, &appdata])
             .find(|dir| db_in(dir).is_file())
             .cloned();
         let root = hit.unwrap_or_else(|| xdg.unwrap_or(local));
