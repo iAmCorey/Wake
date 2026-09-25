@@ -15,6 +15,10 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
 
+// cmd 命令构建不依赖 Win32,在各平台测试拒绝危险输入的边界。
+#[cfg(any(target_os = "windows", test))]
+mod cmd;
+
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -152,8 +156,23 @@ pub fn agent_bin(agent: AgentId) -> Option<&'static str> {
     }
 }
 
+/// Native ids may come from database columns or transcript contents, not just
+/// filenames. Quoting protects shell syntax, but cannot stop a leading `-`
+/// from becoming a CLI option. Share Kooky's conservative id grammar across
+/// local terminals, deep links and copied SSH commands.
+fn is_resume_id(id: &str) -> bool {
+    id.len() <= 200
+        && id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-'))
+}
+
 fn resume_args(meta: &SessionMeta) -> Option<(Vec<String>, bool)> {
     let id = meta.id.as_str();
+    if !is_resume_id(id) {
+        return None;
+    }
     match meta.agent {
         AgentId::ClaudeCode => Some((vec!["--resume".into(), id.into()], true)),
         AgentId::Codex => Some((vec!["resume".into(), id.into()], false)),
@@ -280,8 +299,7 @@ pub enum ResumeTarget {
 }
 
 pub fn resume_targets(meta: &SessionMeta) -> Vec<ResumeTarget> {
-    // 没有 resume 形制的 agent(OpenClaw)不列任何目标——否则菜单里每一项都是
-    // 点了才报 "isn't supported" 的死项;本地/远程两条路同源于 resume_args
+    // 不支持恢复或 id 不安全的会话不列目标;本地/远程同源于 resume_args。
     if resume_args(meta).is_none() {
         return Vec::new();
     }
@@ -304,15 +322,7 @@ pub fn resume_target(meta: &SessionMeta, target: ResumeTarget) -> ResumeOutcome 
 
 fn copy_ssh_outcome(meta: &SessionMeta) -> ResumeOutcome {
     let Some(command) = ssh_resume_command(meta) else {
-        // OpenClaw 之外全有 resume_args;护栏语义同 resume_session_in
-        return ResumeOutcome {
-            ok: false,
-            command: String::new(),
-            error: Some(format!(
-                "Resume isn't supported for {} yet",
-                meta.agent.display_name()
-            )),
-        };
+        return resume_unavailable(meta);
     };
     if platform::copy_to_clipboard(&command) {
         ResumeOutcome {
@@ -331,7 +341,26 @@ fn copy_ssh_outcome(meta: &SessionMeta) -> ResumeOutcome {
     }
 }
 
+fn resume_unavailable(meta: &SessionMeta) -> ResumeOutcome {
+    ResumeOutcome {
+        ok: false,
+        command: String::new(),
+        error: Some(if is_resume_id(&meta.id) {
+            format!(
+                "Resume isn't supported for {} yet",
+                meta.agent.display_name()
+            )
+        } else {
+            "Cannot resume: invalid session id (expected 1–200 ASCII letters, digits, '_', '.' or '-', starting with a letter or digit)".into()
+        }),
+    }
+}
+
 pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome {
+    // Reject before any deep-link dispatch, CLI lookup or clipboard fallback.
+    if !is_resume_id(&meta.id) {
+        return resume_unavailable(meta);
+    }
     // 深链类目标(macOS 的 Kooky / Claude Desktop / Codex Desktop)由平台
     // 整锅接管,不走 shell 命令构建;新增非 shell 目标在平台的
     // deep_link_resume 里声明,这里无需加旁路
@@ -339,14 +368,7 @@ pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome
         return outcome;
     }
     let Some((args, requires_cwd)) = resume_args(meta) else {
-        return ResumeOutcome {
-            ok: false,
-            command: String::new(),
-            error: Some(format!(
-                "Resume isn't supported for {} yet",
-                meta.agent.display_name()
-            )),
-        };
+        return resume_unavailable(meta);
     };
     let bin = session_bin(meta);
     let Some(cli) = bin.and_then(resolve_cli) else {
@@ -360,7 +382,17 @@ pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome
     let cwd = cwd_ok.then(|| meta.project_path.as_str());
     // 按用户选的宿主取方言:command 既是成功 toast 的展示面,也是失败时
     // 塞进剪贴板的那条,必须与真正跑的一致(Windows 的 cmd 宿主方言不同)
-    let command = compose_command(term, &cli, &args, cwd);
+    let command = match compose_command(term, &cli, &args, cwd) {
+        Ok(command) => command,
+        Err(e) => {
+            // An unsafe command must never become the manual/clipboard fallback.
+            return ResumeOutcome {
+                ok: false,
+                command: String::new(),
+                error: Some(format!("Cannot resume: {e}")),
+            };
+        }
+    };
     if requires_cwd && !cwd_ok {
         let hint = clipboard_fallback(&command);
         return ResumeOutcome {
@@ -374,9 +406,7 @@ pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome
     }
 
     // 起终端:POSIX 直接投喂拼好的 command;Windows 的 launch_shell 另收
-    // 结构化件按宿主重拼方言(cmd 宿主 cmd 方言、其余复用 command 的
-    // PowerShell 形态)——一条字符串塞不进两种引号规则,平台差异只摊在
-    // 这一处调用点上。
+    // 结构化件供 wt 拆分工作目录与调用段;其余宿主复用各自方言的 command。
     #[cfg(not(target_os = "windows"))]
     let result = platform::launch_shell(term, &command);
     #[cfg(target_os = "windows")]
@@ -574,6 +604,112 @@ mod tests {
             source: None,
             favorite: false,
             pinned: false,
+        }
+    }
+
+    #[test]
+    fn resume_id_grammar_and_length_boundaries() {
+        for id in [
+            "a",
+            "0",
+            "ses_A1.b-2",
+            "01937a56-3a2c-43af-af68-a8d4e00d60ed",
+        ] {
+            assert!(super::is_resume_id(id), "{id:?}");
+        }
+        assert!(super::is_resume_id(&"a".repeat(200)));
+        assert!(!super::is_resume_id(&"a".repeat(201)));
+        for id in [
+            "", "-", "_abc", ".abc", "a b", "a/b", "a\\b", "a:b", "é", "a\0b",
+        ] {
+            assert!(!super::is_resume_id(id), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn unsafe_ids_never_reach_resume_targets_or_commands() {
+        use super::{ResumeTarget, TerminalApp};
+        #[cfg(target_os = "macos")]
+        let terminals = [
+            TerminalApp::Terminal,
+            TerminalApp::Kooky,
+            TerminalApp::ClaudeDesktop,
+            TerminalApp::CodexDesktop,
+        ];
+        #[cfg(target_os = "linux")]
+        let terminals = [TerminalApp::GnomeTerminal];
+        #[cfg(target_os = "windows")]
+        let terminals = [TerminalApp::Cmd, TerminalApp::WindowsPowershell];
+
+        for agent in AgentId::ALL {
+            for id in [
+                "--dangerously-skip-permissions",
+                "--mcp-config=evil.json",
+                "-x",
+                r#"x" & echo BREAKOUT_MARKER & rem"#,
+                "%COMSPEC%",
+                "a\nb",
+                "a\rb",
+                "",
+            ] {
+                let mut meta = remote_meta(agent, id, "");
+                assert!(super::resume_args(&meta).is_none(), "{agent:?}: {id:?}");
+                assert!(super::resume_targets(&meta).is_empty());
+                assert!(super::ssh_resume_command(&meta).is_none());
+                let copied = super::resume_target(&meta, ResumeTarget::CopySshCommand);
+                assert!(!copied.ok);
+                assert!(copied.command.is_empty());
+                assert!(copied.error.unwrap().contains("invalid session id"));
+
+                meta.host.clear();
+                assert!(super::resume_targets(&meta).is_empty());
+                for term in terminals {
+                    let outcome = super::resume_session_in(&meta, term);
+                    assert!(!outcome.ok);
+                    assert!(outcome.command.is_empty());
+                    assert!(outcome.error.unwrap().contains("invalid session id"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn valid_resume_ids_preserve_agent_arguments() {
+        let id = "a0_B.c-123";
+        for (agent, expected, requires_cwd) in [
+            (AgentId::ClaudeCode, vec!["--resume", id], true),
+            (AgentId::Codex, vec!["resume", id], false),
+            (AgentId::Qoder, vec!["--resume", id], true),
+            (AgentId::Copilot, vec!["--resume=a0_B.c-123"], false),
+            (AgentId::Cursor, vec!["--resume", id], false),
+            (AgentId::Opencode, vec!["--session", id], false),
+            (AgentId::Pi, vec!["--session", id], false),
+            (AgentId::Omp, vec!["--resume", id], false),
+            (AgentId::Grok, vec!["--resume", id], false),
+            (AgentId::Kimi, vec!["--session", id], false),
+            (
+                AgentId::Antigravity,
+                vec!["--conversation=a0_B.c-123"],
+                false,
+            ),
+            (AgentId::Dsh, vec!["@deepseek-ai/dsh", "web"], true),
+            (
+                AgentId::Hermes,
+                vec!["--profile", "default", "--resume", id],
+                false,
+            ),
+            (AgentId::Codebuddy, vec!["--resume", id], true),
+            (AgentId::Devin, vec!["--resume", id], true),
+        ] {
+            let meta = remote_meta(agent, id, "");
+            let (args, cwd) = super::resume_args(&meta).unwrap();
+            assert_eq!(args, expected, "{agent:?}");
+            assert_eq!(cwd, requires_cwd, "{agent:?}");
+            assert_eq!(
+                super::resume_targets(&meta),
+                vec![super::ResumeTarget::CopySshCommand]
+            );
+            assert!(super::ssh_resume_command(&meta).is_some());
         }
     }
 

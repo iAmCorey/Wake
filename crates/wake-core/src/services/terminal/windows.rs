@@ -139,47 +139,6 @@ fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// cmd 方言 quote:一律双引号包裹(Windows 文件名不允许 `"`,无内层转义面)。
-/// 不留裸词快路径——cmd 的引号保全规则按"整行引号个数 + 首字符是否引号"
-/// 分支,让引号数随内容浮动等于让 mangling 随机出现;定长形制配合 cmd_line
-/// 的 `call` 前缀,行首恒为裸词,规则可预测。
-///
-/// `%` 无法在此中和:命令行(非批处理)语境下 `%%` 不折叠、引号内 `^` 是
-/// 字面量,故含 `%` 的会话交由 launch_shell 拒绝走 cmd 宿主,不静默改写
-fn cmd_quote(s: &str) -> String {
-    format!("\"{s}\"")
-}
-
-/// cmd 方言整行。`call` 前缀让行首恒为裸词:cmd 对 `/K` 载荷有一条遗留
-/// 规则——首字符是引号且全行引号数不为二时,砍掉首尾各一个引号——路径
-/// 带空格(`C:\Program Files\…`)时整条命令会被腰斩成 `C:\Program`,而
-/// spawn 成功、Wake 照报 ok(2026-08-25 review)。`call` 对 exe 与
-/// bat/cmd 同样是同步调用,语义不变。
-/// `/d`:跨盘符 cd 也生效(会话在 D: 而 cmd 起在 C: 的情形)。
-fn cmd_line(cli: &str, args: &[String], cwd: Option<&str>) -> String {
-    let mut line = String::new();
-    if let Some(dir) = cwd {
-        line.push_str(&format!("cd /d {} && ", cmd_quote(dir)));
-    }
-    line.push_str("call ");
-    line.push_str(&cmd_quote(cli));
-    for a in args {
-        line.push(' ');
-        line.push_str(&cmd_quote(a));
-    }
-    line
-}
-
-/// cmd 宿主无法安全承载的内容:`%VAR%` 在双引号内照样展开,而命令行语境
-/// 下没有任何转义能关掉它——含 `%` 就会静默跑成另一条命令。会话 id 取自
-/// 文件名(parse_utils),用户目录更是任意,概率并非零。
-fn cmd_hostile(cli: &str, args: &[String], cwd: Option<&str>) -> bool {
-    std::iter::once(cli)
-        .chain(args.iter().map(|s| s.as_str()))
-        .chain(cwd)
-        .any(|s| s.contains('%'))
-}
-
 /// PowerShell 方言:`Set-Location -LiteralPath 'dir' -ErrorAction Stop;
 /// & 'cli' 'args…'`。-LiteralPath 防路径里的 `[ ]` 被当通配符;
 /// **-ErrorAction Stop 不可省**:Windows PowerShell 5.1 不认 `&&`,而
@@ -209,10 +168,10 @@ pub(super) fn compose_command(
     cli: &str,
     args: &[String],
     cwd: Option<&str>,
-) -> String {
+) -> anyhow::Result<String> {
     match term {
-        TerminalApp::Cmd => cmd_line(cli, args, cwd),
-        _ => ps_line(cli, args, cwd),
+        TerminalApp::Cmd => super::cmd::command_line(cli, args, cwd),
+        _ => Ok(ps_line(cli, args, cwd)),
     }
 }
 
@@ -293,8 +252,8 @@ const PS_SESSION: [&str; 3] = ["-NoLogo", "-NoExit", "-Command"];
 
 /// 按宿主方言起终端。keep-open 与 POSIX 的 `exec $SHELL` 同位:cmd 用
 /// `/K`,PowerShell 用 `-NoExit`,命令跑完留在交互提示符。command 即
-/// mod.rs 经 compose_command 拼好的 PowerShell 形态,PowerShell 系宿主
-/// 直接复用;cmd 宿主方言不同,只能从结构化件重拼。
+/// mod.rs 经 compose_command 校验、按宿主拼好的命令。wt 另用结构化件
+/// 拆分工作目录和调用段,避免其分号语义。
 pub(super) fn launch_shell(
     term: TerminalApp,
     cli: &str,
@@ -307,14 +266,9 @@ pub(super) fn launch_shell(
     let mut cmd = Command::new(&exe);
     match term {
         TerminalApp::Cmd => {
-            if cmd_hostile(cli, args, cwd) {
-                // 拒绝而非静默改写:调用方会把 command(此刻已是 cmd 方言)
-                // 送进剪贴板兜底,用户仍拿得到可手动执行的那条
-                anyhow::bail!("path or session id contains '%', which Command Prompt would expand — pick another terminal");
-            }
             // raw_arg 绕过 std 的 argv 引号规则——cmd 不做 argv 解析,std 把
             // 整串再包一层引号反而会毁掉内层结构。command 即 compose_command
-            // 给的 cmd 方言原文(见 cmd_line 的 `call` 前缀说明)
+            // 给的已校验 cmd 方言原文(见 cmd::command_line 的 `call` 前缀)
             cmd.raw_arg(format!("/K {command}"));
         }
         TerminalApp::Pwsh | TerminalApp::WindowsPowershell => {
@@ -511,4 +465,32 @@ pub(super) fn reveal_path(path: &str) {
     let mut cmd = Command::new(explorer_exe());
     cmd.raw_arg(format!("/select,\"{}\"", win_path(path)));
     let _ = spawn_and_reap(cmd);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compose_command, TerminalApp};
+
+    #[test]
+    fn cmd_rejects_unsafe_input_before_clipboard_fallback() {
+        for value in [r#"x" & echo BREAKOUT_MARKER & rem"#, "%COMSPEC%"] {
+            assert!(compose_command(TerminalApp::Cmd, "claude", &[value.into()], None).is_err());
+            assert!(compose_command(TerminalApp::Cmd, value, &[], None).is_err());
+            assert!(compose_command(TerminalApp::Cmd, "claude", &[], Some(value)).is_err());
+        }
+    }
+
+    #[test]
+    fn powershell_still_quotes_paths_that_cmd_cannot_carry() {
+        assert_eq!(
+            compose_command(
+                TerminalApp::WindowsPowershell,
+                r"C:\Tools\agent.cmd",
+                &["--resume".into(), "abc-123".into()],
+                Some(r"D:\O'Brien\100%"),
+            )
+            .unwrap(),
+            r"Set-Location -LiteralPath 'D:\O''Brien\100%' -ErrorAction Stop; & 'C:\Tools\agent.cmd' '--resume' 'abc-123'"
+        );
+    }
 }

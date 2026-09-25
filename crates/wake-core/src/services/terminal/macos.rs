@@ -437,17 +437,7 @@ fn launch_kooky(meta: &SessionMeta) -> ResumeOutcome {
     if !KOOKY_ROSTER.contains(&meta.agent) {
         return launch_kooky_cli(meta);
     }
-    let id_ok = meta
-        .id
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphanumeric())
-        && meta.id.len() <= 200
-        && meta
-            .id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
-    if id_ok {
+    if super::is_resume_id(&meta.id) {
         let mut url = format!(
             "kooky://resume?agent={}&id={}",
             meta.agent.as_str(),

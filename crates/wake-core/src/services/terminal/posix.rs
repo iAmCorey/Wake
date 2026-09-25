@@ -74,8 +74,8 @@ pub(super) fn compose_command(
     cli: &str,
     args: &[String],
     cwd: Option<&str>,
-) -> String {
-    super::sh_command_line(cli, args, cwd)
+) -> anyhow::Result<String> {
+    Ok(super::sh_command_line(cli, args, cwd))
 }
 
 /// 保守 percent-encode(RFC 3986 unreserved 之外全编;keep_slash 供
