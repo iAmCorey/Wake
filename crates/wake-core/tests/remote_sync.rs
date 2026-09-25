@@ -16,6 +16,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::Arc;
 use wake_core::adapters::create_adapter_roster_for;
@@ -80,7 +81,9 @@ fn remote_pipeline_end_to_end() {
         eprintln!("rsync not installed; skipping remote sync e2e");
         return;
     }
-    let tmp = tempfile::tempdir().unwrap();
+    // Keep the source socket path short even on macOS, whose default temp dir
+    // has a long /var/folders prefix. The mirror is deliberately much deeper.
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
     let home = tmp.path().join("remote-home");
     let bin = tmp.path().join("bin");
     let local_home = tmp.path().join("local-home");
@@ -122,11 +125,31 @@ fn remote_pipeline_end_to_end() {
     common::isolate_home(&local_home);
     build_remote_home(&home);
 
-    let store = Arc::new(Store::open(&tmp.path().join("wake.db")).unwrap());
+    // Runtime artifacts may live beside transcripts (#47). Leave the socket
+    // live during both syncs and give the FIFO no .sock suffix, so the test
+    // requires type-based skipping rather than a filename exclusion.
+    let socket_rel = ".cursor/projects/runtime/worker.sock";
+    let fifo_rel = ".cursor/projects/runtime/events";
+    let regular_rel = ".cursor/projects/runtime/regular.sock";
+    fs::create_dir_all(home.join(".cursor/projects/runtime")).unwrap();
+    let _listener = UnixListener::bind(home.join(socket_rel)).unwrap();
+    assert!(std::process::Command::new("mkfifo")
+        .arg(home.join(fifo_rel))
+        .status()
+        .unwrap()
+        .success());
+    touch(&home.join(regular_rel), "regular file, not a socket\n");
+
+    let local_db_dir = tmp.path().join("long-local-cache-path-".repeat(6));
+    fs::create_dir_all(&local_db_dir).unwrap();
+    let store = Arc::new(Store::open(&local_db_dir.join("wake.db")).unwrap());
     store.add_remote_host("devbox").unwrap();
     store.add_remote_host("down").unwrap();
     let db_dir = store.db_dir().unwrap();
     let cache = wake_core::remote::host_cache_dir(&db_dir, "devbox");
+    // Exceeds sun_path on both Darwin (104) and Linux (108), even before rsync
+    // adds a temporary suffix. Recreating a socket here must never be attempted.
+    assert!(cache.join(socket_rel).as_os_str().len() > 108);
     let devbox = || host_row(&store, "devbox");
 
     // ① 首次同步:.copilot(缺父目录)之后的 cursor…dsh 必须到位,exclude 与凭证
@@ -144,6 +167,17 @@ fn remote_pipeline_end_to_end() {
         "探测后消失的源应重探一轮,不是报错"
     );
     assert!(devbox().last_sync_at.is_some());
+    for rel in [socket_rel, fifo_rel] {
+        assert!(
+            fs::symlink_metadata(cache.join(rel)).is_err(),
+            "runtime special file was mirrored: {rel}"
+        );
+        assert!(fs::symlink_metadata(home.join(rel)).is_ok());
+    }
+    assert_eq!(
+        fs::read_to_string(cache.join(regular_rel)).unwrap(),
+        "regular file, not a socket\n"
+    );
     assert!(
         !cache
             .join(".local/share/opencode/opencode-next.db")

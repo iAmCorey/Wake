@@ -353,7 +353,15 @@ fn present_remote_paths(stdout: &str) -> Vec<&'static str> {
 /// 布局;`--delete` 让远程删除传播到缓存(watcher 收 Remove 后清库内行)——
 /// 它只作用于各源树**内部**,整棵源消失由 sync_host 的缺席清理负责。
 fn rsync_args(host: &str, dest: &Path, paths: &[&str]) -> Vec<String> {
-    let mut args = vec!["-az".to_string(), "-R".to_string(), "--delete".to_string()];
+    // -a enables special files. Override it afterwards: sockets/FIFOs carry no
+    // session data, and recreating sockets under a long cache path can exceed
+    // sun_path and abort openrsync's receiver (#47).
+    let mut args = vec![
+        "-az".to_string(),
+        "-R".to_string(),
+        "--delete".to_string(),
+        "--no-specials".to_string(),
+    ];
     args.extend(
         REMOTE_LAYOUTS
             .iter()
@@ -676,6 +684,12 @@ mod tests {
         let present = [".claude/projects", ".codex/state_5.sqlite"];
         let args = rsync_args("devbox", Path::new("/tmp/cache/devbox"), &present);
         assert_eq!(args[0], "-az");
+        let archive = args.iter().position(|a| a == "-az").unwrap();
+        let no_specials = args.iter().position(|a| a == "--no-specials").unwrap();
+        assert!(
+            no_specials > archive,
+            "--no-specials must follow -a, which enables special files"
+        );
         assert!(args.contains(&"-R".to_string()));
         assert!(args.contains(&"--delete".to_string()));
         assert!(args
