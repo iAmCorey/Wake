@@ -101,6 +101,8 @@ pub fn agent_series_color(agent: wake_core::models::AgentId) -> u32 {
         Gemini => 0x3B8BD9,
         Copilot => 0x6E9C3F,
         Antigravity => 0x648AB5,
+        // 与 Antigravity(CLI)同品牌色,同一家的两个面
+        AntigravityIde => 0x648AB5,
         Qoder => 0x2BB454,
         Hermes => 0xE0B040,
         Openclaw => 0xE04A4A,

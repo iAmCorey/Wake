@@ -134,6 +134,9 @@ pub fn agent_bin(agent: AgentId) -> Option<&'static str> {
         AgentId::Grok => Some("grok"),
         AgentId::Kimi => Some("kimi"),
         AgentId::Antigravity => Some("agy"),
+        // IDE 与 CLI 同一家的两个面、共用 `agy` 入口与同一套会话 id 空间
+        // (`agy` 的 /resume 能打开非 CLI 面的会话,故同一个 --conversation=<id> 形制通用)
+        AgentId::AntigravityIde => Some("agy"),
         // dsh 官方唯一分发形态是 npx(README 只有 `npx @deepseek-ai/dsh web`,
         // 不发全局命令);包名由 resume_args 作首参带上
         AgentId::Dsh => Some("npx"),
@@ -169,6 +172,8 @@ fn resume_args(meta: &SessionMeta) -> Option<(Vec<String>, bool)> {
         AgentId::Grok => Some((vec!["--resume".into(), id.into()], false)),
         AgentId::Kimi => Some((vec!["--session".into(), id.into()], false)),
         AgentId::Antigravity => Some((vec![format!("--conversation={id}")], false)),
+        // 与 CLI 同形制:`agy` 按会话 id 打开,跨面(CLI/IDE/桌面)同一空间
+        AgentId::AntigravityIde => Some((vec![format!("--conversation={id}")], false)),
         // dsh 官方 tui bundle 未发布(rc.8 shipped profile 只有 web/headless,
         // help 里的 --profile tui --resume 当下无消费端),web 是唯一交互
         // surface 且无 per-session 深链——resume 退而求其次:cd 到会话 cwd

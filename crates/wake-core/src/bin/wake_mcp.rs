@@ -102,7 +102,7 @@ fn main() -> ExitCode {
             for s in mcp::setup_snippets(&bin) {
                 let _ = writeln!(out, "## {} — {}\n\n{}\n", s.client, s.hint, s.text);
             }
-            // 只探库,不必为一行提示把二十一家 roster 建起来
+            // 只探库,不必为一行提示把二十二家 roster 建起来
             if let Err(e) = Store::open_read_only(&db_path(&args.db)) {
                 let _ = writeln!(out, "Note: {e:#}");
             }

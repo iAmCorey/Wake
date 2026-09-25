@@ -1,4 +1,5 @@
 pub mod antigravity;
+pub mod antigravity_ide;
 pub mod claude;
 pub mod codebuddy;
 pub mod codex;
@@ -169,7 +170,7 @@ pub trait AgentAdapter: Send + Sync {
     /// 拥有本家 session 文件的位置",凭据/配置/索引这类不产生会话的文件不列。
     /// 新增 adapter 必须实现:没有默认值,漏了编译就过不去
     fn data_roots(&self) -> Vec<std::path::PathBuf>;
-    /// 文件监听根目录。默认 = data_roots 中现存的目录,二十一家实测全部吻合:
+    /// 文件监听根目录。默认 = data_roots 中现存的目录,二十二家实测全部吻合:
     /// 目录型给出自己的 root,SQLite 型的根是库文件、天然筛空(watcher 只认
     /// .jsonl,库变更靠启动/手动刷新),codex 的 sessions + archived 一并覆盖。
     /// 只有当监听范围确实不同于数据根时才覆写——否则一次根路径搬迁
@@ -270,7 +271,7 @@ pub(crate) fn env_dir(key: &str) -> Option<std::path::PathBuf> {
 
 /// 各家数据根共用的 HOME。**全部 adapter 必须走这里**,不要直接
 /// `dirs::home_dir()`——`WAKE_HOME` 是整组 adapter 的统一改道开关:
-/// 契约测试靠它把二十一家指向 fixture 目录,而 `dirs::home_dir()` 只在
+/// 契约测试靠它把二十二家指向 fixture 目录,而 `dirs::home_dir()` 只在
 /// POSIX 上看 `$HOME`,Windows 上走 SHGetKnownFolderPath、无论如何都指向
 /// 真实用户目录(于是 Windows 上的契约测试全部落空,2026-08-25 review)。
 /// 对用户它顺带是便携安装/多档案切换的手动开关。
@@ -278,7 +279,7 @@ pub(crate) fn home_dir() -> Option<std::path::PathBuf> {
     env_dir("WAKE_HOME").or_else(dirs::home_dir)
 }
 
-/// 全量二十一家 roster,**不按 detect 过滤**。这是全应用唯一的构造点:
+/// 全量二十二家 roster,**不按 detect 过滤**。这是全应用唯一的构造点:
 /// scanner/watcher/resume/Session locations 面板共享 Workbench 启动时的
 /// 同一份实例。缺根的家由各自 list_session_files 降级为 Ok(空)(scanner
 /// 对 Err 会 `?` 截断整轮,新 adapter 必须维持这条降级约定,contract 测试
@@ -306,6 +307,7 @@ pub fn create_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(grok::GrokAdapter::new()),
         Box::new(kimi::KimiAdapter::new()),
         Box::new(antigravity::AntigravityAdapter::new()),
+        Box::new(antigravity_ide::AntigravityIdeAdapter::new()),
         Box::new(dsh::DshAdapter::new()),
         Box::new(hermes::HermesAdapter::new()),
         Box::new(openclaw::OpenclawAdapter::new()),
