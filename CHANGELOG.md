@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.8.4] — 2026-09-25
+
+- Fix: Remote sync skips Unix sockets and FIFOs in agent directories, preventing long cache paths from causing `mkstempsock: Invalid argument` and a persistent Sync failed status on macOS (#47).
+- Fix: Open In validates session IDs before opening terminals or desktop apps and before copying SSH commands, preventing IDs from being interpreted as CLI options. Windows Command Prompt also rejects inputs it cannot safely quote before launching or copying a fallback command (#49, #50).
+
 ## [0.8.3] — 2026-09-25
 
 - Fix: DeepSeek Harness sessions from dsh 0.1.6 and later are indexed again, and sessions dsh has upgraded to its newer log format show their latest conversation instead of an outdated copy (#45, thanks @z1HwanG)
