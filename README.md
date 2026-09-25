@@ -44,7 +44,8 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and a dozen othe
 | Oh My Pi | `~/.omp/agent/sessions/**/*.jsonl` | ✅ | — |
 | Grok Build | `~/.grok/sessions/**/updates.jsonl` | ✅ | — |
 | Kimi Code | `~/.kimi-code/sessions/**/wire.jsonl` | — | — |
-| Antigravity CLI | `~/.gemini/antigravity-cli/conversation_summaries.db` (metadata only — transcripts are encrypted) | — | — |
+| Antigravity CLI | `~/.gemini/antigravity-cli/conversation_summaries.db` (metadata only — the transcript bodies are encrypted) | ✅ | — |
+| Antigravity IDE | `~/.gemini/antigravity-ide/brain/**/transcript.jsonl` (full transcripts, plus pasted images under the session's `.user_uploaded/`) | ✅ | — |
 | DeepSeek Harness (`dsh`) | `~/.dsh/sessions/**/session[.vN].jsonl[.zstd]` (the newest log format generation is read; zstd-compressed logs are decoded transparently) | ✅ | — |
 | Hermes Agent | `~/.hermes/state.db` + `profiles/*/state.db` (`HERMES_HOME` is respected) | ✅ | ✅ |
 | OpenClaw | `~/.openclaw/agents/*/agent/openclaw-agent.sqlite` + legacy `agents/*/sessions/*.jsonl` (`OPENCLAW_STATE_DIR` is respected) | ✅ | ✅ |
@@ -220,7 +221,7 @@ CI runs `cargo test -p wake-core` plus a full app build on every push to main an
 crates/
 ├── wake-core        # pure data layer, no UI dependencies
 │   ├── adapters/    #   claude / codex / qoder / copilot / cursor / opencode / kiro / hermes / openclaw
-│   │                #   gemini / pi / omp / grok / kimi / antigravity / dsh
+│   │                #   gemini / pi / omp / grok / kimi / antigravity-cli / antigravity-ide / dsh
 │   │                #   (AgentAdapter trait — add an adapter, get the whole UI for free;
 │   │                #   remote.rs wraps any adapter over a synced cache for remote hosts)
 │   ├── remote.rs    #   remote hosts: ssh probe + rsync whitelist mirror into <data dir>/remotes/<host>/
