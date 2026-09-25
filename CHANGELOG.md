@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.8.3] — 2026-09-25
 
 - Fix: DeepSeek Harness sessions from dsh 0.1.6 and later are indexed again, and sessions dsh has upgraded to its newer log format show their latest conversation instead of an outdated copy (#45, thanks @z1HwanG)
 
