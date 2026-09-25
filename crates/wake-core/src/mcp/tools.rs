@@ -34,7 +34,9 @@ struct CachedTranscript {
     path: String,
     mtime: i64,
     size: i64,
+    // 侧档(Cursor 的 IDE 库)在转录不变时也会改项目与模型:两样都进键,索引一刷就重解析
     indexed_project: String,
+    indexed_model: Option<String>,
     transcript: Arc<ParsedTranscript>,
 }
 
@@ -59,6 +61,7 @@ impl TranscriptCache {
                 && cached.mtime == stamp
                 && cached.size == r.size
                 && cached.indexed_project == meta.project_path
+                && cached.indexed_model == meta.model
             {
                 return Ok(cached.transcript.clone());
             }
@@ -69,6 +72,7 @@ impl TranscriptCache {
             mtime: stamp,
             size: r.size,
             indexed_project: meta.project_path.clone(),
+            indexed_model: meta.model.clone(),
             transcript: t.clone(),
         });
         Ok(t)

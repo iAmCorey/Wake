@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 /// (`{"type":"turn_ended"}`)写进那里、正文全留在本库——所以 IDE 会话在只读
 /// JSONL 的旧实现里是空壳。两源同 native_id 的重叠交 scanner 的副本裁决,
 /// 本源以 `dedup_rank` 排在 CLI 源之后:转录带正文时 CLI 那份胜出,
-/// 并可从本库补充项目路径;本源那份正文留作解析失败的回退;
+/// 并可从本库补充项目路径与模型 / token;本源那份正文留作解析失败的回退;
 /// 只有转录缺失或只剩空壳的会话才由本源胜出。不按 mtime 定胜负——两边写盘
 /// 先后不固定,同一会话会在项目之间跳(2026-09-15 实测)。
 ///
@@ -82,28 +82,9 @@ pub(super) struct ProjectMetadata {
     pub repositories: Vec<String>,
 }
 
-/// Read only the requested composers, sharing one connection across a scan.
-/// Keep workspace and repository paths distinct: a repo may contain the actual
-/// workspace, or be one of several repos inside it.
-pub(super) fn project_metadata<'a>(
-    db: &Path,
-    ids: impl Iterator<Item = &'a str>,
-) -> Option<HashMap<String, ProjectMetadata>> {
-    let ro = open_sqlite_ro(db, "cursor-project")?;
-    let mut stmt = ro
-        .conn
-        .prepare("SELECT CAST(value AS TEXT) FROM cursorDiskKV WHERE key = ?1")
-        .ok()?;
-    let mut paths = HashMap::new();
-    for id in ids {
-        let Ok(raw) = stmt.query_row([format!("{COMPOSER_PREFIX}{id}")], |r| {
-            r.get::<_, String>(0)
-        }) else {
-            continue;
-        };
-        let Ok(data) = serde_json::from_str::<Value>(&raw) else {
-            continue;
-        };
+impl ProjectMetadata {
+    /// composer 记的工作区与 Git 仓库;两样都没有给 None
+    fn from_data(data: &Value) -> Option<Self> {
         let workspace = data
             .pointer("/workspaceIdentifier/uri/fsPath")
             .and_then(Value::as_str)
@@ -118,17 +99,140 @@ pub(super) fn project_metadata<'a>(
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .collect::<Vec<_>>();
-        if workspace.is_some() || !repositories.is_empty() {
-            paths.insert(
-                id.to_string(),
-                ProjectMetadata {
-                    workspace,
-                    repositories,
-                },
-            );
+        (workspace.is_some() || !repositories.is_empty()).then_some(Self {
+            workspace,
+            repositories,
+        })
+    }
+}
+
+/// 转录那一路向本库借的东西(转录不记 cwd、模型与 token)。**只读 composer 那一行**:气泡动辄
+/// 几十上百 MB(本机最大一条 15k 条气泡、98 MB),而转录胜出的都是新版 Cursor 的会话,气泡里
+/// 本来就没有逐条模型与 token——逐条那一级只在 `CursorIdeAdapter::parse` 里用,那边气泡已经读进来了
+#[derive(Default)]
+pub(super) struct ComposerFacts {
+    /// Keep workspace and repository paths distinct: a repo may contain the
+    /// actual workspace, or be one of several repos inside it.
+    pub project: Option<ProjectMetadata>,
+    pub model: Option<String>,
+}
+
+/// 批量读,一次连接、一条缓存的语句(转录解析读一个,每轮扫描的侧档刷新读全部)。库打不开
+/// 给 None;库里没有的 id(纯 CLI 会话)不出现在结果里
+pub(super) fn composer_facts<'a>(
+    db: &Path,
+    ids: impl Iterator<Item = &'a str>,
+) -> Option<HashMap<String, ComposerFacts>> {
+    let ro = open_sqlite_ro(db, "cursor-project")?;
+    Some(
+        ids.filter_map(|id| {
+            let data = read_composer(&ro.conn, id)?;
+            let facts = ComposerFacts {
+                project: ProjectMetadata::from_data(&data),
+                model: composer_model(&data),
+            };
+            Some((id.to_string(), facts))
+        })
+        .collect(),
+    )
+}
+
+/// IDE 会话用过的模型与 token——Cursor 在本地记下的那部分
+#[derive(Default)]
+struct Usage {
+    model: Option<String>,
+    tokens: Option<i64>,
+}
+
+/// 模型:对话里最后一条带 `modelInfo.modelName` 的气泡(逐次请求实际用的模型,2025-10 ~
+/// 2026-01 的版本写在用户气泡上)> `composer_model`。token:各气泡 `tokenCount` 的输入加输出
+/// 按调用累加——只有 2025-09 ~ 2026-01 的版本记过,之后的 Cursor 本地不记用量,给 None
+fn usage_from(data: &Value, bubbles: &HashMap<String, Value>) -> Usage {
+    let mut model = None;
+    let mut tokens = 0i64;
+    for (_, bubble) in in_order(data, bubbles) {
+        if let Some(name) =
+            optional_string(bubble.pointer("/modelInfo/modelName")).filter(|m| is_model_name(m))
+        {
+            model = Some(name);
+        }
+        let count = |pointer: &str| bubble.pointer(pointer).and_then(Value::as_i64).unwrap_or(0);
+        tokens += count("/tokenCount/inputTokens") + count("/tokenCount/outputTokens");
+    }
+    Usage {
+        model: model.or_else(|| composer_model(data)),
+        tokens: (tokens > 0).then_some(tokens),
+    }
+}
+
+/// 会话级的模型:`modelConfig.modelName`(当前选中的)> `usageData` 里请求数最多的模型
+/// (`{模型: {costInCents, amount}}`,实际计过费的)
+fn composer_model(data: &Value) -> Option<String> {
+    optional_string(data.pointer("/modelConfig/modelName"))
+        .filter(|m| is_model_name(m))
+        .or_else(|| {
+            data.get("usageData")?
+                .as_object()?
+                .iter()
+                .filter(|(name, _)| is_model_name(name))
+                .max_by_key(|(_, used)| used.get("amount").and_then(Value::as_i64).unwrap_or(0))
+                .map(|(name, _)| name.clone())
+        })
+}
+
+/// "default" 是 Auto 档的占位,不是模型名
+fn is_model_name(name: &str) -> bool {
+    !name.trim().is_empty() && name != "default"
+}
+
+/// 一个 composer 的元数据行(`composerData:<id>`);语句按连接缓存,批量读时只编译一次
+fn read_composer(conn: &rusqlite::Connection, id: &str) -> Option<Value> {
+    let raw: String = conn
+        .prepare_cached("SELECT CAST(value AS TEXT) FROM cursorDiskKV WHERE key = ?1")
+        .ok()?
+        .query_row([format!("{COMPOSER_PREFIX}{id}")], |x| x.get(0))
+        .ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// 一个 composer 的全部气泡正文(`bubbleId:<id>:<气泡>`),按气泡 id 索引。一次范围扫描全取
+/// 回来(逐条点查是 N 次往返);上界用同前缀接 U+FFFF:UUID 只含 [0-9a-f-],不会越界到别的
+/// 会话。Cursor 清理过的气泡会留下 value 为 NULL 的行(本机 2.5 GB 库里 983 行、波及 107 个
+/// 会话),按"已被清理"跳过——当成错误会让整个会话解析失败
+fn read_bubbles(conn: &rusqlite::Connection, id: &str) -> rusqlite::Result<HashMap<String, Value>> {
+    let prefix = format!("{BUBBLE_PREFIX}{id}:");
+    let mut stmt = conn.prepare(
+        "SELECT substr(key, ?2), CAST(value AS TEXT) FROM cursorDiskKV
+         WHERE key >= ?1 AND key < ?3",
+    )?;
+    let upper = format!("{prefix}\u{FFFF}");
+    let cut = prefix.len() as i64 + 1;
+    let mut bubbles = HashMap::new();
+    let mut found = stmt.query(rusqlite::params![&prefix, cut, &upper])?;
+    while let Some(row) = found.next()? {
+        let bubble_id: String = row.get(0)?;
+        let Some(body) = row.get::<_, Option<String>>(1)? else {
+            continue;
+        };
+        if let Ok(v) = serde_json::from_str::<Value>(&body) {
+            bubbles.insert(bubble_id, v);
         }
     }
-    Some(paths)
+    Ok(bubbles)
+}
+
+/// 按 `fullConversationHeadersOnly` 的顺序配出(顺序表项, 气泡正文)。**顺序只认这张表**——
+/// KV 表按 key 字典序,而 bubbleId 是随机 UUID,照 key 序读会把对话打乱。顺序表里有、KV 里
+/// 没有的(气泡行被 Cursor 清理过,老会话常见)跳过
+fn in_order<'a>(
+    data: &'a Value,
+    bubbles: &'a HashMap<String, Value>,
+) -> impl Iterator<Item = (&'a Value, &'a Value)> {
+    data.get("fullConversationHeadersOnly")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|head| Some((head, bubbles.get(head.get("bubbleId")?.as_str()?)?)))
 }
 
 impl CursorIdeAdapter {
@@ -196,7 +300,13 @@ impl CursorIdeAdapter {
         })
     }
 
-    fn build_meta(&self, r: &SessionFileRef, row: &IdeRow, message_count: i64) -> SessionMeta {
+    fn build_meta(
+        &self,
+        r: &SessionFileRef,
+        row: &IdeRow,
+        message_count: i64,
+        usage: Usage,
+    ) -> SessionMeta {
         let title = clean_title_candidate(&row.name);
         SessionMeta {
             key: format!("cursor:{}", row.id),
@@ -224,8 +334,8 @@ impl CursorIdeAdapter {
             message_count,
             size_bytes: r.size,
             git_branch: None,
-            model: None,
-            tokens_used: None,
+            model: usage.model,
+            tokens_used: usage.tokens,
             archived: false,
             source: None,
             favorite: false,
@@ -234,62 +344,16 @@ impl CursorIdeAdapter {
     }
 
     /// 单会话解析:一次连接,先读 composerData 拿气泡顺序,再按
-    /// `bubbleId:<cid>:` 前缀范围扫出正文。**顺序只认
-    /// `fullConversationHeadersOnly`**——KV 表按 key 字典序,而 bubbleId 是
-    /// 随机 UUID,照 key 序读会把对话打乱。
+    /// `bubbleId:<cid>:` 前缀范围扫出正文,按 `in_order` 排好
     fn parse(&self, r: &SessionFileRef) -> Result<(SessionMeta, Vec<TranscriptMessage>)> {
         let ro = open_sqlite_ro(&self.db, "cursor-ide")
             .ok_or_else(|| anyhow!("cannot open cursor IDE store"))?;
-        let raw: String = ro
-            .conn
-            .query_row(
-                "SELECT CAST(value AS TEXT) FROM cursorDiskKV WHERE key = ?1",
-                [format!("{COMPOSER_PREFIX}{}", r.native_id)],
-                |x| x.get(0),
-            )
-            .map_err(|_| anyhow!("cursor composer {} not in store", r.native_id))?;
-        let data: Value = serde_json::from_str(&raw)?;
+        let data = read_composer(&ro.conn, &r.native_id)
+            .ok_or_else(|| anyhow!("cursor composer {} not in store", r.native_id))?;
+        let bubbles = read_bubbles(&ro.conn, &r.native_id)?;
 
-        // 气泡正文单独存 KV,一次范围扫描全取回来(逐条点查是 N 次往返)。
-        // 上界用同前缀接 U+FFFF:UUID 只含 [0-9a-f-],不会越界到别的会话
-        let prefix = format!("{BUBBLE_PREFIX}{}:", r.native_id);
-        let mut bubbles: HashMap<String, Value> = HashMap::new();
-        {
-            let mut stmt = ro.conn.prepare(
-                "SELECT substr(key, ?2), CAST(value AS TEXT) FROM cursorDiskKV
-                 WHERE key >= ?1 AND key < ?3",
-            )?;
-            let upper = format!("{prefix}\u{FFFF}");
-            let cut = prefix.len() as i64 + 1;
-            let mut found = stmt.query(rusqlite::params![&prefix, cut, &upper])?;
-            while let Some(row) = found.next()? {
-                let id: String = row.get(0)?;
-                // Cursor 清理过的气泡会留下 value 为 NULL 的行(本机 2.5 GB 库里
-                // 983 行、波及 107 个会话),按"已被清理"跳过——当成错误会让
-                // 整个会话解析失败
-                let Some(body) = row.get::<_, Option<String>>(1)? else {
-                    continue;
-                };
-                if let Ok(v) = serde_json::from_str::<Value>(&body) {
-                    bubbles.insert(id, v);
-                }
-            }
-        }
-
-        let order = data
-            .get("fullConversationHeadersOnly")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
         let mut messages: Vec<TranscriptMessage> = Vec::new();
-        for head in &order {
-            let Some(bid) = head.get("bubbleId").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            // 顺序表里有、KV 里没有:气泡行已被 Cursor 清理(老会话常见)
-            let Some(bubble) = bubbles.get(bid) else {
-                continue;
-            };
+        for (head, bubble) in in_order(&data, &bubbles) {
             // 角色以顺序表为准、气泡自带的 type 兜底(两处写同一枚举)
             let kind = head
                 .get("type")
@@ -306,12 +370,10 @@ impl CursorIdeAdapter {
             .iter()
             .filter(|m| m.kind == MessageKind::Text)
             .count() as i64;
-        // 枚举快照优先(与列表页同源);库在扫描与打开详情之间变过时就地重建
-        let row = self
-            .rows()
-            .and_then(|rows| rows.into_iter().find(|x| x.id == r.native_id))
-            .unwrap_or_else(|| IdeRow::from_data(&r.native_id, &data, order.len() as i64));
-        let mut meta = self.build_meta(r, &row, count);
+        // 行信息从已经读到的 composer 现算(与 `rows` 的 SQL 同一算法,列表与详情对得上),
+        // 不去翻枚举快照:Cursor 正在写库时快照随库戳失效,每条会话解析都会触发一次整库重列
+        let row = IdeRow::from_data(&r.native_id, &data);
+        let mut meta = self.build_meta(r, &row, count, usage_from(&data, &bubbles));
         // composer 没起名时(新建会话、或 Cursor 还没生成摘要)回退首条用户消息
         if meta.title == UNTITLED {
             if let Some(t) = title_from_messages(&messages) {
@@ -493,25 +555,30 @@ struct IdeRow {
 }
 
 impl IdeRow {
-    /// 枚举快照里没有这条时的兜底(库在扫描与打开详情之间变过)
-    fn from_data(id: &str, data: &Value, bubble_count: i64) -> Self {
-        let created = data.get("createdAt").and_then(|v| v.as_i64()).unwrap_or(0);
-        let updated = data
-            .get("lastUpdatedAt")
-            .and_then(|v| v.as_i64())
+    /// 从 composer 的 JSON 现算,与 `rows` 的 SQL 逐列同一算法:改了一边另一边照改,
+    /// 列表(快照)与详情(现算)才对得上
+    fn from_data(id: &str, data: &Value) -> Self {
+        let int = |key: &str| data.get(key).and_then(Value::as_i64).unwrap_or(0);
+        let heads = data
+            .get("fullConversationHeadersOnly")
+            .and_then(Value::as_array);
+        let last_bubble = heads
+            .and_then(|h| h.last())
+            .and_then(|h| h.get("createdAt"))
+            .and_then(Value::as_str)
+            .map(iso_ms)
             .unwrap_or(0);
-        let cwd = project_path_from_data(data).unwrap_or_default();
         Self {
             id: id.to_string(),
             name: data
                 .get("name")
-                .and_then(|v| v.as_str())
+                .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
-            created_ms: created,
-            updated_ms: pick_updated(updated, 0, created),
-            bubble_count,
-            cwd: cwd.to_string(),
+            created_ms: int("createdAt"),
+            updated_ms: pick_updated(int("lastUpdatedAt"), last_bubble, int("createdAt")),
+            bubble_count: heads.map_or(0, |h| h.len() as i64),
+            cwd: project_path_from_data(data).unwrap_or_default().to_string(),
         }
     }
 }
@@ -552,7 +619,7 @@ impl AgentAdapter for CursorIdeAdapter {
             if let Some(row) = by_id.get(r.native_id.as_str()) {
                 out.insert(
                     r.file_path.clone(),
-                    self.build_meta(r, row, row.bubble_count),
+                    self.build_meta(r, row, row.bubble_count, Usage::default()),
                 );
             }
         }

@@ -205,8 +205,10 @@ CREATE TABLE IF NOT EXISTS claimed_sessions (
 ///       记下 agent 查 Wake 的每次调用,落 wake_lookups 表,老库靠这轮重解析回填),
 /// "7" = 三条分支合到 main 时对齐(2026-09-21/22):Codex spawn_agent 子线程折叠、
 ///       wake_lookups、记忆层一起回填——开发库可能戳着 5 或 6,换代判据是精确不等,
-///       两个都跳过。
-pub const FTS_FORMAT: &str = "7";
+///       两个都跳过;
+/// "8" = Cursor 会话补上模型与 token(IDE 库的 modelInfo / modelConfig / usageData /
+///       tokenCount;转录胜出的会话向同一个 composer 借),老行靠这轮重解析回填。
+pub const FTS_FORMAT: &str = "8";
 
 fn open_conn(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent() {
@@ -803,28 +805,39 @@ impl Store {
     /// Sidecar-only updates must not replace transcript contents or steal a
     /// session from another copy. Changed files go through normal parsing;
     /// children inherit their project through replace_parent_links instead.
-    pub(crate) fn update_project_paths(
+    /// A field the sidecar does not know (`None` / empty) is left as it is.
+    pub(crate) fn update_sidecar_meta(
         &self,
         refs: &[SessionFileRef],
-        paths: &HashMap<String, String>,
+        updates: &HashMap<String, SidecarMeta>,
     ) -> Result<bool> {
-        if paths.is_empty() {
+        if updates.is_empty() {
             return Ok(false);
         }
         let mut conn = self.write.lock().unwrap();
         let tx = conn.transaction()?;
         let mut changed = false;
         for r in refs {
-            let Some(project) = paths.get(&r.file_path).filter(|p| !p.is_empty()) else {
+            let Some(update) = updates.get(&r.file_path) else {
                 continue;
             };
-            let name = crate::adapters::parse_utils::project_name_of(project);
-            changed |= tx.execute(
-                "UPDATE sessions SET project_path = ?1, project_name = ?2
-                 WHERE file_path = ?3 AND file_mtime = ?4 AND file_size = ?5
-                   AND parent_key = '' AND (project_path <> ?1 OR project_name <> ?2)",
-                params![project, name, r.file_path, r.mtime_ms, r.size],
-            )? > 0;
+            if let Some(project) = update.project.as_deref().filter(|p| !p.is_empty()) {
+                let name = crate::adapters::parse_utils::project_name_of(project);
+                changed |= tx.execute(
+                    "UPDATE sessions SET project_path = ?1, project_name = ?2
+                     WHERE file_path = ?3 AND file_mtime = ?4 AND file_size = ?5
+                       AND parent_key = '' AND (project_path <> ?1 OR project_name <> ?2)",
+                    params![project, name, r.file_path, r.mtime_ms, r.size],
+                )? > 0;
+            }
+            if let Some(model) = update.model.as_deref().filter(|m| !m.is_empty()) {
+                changed |= tx.execute(
+                    "UPDATE sessions SET model = ?1
+                     WHERE file_path = ?2 AND file_mtime = ?3 AND file_size = ?4
+                       AND model IS NOT ?1",
+                    params![model, r.file_path, r.mtime_ms, r.size],
+                )? > 0;
+            }
         }
         tx.commit()?;
         Ok(changed)

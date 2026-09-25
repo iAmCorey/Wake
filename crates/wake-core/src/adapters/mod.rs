@@ -67,13 +67,14 @@ pub trait AgentAdapter: Send + Sync {
     ) -> Option<std::collections::HashMap<String, SessionMeta>> {
         None
     }
-    /// Refresh project metadata from sidecars even when the transcript did not
-    /// change. Keys are source file paths; only existing, unchanged winning
+    /// Refresh metadata kept in sidecars (project path, model) even when the
+    /// transcript did not change: a sidecar can be written after the transcript's
+    /// final write. Keys are source file paths; only existing, unchanged winning
     /// copies are updated, without replacing their body or source timestamps.
-    fn project_path_updates(
+    fn sidecar_updates(
         &self,
         _refs: &[SessionFileRef],
-    ) -> std::collections::HashMap<String, String> {
+    ) -> std::collections::HashMap<String, SidecarMeta> {
         Default::default()
     }
     /// quick 与 parsed 的合并策略:默认 parsed 为准、quick 补缺。

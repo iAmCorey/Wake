@@ -408,6 +408,14 @@ impl SessionFileRef {
     }
 }
 
+/// 转录没变时也能从侧档刷新的元数据(`AgentAdapter::sidecar_updates`)。`None` = 这份侧档
+/// 不知道,不是"清空"
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SidecarMeta {
+    pub project: Option<String>,
+    pub model: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ParsedSession {
     pub meta: SessionMeta,

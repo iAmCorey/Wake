@@ -111,11 +111,11 @@ impl AgentAdapter for RemoteAdapter {
         self.inner.merge_quick_meta(parsed, quick)
     }
 
-    fn project_path_updates(
+    fn sidecar_updates(
         &self,
         refs: &[SessionFileRef],
-    ) -> std::collections::HashMap<String, String> {
-        self.inner.project_path_updates(refs)
+    ) -> std::collections::HashMap<String, SidecarMeta> {
+        self.inner.sidecar_updates(refs)
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {

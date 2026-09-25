@@ -35,7 +35,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and a dozen othe
 | Codex CLI | `~/.codex/sessions` + `state_5.sqlite` (read-only) | ✅ | ✅ |
 | Qoder CLI | `~/.qoder/projects/*/*.jsonl` (`QODER_CONFIG_DIR` is respected) | ✅ | — |
 | Copilot CLI | `~/.copilot/session-store.db` | — | — |
-| Cursor | `~/.cursor/projects/**/agent-transcripts` (agent transcripts) + `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` (IDE Chat/Composer history, read-only) | — | — |
+| Cursor | `~/.cursor/projects/**/agent-transcripts` (agent transcripts) + `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` (IDE Chat/Composer history, read-only) | ✅ | — |
 | OpenCode | `~/.local/share/opencode/opencode.db` | ✅ | — |
 | OpenCode 2 (`opencode2`) | `~/.local/share/opencode/{opencode.db,opencode-next.db}` (`session_v2` or `session` + `session_message`); both paths are scanned | ✅ | — |
 | Kiro | `~/.kiro/sessions/cli` | ✅ | — |

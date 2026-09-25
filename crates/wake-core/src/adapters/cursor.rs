@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 
 /// Cursor CLI:`~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl` 明文。
 /// 行结构 {role, message:{content:[{type:text|tool_use}]}} + {type:"turn_ended"}。
-/// user 正文包在 <timestamp>/<user_query> 壳里;transcript 不含 cwd,
-/// 优先从同一会话的 IDE 元数据读取路径,缺失时从 slug 目录名还原。
+/// user 正文包在 <timestamp>/<user_query> 壳里;transcript 不含 cwd,也不记模型——
+/// 两样都优先从同一会话的 IDE 元数据借(`cursor_ide::composer_facts`),路径缺失时从
+/// slug 目录名还原。纯 CLI 会话在 IDE 库里没有记录,模型就空着;token 转录这一路不给。
 ///
 /// **同一家的另一个源**:IDE 面板(Chat/Composer)的会话正文在
 /// `globalStorage/state.vscdb`,由 cursor_ide.rs 读。某些 Cursor 版本的 IDE
@@ -36,12 +37,53 @@ impl CursorAdapter {
         }
     }
 
-    fn project_path(&self, r: &SessionFileRef) -> String {
-        let metadata = self
-            .metadata_db
+    /// 同一个会话在 IDE 库里的 composer(只有默认实例有 IDE 库;自定义根也用于远程缓存,
+    /// 不能混用本机的)。新版 Cursor 给 IDE 会话也写转录、转录胜出,项目与模型得从这份借
+    fn composer_facts(&self, r: &SessionFileRef) -> cursor_ide::ComposerFacts {
+        self.metadata_db
             .as_deref()
-            .and_then(|db| cursor_ide::project_metadata(db, std::iter::once(r.native_id.as_str())));
-        resolve_project_path(r, metadata.as_ref().and_then(|m| m.get(&r.native_id)))
+            .and_then(|db| cursor_ide::composer_facts(db, std::iter::once(r.native_id.as_str())))
+            .and_then(|mut facts| facts.remove(&r.native_id))
+            .unwrap_or_default()
+    }
+
+    fn build_meta(&self, r: &SessionFileRef, p: &CursorParse) -> SessionMeta {
+        let facts = self.composer_facts(r);
+        let cwd = resolve_project_path(r, facts.project.as_ref());
+        let title = title_from_messages(&p.messages).unwrap_or_else(|| UNTITLED.to_string());
+        SessionMeta {
+            key: format!("cursor:{}", r.native_id),
+            host: String::new(),
+            id: r.native_id.clone(),
+            agent: AgentId::Cursor,
+            title,
+            project_path: cwd.clone(),
+            project_name: project_name_of(&cwd),
+            file_path: r.file_path.clone(),
+            created_at: if p.created_at > 0 {
+                p.created_at
+            } else {
+                r.mtime_ms
+            },
+            updated_at: if p.updated_at > 0 {
+                p.updated_at
+            } else {
+                r.mtime_ms
+            },
+            message_count: p
+                .messages
+                .iter()
+                .filter(|m| m.kind == MessageKind::Text)
+                .count() as i64,
+            size_bytes: r.size,
+            git_branch: None,
+            model: facts.model,
+            tokens_used: None,
+            archived: false,
+            source: None,
+            favorite: false,
+            pinned: false,
+        }
     }
 }
 
@@ -354,43 +396,6 @@ fn resolve_project_path(
     decode_slug(&slug)
 }
 
-fn build_meta(r: &SessionFileRef, p: &CursorParse, cwd: String) -> SessionMeta {
-    let title = title_from_messages(&p.messages).unwrap_or_else(|| UNTITLED.to_string());
-    SessionMeta {
-        key: format!("cursor:{}", r.native_id),
-        host: String::new(),
-        id: r.native_id.clone(),
-        agent: AgentId::Cursor,
-        title,
-        project_path: cwd.clone(),
-        project_name: project_name_of(&cwd),
-        file_path: r.file_path.clone(),
-        created_at: if p.created_at > 0 {
-            p.created_at
-        } else {
-            r.mtime_ms
-        },
-        updated_at: if p.updated_at > 0 {
-            p.updated_at
-        } else {
-            r.mtime_ms
-        },
-        message_count: p
-            .messages
-            .iter()
-            .filter(|m| m.kind == MessageKind::Text)
-            .count() as i64,
-        size_bytes: r.size,
-        git_branch: None,
-        model: None,
-        tokens_used: None,
-        archived: false,
-        source: None,
-        favorite: false,
-        pinned: false,
-    }
-}
-
 /// 这个 transcript 只有回合标记、没有任何对话行吗?
 ///
 /// IDE 面板里跑的会话在这里只留 `{"type":"turn_ended"}`,正文全在
@@ -510,7 +515,7 @@ impl AgentAdapter for CursorAdapter {
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
         let parsed = parse_cursor_jsonl(Path::new(&r.file_path), false)?;
-        let meta = build_meta(r, &parsed, self.project_path(r));
+        let meta = self.build_meta(r, &parsed);
         Ok(ParsedSession::derive(
             meta,
             &parsed.messages,
@@ -538,7 +543,7 @@ impl AgentAdapter for CursorAdapter {
             }
         }
         Ok(ParsedTranscript {
-            meta: build_meta(r, &parsed, self.project_path(r)),
+            meta: self.build_meta(r, &parsed),
             mainline: parsed.messages,
             sidechains,
             unknown_line_count: parsed.unknown_lines,
@@ -594,23 +599,29 @@ impl AgentAdapter for CursorAdapter {
         }
     }
 
-    fn project_path_updates(
+    /// IDE 库里的 composer 可能比转录的最后一次写入还晚落盘:项目与模型每轮扫描都按它
+    /// 刷一遍,转录没变也跟上(与解析时借的是同一份,不会来回翻)
+    fn sidecar_updates(
         &self,
         refs: &[SessionFileRef],
-    ) -> std::collections::HashMap<String, String> {
+    ) -> std::collections::HashMap<String, SidecarMeta> {
         if refs.is_empty() {
             return Default::default();
         }
-        let metadata = self.metadata_db.as_deref().and_then(|db| {
-            cursor_ide::project_metadata(db, refs.iter().map(|r| r.native_id.as_str()))
+        let facts = self.metadata_db.as_deref().and_then(|db| {
+            cursor_ide::composer_facts(db, refs.iter().map(|r| r.native_id.as_str()))
         });
-        let Some(metadata) = metadata else {
+        let Some(facts) = facts else {
             return Default::default();
         };
         refs.iter()
             .filter_map(|r| {
-                let project = metadata.get(&r.native_id)?;
-                Some((r.file_path.clone(), resolve_project_path(r, Some(project))))
+                let f = facts.get(&r.native_id)?;
+                let update = SidecarMeta {
+                    project: f.project.as_ref().map(|p| resolve_project_path(r, Some(p))),
+                    model: f.model.clone(),
+                };
+                Some((r.file_path.clone(), update))
             })
             .collect()
     }
@@ -948,7 +959,7 @@ mod tests {
         let (dir, adapter, r) =
             metadata_fixture(r#"{"workspaceIdentifier":{"uri":{"fsPath":"/wakefx/My Project"}}}"#);
         let parsed = adapter.parse_session(&r).unwrap();
-        let updates = adapter.project_path_updates(std::slice::from_ref(&r));
+        let updates = adapter.sidecar_updates(std::slice::from_ref(&r));
         for case in ["unchanged", "newer", "resized", "other-copy", "child"] {
             let index = dir.path().join(format!("{case}.db"));
             let store = Store::open(&index).unwrap();
@@ -974,7 +985,7 @@ mod tests {
                     .unwrap();
             }
             let changed = store
-                .update_project_paths(std::slice::from_ref(&r), &updates)
+                .update_sidecar_meta(std::slice::from_ref(&r), &updates)
                 .unwrap();
             assert_eq!(changed, case == "unchanged", "{case}");
             let after = store.get_session(&saved.key).unwrap().unwrap();
@@ -992,6 +1003,38 @@ mod tests {
     }
 
     #[test]
+    fn sidecar_refresh_fills_the_model_without_clearing_it() {
+        use crate::db::Store;
+
+        // composer 比转录的最后一次写入还晚落盘:解析那一刻借不到模型,之后每轮扫描的
+        // 侧档刷新补上;侧档不知道模型时(Auto 档、读不出来)不清掉库里已有的
+        let (dir, adapter, r) =
+            metadata_fixture(r#"{"modelConfig":{"modelName":"claude-4.5-sonnet"}}"#);
+        let parsed = adapter.parse_session(&r).unwrap();
+        assert_eq!(parsed.meta.model.as_deref(), Some("claude-4.5-sonnet"));
+        let store = Store::open(&dir.path().join("index.db")).unwrap();
+        let mut saved = parsed.meta.clone();
+        saved.model = None;
+        store
+            .write_session(&saved, r.mtime_ms, &parsed.units)
+            .unwrap();
+        let model = || store.get_session(&saved.key).unwrap().unwrap().model;
+
+        let updates = adapter.sidecar_updates(std::slice::from_ref(&r));
+        assert!(store
+            .update_sidecar_meta(std::slice::from_ref(&r), &updates)
+            .unwrap());
+        assert_eq!(model().as_deref(), Some("claude-4.5-sonnet"));
+
+        let unknown =
+            std::collections::HashMap::from([(r.file_path.clone(), SidecarMeta::default())]);
+        assert!(!store
+            .update_sidecar_meta(std::slice::from_ref(&r), &unknown)
+            .unwrap());
+        assert_eq!(model().as_deref(), Some("claude-4.5-sonnet"));
+    }
+
+    #[test]
     fn custom_root_does_not_use_default_project_metadata() {
         let (_dir, adapter, r) =
             metadata_fixture(r#"{"workspaceIdentifier":{"uri":{"fsPath":"/local/My Project"}}}"#);
@@ -1004,9 +1047,7 @@ mod tests {
             custom.parse_transcript(&r).unwrap().meta.project_path,
             "/wakefx/My/Project"
         );
-        assert!(custom
-            .project_path_updates(std::slice::from_ref(&r))
-            .is_empty());
+        assert!(custom.sidecar_updates(std::slice::from_ref(&r)).is_empty());
     }
 
     #[test]

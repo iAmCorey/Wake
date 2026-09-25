@@ -4,6 +4,7 @@
 
 - New: Craft Agents sessions are indexed from its workspaces — titles, models, tool calls and token counts, with archived sessions, sub-tasks and branches, whether the session ran on a Claude connection or on ChatGPT, Copilot or Google. The copy that a Claude connection also leaves in Claude Code's history is hidden while the Craft session exists, so each conversation is listed once. Workspaces kept outside `~/.craft-agent/workspaces` can be added in Settings → Session locations. Read-only, and no Open In (#44, thanks @qiajue)
 - New: Devin sessions are indexed from its local database (`~/.local/share/devin/cli/sessions.db`, read-only) — titles, models, thinking, tool calls and token counts included; the visible transcript follows each session's main chain, so retries edited out of the conversation and hidden helper sessions stay out. Open In resumes a session with `devin --resume` in its project directory (#46, thanks @BUKOWSKIREAL for the report and the implementation in #48)
+- Update: Cursor sessions now show the model they used, and their token usage where Cursor recorded it — sessions from late 2025 to early 2026; newer Cursor versions no longer keep token counts on disk. Existing indexes are re-read once after upgrading
 
 ## [0.8.1] — 2026-09-23
 

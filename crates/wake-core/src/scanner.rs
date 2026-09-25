@@ -444,7 +444,7 @@ fn run_scan_inner(
 
         // Sidecar metadata can arrive after the transcript's final write.
         // Refresh it independently of the mtime/size gate and notify the UI.
-        if store.update_project_paths(&refs, &adapter.project_path_updates(&refs))? {
+        if store.update_sidecar_meta(&refs, &adapter.sidecar_updates(&refs))? {
             events.on_sessions_changed();
         }
 

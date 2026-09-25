@@ -1267,6 +1267,13 @@ fn cursor_ide_parse_contract() {
     assert_eq!(s.meta.updated_at, 1786300600000);
     assert!(s.meta.file_path.ends_with("#cide-0001"));
     assert_eq!(s.unknown_line_count, 0);
+    // 模型:逐条请求记的实发模型(用户气泡的 modelInfo)压过会话级的 modelConfig;
+    // token 是各气泡 tokenCount 的输入加输出按调用累加。详情页与 MCP 读的 parse_transcript
+    // 同一口径
+    for meta in [&s.meta, &t.meta] {
+        assert_eq!(meta.model.as_deref(), Some("claude-4.5-sonnet"));
+        assert_eq!(meta.tokens_used, Some(1200 + 80 + 1500 + 120));
+    }
 
     // 空壳流式气泡(bb)、已被清理的气泡(cc)与 value 为 NULL 的气泡行(dd)
     // 都不产出消息,也不让整段解析失败
@@ -1341,6 +1348,10 @@ fn cursor_ide_parse_contract() {
         .expect("cursor ide fallback parse");
     assert_eq!(s2.meta.title, "空 name 会话的兜底标题应取这句");
     assert_eq!(s2.meta.created_at, 1786310000000);
+    // modelConfig 是 "default"(Auto 档,不是模型名)→ 退到 usageData 里请求最多的模型;
+    // 没有 tokenCount(新版 Cursor 本地不记)→ 空着,不写 0
+    assert_eq!(s2.meta.model.as_deref(), Some("claude-4-sonnet"));
+    assert_eq!(s2.meta.tokens_used, None);
     assert_eq!(s2.meta.updated_at, ms("2026-08-09T11:00:20.000Z"));
 
     // 子代理归属来自 composerHeaders.subagentInfo
@@ -1417,6 +1428,20 @@ fn cursor_parse_contract() {
     assert_eq!(s.meta.updated_at, ms("2026-08-01T09:40:00+08:00"));
     assert_eq!(s.meta.message_count, 3);
     assert_eq!(s.unknown_line_count, 1); // session_started;turn_ended 不计
+
+    // 转录不记模型:向 IDE 库里同一个 composer("CLI twin")的会话级设置借,两条解析路径
+    // 一致。只读 composer 那一行、不读气泡——那份气泡里的 tokenCount 不会被算进来;
+    // 自定义根(也用于远程缓存)不借本机 IDE 库
+    for meta in [&s.meta, &t.meta] {
+        assert_eq!(meta.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(meta.tokens_used, None);
+    }
+    let custom = CursorAdapter::new()
+        .with_custom_root(fixture("cursor"))
+        .parse_session(&r)
+        .expect("cursor custom-root parse");
+    assert_eq!(custom.meta.model, None);
+    assert_eq!(custom.meta.tokens_used, None);
 
     assert_eq!(
         roles_kinds(&t.mainline),
