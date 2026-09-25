@@ -1134,8 +1134,9 @@ fn cursor_two_sources_remove_independently() {
         vec![env.cursor_ide_db.clone()],
         "roster 顺序:CLI 在前、IDE 库在后"
     );
+    let ide_copy = format!("{}#dup", env.cursor_ide_db.display());
     assert!(
-        cli.dedup_rank() < ide.dedup_rank(),
+        cli.dedup_rank(&cursor_ref().file_path) < ide.dedup_rank(&ide_copy),
         "CLI 源必须排在 IDE 库副本之前"
     );
     for a in &cursors {
@@ -2142,8 +2143,8 @@ fn dsh_torn_final_frame_terminates() {
 fn dsh_parse_contract() {
     let env = setup();
     let adapter = DshAdapter::new();
-    // file_ref 是公开 API:只认 session.jsonl[.zstd],native_id 取 header 的
-    // 权威 id(目录名是转义过的 id);子代理会话(origin=subagent)在此过滤
+    // file_ref 是公开 API:只认会话日志(session[.vN].jsonl[.zstd]),native_id 取
+    // header 的权威 id(目录名是转义过的 id);子代理会话(origin=subagent)在此过滤
     let r = adapter.file_ref(&env.dsh_log).expect("dsh file_ref");
     assert_eq!(r.native_id, "dsh-e2e4-0001");
     let sub = env
@@ -2155,7 +2156,7 @@ fn dsh_parse_contract() {
         .join("session.jsonl");
     assert!(adapter.file_ref(&sub).is_none(), "子代理会话不进列表");
 
-    // list 走 <project>/<session>/session.jsonl[.zstd] 两层布局,子代理被滤掉
+    // list 走 <project>/<session>/<日志> 两层布局,子代理被滤掉
     let listed = adapter
         .list_session_files()
         .expect("dsh list_session_files");
@@ -2229,6 +2230,147 @@ fn dsh_parse_contract() {
     assert_eq!(
         s.units.iter().map(|u| u.seq).collect::<Vec<_>>(),
         vec![0, 1]
+    );
+}
+
+#[test]
+fn dsh_reads_the_newest_format_generation() {
+    // dsh 迁移只新增下一代文件、不删旧代(issue #45:0.1.6 起写 session.v3.jsonl.zstd,
+    // master 在写 v4):会话目录里读编号最大的那一代,旧代哪怕 mtime 更新也让位;迁移
+    // 临时文件与锁文件不是日志。独立 tempdir,不扰动共享的假 HOME
+    let root = tempfile::tempdir().expect("tempdir");
+    let project = root.path().join("--Users-tester-Github-wakefx--");
+    let header = |version: u32, id: &str| {
+        format!(
+            r#"{{"type":"session","version":{version},"id":"{id}","createdAt":1788000000000,"cwd":"/Users/tester/Github/wakefx","isSeeded":false,"delegationDepth":0}}"#
+        ) + "\n"
+    };
+
+    // v4 会话,旁边留着迁移前的 v0 旧代(只有 header 就够:它只在新代消失时接替),
+    // 旧代的 mtime 反而更新——按代裁决,不按时间
+    let v4_dir = project.join("dsh-v4-0003");
+    fs::create_dir_all(&v4_dir).expect("mkdir v4 session dir");
+    let v4_log = v4_dir.join("session.v4.jsonl.zstd");
+    let v4_plain = fs::read_to_string(fixture("dsh/session.v4.jsonl")).expect("read v4 fixture");
+    fs::write(&v4_log, common::dsh_zstd(&v4_plain)).expect("write v4 log");
+    let v0_log = v4_dir.join("session.jsonl.zstd");
+    fs::write(&v0_log, common::dsh_zstd(&header(0, "dsh-v4-0003"))).expect("write v0 log");
+    touch_forward(&v0_log, 3600);
+    let migration_tmp = v4_dir.join("session.migration.k3j9.jsonl.zstd.tmp");
+    fs::copy(&v4_log, &migration_tmp).expect("write migration temp");
+    let lock = v4_dir.join("session.lock");
+    fs::write(&lock, "4242").expect("write lock");
+
+    // v3 会话:明文后缀(compression: none);这里只看选代,header 就够
+    let v3_dir = project.join("dsh-v3-0004");
+    fs::create_dir_all(&v3_dir).expect("mkdir v3 session dir");
+    let v3_log = v3_dir.join("session.v3.jsonl");
+    fs::write(&v3_log, header(3, "dsh-v3-0004")).expect("write v3 log");
+
+    let adapter = DshAdapter::new().with_custom_root(root.path().to_path_buf());
+    let mut listed: Vec<(String, PathBuf)> = adapter
+        .list_session_files()
+        .expect("dsh list_session_files")
+        .into_iter()
+        .map(|r| (r.native_id, PathBuf::from(r.file_path)))
+        .collect();
+    listed.sort();
+    assert_eq!(
+        listed,
+        vec![
+            ("dsh-v3-0004".to_string(), v3_log.clone()),
+            ("dsh-v4-0003".to_string(), v4_log.clone()),
+        ]
+    );
+    // watcher 入口同一把尺子:旧代、迁移临时文件、锁文件都不是会话的主文件
+    for other in [&v0_log, &migration_tmp, &lock] {
+        assert!(adapter.file_ref(other).is_none(), "{other:?}");
+    }
+
+    let r = adapter
+        .file_ref(&v4_log)
+        .expect("v4 log is the session's log");
+    assert_seq_contract(adapter.as_ref(), &r);
+    let s = adapter.parse_session(&r).expect("v4 parse_session");
+    let t = adapter.parse_transcript(&r).expect("v4 parse_transcript");
+    assert_eq!(s.meta.key, "dsh:dsh-v4-0003");
+    assert_eq!(s.meta.title, "README 安装命令改 npx");
+    assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx");
+    assert_eq!(s.meta.model.as_deref(), Some("deepseek-v4-pro"));
+    // 按调用累加 input + output + cacheRead:(2000+120+800) + (2300+80) + (2400+60)
+    assert_eq!(s.meta.tokens_used, Some(7760));
+    assert_eq!(s.meta.created_at, 1788000000000);
+    assert_eq!(s.meta.updated_at, 1788000004900);
+    assert_eq!(s.meta.message_count, 2);
+    // 只有 hologram/beam:v2–v4 新增的词汇(assistant/attempt、tool/ptc-dispatch、
+    // subagent/catalog、workspace/changes…)与 ignorable 行都不算
+    assert_eq!(s.unknown_line_count, 1);
+    // 系统提示归 Meta;只有工具增删的 developer/message 没有文字、不出消息;
+    // 三个 step 的助手话合并成一条
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![
+            (Role::System, MessageKind::Meta),
+            (Role::User, MessageKind::Text),
+            (Role::User, MessageKind::Meta),
+            (Role::Assistant, MessageKind::Text),
+        ]
+    );
+    assert_eq!(
+        s.units.iter().map(|u| u.seq).collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+    let a = &t.mainline[3];
+    assert!(a.text.starts_with("我先看一下 README"));
+    assert!(a.text.contains("npx @deepseek-ai/dsh web"));
+    assert!(a
+        .thinking
+        .as_deref()
+        .unwrap_or_default()
+        .contains("找到安装段落"));
+    // v4 的结果直接挂在 tool 角色消息上;surfaceOp replace 的裁剪版不盖原文
+    assert_eq!(
+        a.tool_calls
+            .iter()
+            .map(|tc| (
+                tc.name.as_str(),
+                tc.output.as_deref().unwrap_or_default(),
+                tc.is_error
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "read_file",
+                "## Install\nnpm install -g @deepseek-ai/dsh",
+                false
+            ),
+            (
+                "edit_file",
+                "permission denied: README.md is read-only",
+                true
+            ),
+        ]
+    );
+
+    // 比已知最新一代还新的格式:照样接替、按形状读,但记一笔 unknown——Clean up 靠它
+    // 把可能读不全的会话留着
+    let v5_log = v3_dir.join("session.v5.jsonl");
+    fs::write(&v5_log, header(5, "dsh-v3-0004")).expect("write v5 log");
+    assert!(adapter.file_ref(&v3_log).is_none());
+    let r5 = adapter.file_ref(&v5_log).expect("v5 takes over");
+    assert_eq!(
+        adapter
+            .parse_session(&r5)
+            .expect("v5 parse_session")
+            .unknown_line_count,
+        1
+    );
+
+    // 最新一代没了(手动删了、或同步只拉到一部分),留下的旧代接替
+    fs::remove_file(&v4_log).expect("remove v4 log");
+    assert_eq!(
+        adapter.file_ref(&v0_log).map(|r| r.native_id),
+        Some("dsh-v4-0003".to_string())
     );
 }
 

@@ -301,13 +301,15 @@ pub fn run_memory_sync(adapters: &[Box<dyn AgentAdapter>], store: &Arc<Store>) -
 }
 
 /// 写事务内副本裁决(`Store::write_session_guarded`)用的位次查询:按 file_path
-/// 找拥有它的实例取 `dedup_rank`;无实例认领的路径落到该家首个实例——与枚举
-/// 时的候选排序同一把尺子,全量与增量两条写库路径才给出同一个胜者
+/// 找拥有它的实例、问它这份副本的 `dedup_rank`;无实例认领的路径落到该家首个
+/// 实例——与枚举时的候选排序同一把尺子,全量与增量两条写库路径才给出同一个胜者
 fn rank_of<'a>(
     adapters: &'a [Box<dyn AgentAdapter>],
     agent: crate::models::AgentId,
 ) -> impl Fn(&str) -> u8 + 'a {
-    move |path| crate::adapters::adapter_for(adapters, agent, path).map_or(0, |a| a.dedup_rank())
+    move |path| {
+        crate::adapters::adapter_for(adapters, agent, path).map_or(0, |a| a.dedup_rank(path))
+    }
 }
 
 fn run_scan_inner(
@@ -385,10 +387,10 @@ fn run_scan_inner(
         per_adapter.push(refs);
     }
     // 同家同 ID 去重:同一会话在默认根与自定义根各有一份副本时,两个文件会
-    // 每轮轮流改写同一行(key 相同,file_path 摇摆)。候选按 (实例 dedup_rank
+    // 每轮轮流改写同一行(key 相同,file_path 摇摆)。候选按 (副本 dedup_rank
     // 小者, mtime 新者, 平局路径字典序小者) 排序,首位入队,其余留作**解析
-    // 失败的回退顺位**——rank 让一家的多个数据源固定偏好某一源(Cursor 的
-    // 转录源永远压过 IDE 库副本),mtime 只在同级副本之间裁决
+    // 失败的回退顺位**——rank 让一家固定偏好某一份(Cursor 的转录源永远压过
+    // IDE 库副本,dsh 的新一代日志永远压过旧代),mtime 只在同级副本之间裁决
     // ——胜者副本截断/损坏时,不能让整个会话从索引消失(Codex review P2)。
     // 去重域即 session_key(agent, 实例 host, native_id)——直接以它为键,
     // "去重域与最终 key 的分段一致"就结构性成立:两台机器各自续跑过的
@@ -406,8 +408,8 @@ fn run_scan_inner(
     for v in candidates.values_mut() {
         v.sort_by(|(ia, a), (ib, b)| {
             adapters[*ia]
-                .dedup_rank()
-                .cmp(&adapters[*ib].dedup_rank())
+                .dedup_rank(&a.file_path)
+                .cmp(&adapters[*ib].dedup_rank(&b.file_path))
                 .then_with(|| b.mtime_ms.cmp(&a.mtime_ms))
                 .then_with(|| a.file_path.cmp(&b.file_path))
         });

@@ -9,6 +9,16 @@ use std::path::{Path, PathBuf};
 
 use wake_core::db::{IndexLock, Ownership};
 
+/// dsh 默认落盘的 zstd 多帧日志:首帧 header 行、次帧事件批,帧直接连接(写端每次 append
+/// 一帧,解码器解到 EOF)
+pub fn dsh_zstd(plain: &str) -> Vec<u8> {
+    let (header, body) = plain.split_once('\n').unwrap_or((plain, ""));
+    let mut frames =
+        zstd::encode_all(format!("{header}\n").as_bytes(), 3).expect("zstd header frame");
+    frames.extend(zstd::encode_all(body.as_bytes(), 3).expect("zstd event frame"));
+    frames
+}
+
 pub fn fixture(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -294,12 +304,8 @@ pub fn stage_sidecars(home: &Path) -> Sidecars {
     let dsh_sess = dsh_project.join("dsh-e2e4-0001");
     fs::create_dir_all(&dsh_sess).expect("mkdir dsh session dir");
     let plain = fs::read_to_string(fixture("dsh/session.jsonl")).expect("read dsh fixture");
-    let (header, body) = plain.split_once('\n').expect("dsh fixture header line");
-    let mut frames =
-        zstd::encode_all(format!("{header}\n").as_bytes(), 3).expect("zstd header frame");
-    frames.extend(zstd::encode_all(body.as_bytes(), 3).expect("zstd event frame"));
     let dsh_log = dsh_sess.join("session.jsonl.zstd");
-    fs::write(&dsh_log, frames).expect("write dsh zstd log");
+    fs::write(&dsh_log, dsh_zstd(&plain)).expect("write dsh zstd log");
     let dsh_sub = dsh_project.join("dsh-sub-0002");
     fs::create_dir_all(&dsh_sub).expect("mkdir dsh subagent dir");
     fs::write(

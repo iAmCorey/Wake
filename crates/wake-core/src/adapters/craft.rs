@@ -396,12 +396,6 @@ fn tool_view(row: &Value) -> ToolCallView {
     )
 }
 
-fn meta_msg(text: &str, ts: i64) -> TranscriptMessage {
-    let mut m = text_msg(Role::System, text, ts);
-    m.kind = MessageKind::Meta;
-    m
-}
-
 fn parse_file(path: &Path) -> Result<CraftParse> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("read craft session {}", path.display()))?;

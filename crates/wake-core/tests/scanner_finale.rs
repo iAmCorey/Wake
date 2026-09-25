@@ -598,7 +598,7 @@ impl AgentAdapter for SeedAdapter {
     fn agent(&self) -> AgentId {
         self.agent
     }
-    fn dedup_rank(&self) -> u8 {
+    fn dedup_rank(&self, _path: &str) -> u8 {
         self.rank
     }
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
@@ -1215,6 +1215,70 @@ fn lower_dedup_rank_beats_newer_mtime_and_still_falls_back() {
         store.get_session("cursor:dup").unwrap().unwrap().file_path,
         "/cli/dup.jsonl",
         "增量写入也按 rank 接管,不被库里较新的 IDE 副本挡住"
+    );
+}
+
+/// dsh 迁移后旧代原样留着(issue #45):库里已经记着旧代时(0.8.2 及以前的 Wake 只认
+/// v0 的文件名),新代经 watcher(scan_files)到来必须接替——哪怕它的 mtime 反而更旧
+/// (同步、拷贝来的)。写事务内的副本裁决先比 dedup_rank,dsh 按代给位次
+#[test]
+fn dsh_newer_generation_takes_over_an_indexed_older_one() {
+    use wake_core::adapters::dsh::DshAdapter;
+    const KEY: &str = "dsh:dsh-v4-0003";
+    let root = tempfile::tempdir().unwrap();
+    let session = root
+        .path()
+        .join("--Users-tester-Github-wakefx--")
+        .join("dsh-v4-0003");
+    std::fs::create_dir_all(&session).unwrap();
+    let v0 = session.join("session.jsonl.zstd");
+    std::fs::write(
+        &v0,
+        common::dsh_zstd(concat!(
+            r#"{"type":"session","version":0,"id":"dsh-v4-0003","createdAt":1788000000000,"cwd":"/Users/tester/Github/wakefx","delegationDepth":0}"#,
+            "\n",
+            r#"{"type":"user/message","seq":0,"time":1788000001000,"data":{"id":"m-u","role":"user","content":[{"type":"text","text":"old generation question"}],"source":{"kind":"user"}}}"#,
+            "\n",
+            r#"{"type":"session/title","seq":1,"time":1788000002000,"data":{"title":"Old generation title"}}"#,
+            "\n",
+        )),
+    )
+    .unwrap();
+    let adapters: Vec<Box<dyn AgentAdapter>> =
+        vec![DshAdapter::new().with_custom_root(root.path().to_path_buf())];
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+    let s = store.get_session(KEY).unwrap().expect("旧代入库");
+    assert_eq!(s.file_path, v0.to_string_lossy());
+    assert_eq!(s.title, "Old generation title");
+
+    // dsh 迁移出 v4,mtime 却比 v0 旧一小时
+    let v4 = session.join("session.v4.jsonl.zstd");
+    let plain = std::fs::read_to_string(common::fixture("dsh/session.v4.jsonl")).unwrap();
+    std::fs::write(&v4, common::dsh_zstd(&plain)).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&v4)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+        .unwrap();
+    let incoming = adapters[0].file_ref(&v4).expect("v4 是这个会话的日志");
+    scan_files(&adapters, &store, &Recorder::new(), vec![incoming]);
+    let s = store.get_session(KEY).unwrap().expect("会话仍在库");
+    assert_eq!(
+        s.file_path,
+        v4.to_string_lossy(),
+        "新代经增量写入接替,不被旧代较新的 mtime 挡住"
+    );
+    assert_eq!(s.title, "README 安装命令改 npx");
+
+    // 旧代上的事件不是这个会话的日志;下一轮全量扫描也稳定在新代上
+    assert!(adapters[0].file_ref(&v0).is_none());
+    run_scan(&adapters, &store, &Recorder::new(), false).unwrap();
+    assert_eq!(
+        store.get_session(KEY).unwrap().unwrap().file_path,
+        v4.to_string_lossy()
     );
 }
 

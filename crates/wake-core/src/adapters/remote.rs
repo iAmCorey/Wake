@@ -209,8 +209,8 @@ impl AgentAdapter for RemoteAdapter {
         self.inner.supports_individual_root_removal()
     }
 
-    fn dedup_rank(&self) -> u8 {
-        self.inner.dedup_rank()
+    fn dedup_rank(&self, path: &str) -> u8 {
+        self.inner.dedup_rank(path)
     }
 
     fn parent_links_global(&self) -> bool {

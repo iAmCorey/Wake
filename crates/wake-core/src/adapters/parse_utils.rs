@@ -101,6 +101,14 @@ pub fn text_msg(role: Role, text: &str, ts: i64) -> TranscriptMessage {
     }
 }
 
+/// 给模型看、不是对话的上下文(系统提示、状态说明等):System 角色的 Meta 消息——
+/// 不进 FTS、不算 message_count、不参与标题推导
+pub fn meta_msg(text: &str, ts: i64) -> TranscriptMessage {
+    let mut m = text_msg(Role::System, text, ts);
+    m.kind = MessageKind::Meta;
+    m
+}
+
 /// seq 回填——FTS seq 与详情页序号一致(跨文件不变量 1)的统一执行点,
 /// 必须在消息序列定型后、入库/返回前调用
 pub fn assign_seq(messages: &mut [TranscriptMessage]) {

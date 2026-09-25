@@ -589,7 +589,7 @@ impl AgentAdapter for CursorIdeAdapter {
     }
 
     /// 与 cursor.rs 同 key 的副本:CLI 源先、本源后(见文件头)
-    fn dedup_rank(&self) -> u8 {
+    fn dedup_rank(&self, _path: &str) -> u8 {
         1
     }
 

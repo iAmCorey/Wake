@@ -7,14 +7,18 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-/// DeepSeek Harness(dsh):`~/.dsh/sessions/--<cwd转义>--/<id转义>/session.jsonl[.zstd]`,
-/// 一目录一会话,文件名固定。默认落盘是 zstd **多帧连接**(首帧 header 行,之后每次
-/// append 一帧),标准流式解码到 EOF 即可;`compression: none` 配置则是纯文本 .jsonl,
-/// 两种后缀都认。首行 {type:"session",id,createdAt,cwd,…} 给权威 id/cwd/created,
-/// 不反推目录名;origin=="subagent" 或 delegationDepth>0 是子代理会话,不进列表。
-/// 事件行 {type,seq,time,data}:assistant/message 是流式 chunk 的最终合成体
-/// (assistant/chunk 与其打包行 *-chunks 直接跳过),tool/result 按 toolCallId 回填,
-/// session/title 事件 last-wins 给标题,model 在 assistant 消息的 source 里。
+/// DeepSeek Harness(dsh):`~/.dsh/sessions/--<cwd转义>--/<id转义>/<日志>`,一目录一会话。
+/// 日志文件名带**格式代数**:v0 是 `session.jsonl[.zstd]`,之后每代 `session.vN.jsonl[.zstd]`
+/// (issue #45:0.1.6 起写 v3,master 已在写 v4)。dsh 迁移只新增下一代文件、不删旧代,
+/// 读的永远是编号最大的那一代——`session_log` 单点裁决。默认落盘是 zstd **多帧连接**
+/// (首帧 header 行,之后每次 append 一帧),标准流式解码到 EOF 即可;`compression: none`
+/// 配置则是纯文本 .jsonl,两种后缀都认。首行 {type:"session",version,id,createdAt,cwd,…}
+/// 给权威 id/cwd/created,不反推目录名;origin=="subagent" 或 delegationDepth>0 是子代理
+/// 会话,不进列表。事件行 {type,seq,time,data}:assistant/message 是一次模型调用的合成体
+/// (v0/v1 的 assistant/chunk 与其打包行 *-chunks 直接跳过,v2 起流嵌在消息里),tool/result
+/// 按 toolCallId 回填(v0–v3 包在一个 tool-result 块里,v4 直接挂在 tool 角色消息上),
+/// system/message(v3 起系统提示在对话里)与 developer/message(v4)归 Meta,session/title
+/// 事件 last-wins 给标题,model 在 assistant 消息的 source 里。
 pub struct DshAdapter {
     root: PathBuf,
 }
@@ -77,37 +81,51 @@ fn read_header(path: &Path) -> Option<DshHeader> {
     parse_header(&serde_json::from_str(line.trim_end()).ok()?)
 }
 
-/// dsh 当前版本除内容事件外的完整事件词汇(源码 known-event-types.ts,
-/// 2026-08)+ 三种 chunk 打包存储行。上游新增词汇会计入 unknown 提醒跟进。
-const KNOWN_SKIP: &[&str] = &[
+/// dsh 的事件词汇,照抄上游 `KNOWN_SESSION_EVENT_TYPES`(dsh-session 包的 known-event-types.ts,
+/// 生成文件;当前是 v4)。上面有 match 分支的内容事件也在里面——先到先得、这里不会命中;
+/// 上游换代时整段替换即可,不用挑
+const UPSTREAM_EVENT_TYPES: &[&str] = &[
     "agent-preset/selected",
     "agent/inbox/spliced",
     "approval/asked",
     "approval/decided",
     "approval/policy",
-    "assistant/chunk",
+    "assistant/attempt",
+    "assistant/message",
     "command/done",
     "command/run",
     "compaction/end",
     "compaction/prune",
     "compaction/start",
     "compaction/summary",
+    "deliverables/presented",
+    "developer/message",
+    "feedback/message-delete",
+    "feedback/message-put",
     "feedback/record",
     "goal/change",
     "hook/invoked",
     "hook/result",
+    "image/offload",
     "llm/retry",
     "llm/retry-started",
+    "model/selection",
     "permission/preset",
     "plan/mode",
+    "request/context",
     "request/header",
     "sandbox/mode",
     "schedule/change",
+    "session-log-deepseek/delivery-accepted",
     "session/end-seed",
+    "session/title",
     "session/title-llm-request",
     "step/end",
     "step/start",
+    "subagent/catalog",
     "subagent/descriptor",
+    "subagent/model-selection-policy",
+    "system/message",
     "team/member",
     "team/message/delivered",
     "team/message/queued",
@@ -118,15 +136,80 @@ const KNOWN_SKIP: &[&str] = &[
     "tool-workflow/run-end",
     "tool-workflow/run-start",
     "tool/call",
-    "tool/code-dispatch",
-    "tool/code-dispatch-start",
+    "tool/ptc-dispatch",
+    "tool/ptc-dispatch-start",
+    "tool/result",
     "turn/end",
     "turn/start",
+    "user/message",
     "web/deepseek-search-llm-request",
+    "workspace/changes",
+];
+
+/// 上游清单已经删掉、只在老格式里出现的名字:v0/v1 的 assistant/chunk 与三种 chunk 打包
+/// 存储行,v3 前的 tool/code-dispatch*。没被 dsh 重新打开过的老会话不会迁移,照样得认——
+/// 只增不减
+const LEGACY_EVENT_TYPES: &[&str] = &[
+    "assistant/chunk",
     "text-chunks",
     "reasoning-chunks",
     "tool-call-chunks",
+    "tool/code-dispatch",
+    "tool/code-dispatch-start",
 ];
+
+/// 已知最新的格式代数。更新的一代照样选中、按形状读,但 header 那一行记一笔 unknown:
+/// 字段在已知事件里挪了位置时(v4 的 tool/result 就是),一个事件名都不会漏,只有这一笔
+/// 能让 Clean up 知道这个会话读不全
+const NEWEST_FORMAT: u64 = 4;
+
+/// 会话日志文件名 → (格式代数, 是否 zstd)。v0 是 `session.jsonl[.zstd]`,之后每代
+/// `session.vN.jsonl[.zstd]`(N 从 1 起、不带前导零——`session.v0` / `session.v03` 不是 dsh
+/// 会写的名字,认了就会两个名字指同一代);别的文件(session.lock 等)给 None
+fn log_generation(name: &str) -> Option<(u32, bool)> {
+    let (stem, zstd) = match name.strip_suffix(".zstd") {
+        Some(stem) => (stem, true),
+        None => (name, false),
+    };
+    let version = stem.strip_suffix(".jsonl")?.strip_prefix("session")?;
+    if version.is_empty() {
+        return Some((0, zstd));
+    }
+    let digits = version.strip_prefix(".v")?;
+    if digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((digits.parse().ok()?, zstd))
+}
+
+/// 会话目录 → 会话引用。日志取 dsh 自己会读的那一份:编号最大的一代(迁移只新增、不删
+/// 旧代,旧代的 mtime 可能更新);同一代压缩与明文并存(换过 compression 配置)时 mtime
+/// 新者胜、平局 .zstd 胜。list 与 watcher(经 file_ref)两条入口共用这一处裁决——只做在
+/// list 会让 watcher 把旧代的事件当主文件解析。首行 header 给权威 id(目录名是转义过的
+/// id);子代理会话在此过滤
+fn session_log(dir: &Path) -> Option<SessionFileRef> {
+    let ((_, mtime, _), path, size) = fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let (generation, zstd) = log_generation(&entry.file_name().to_string_lossy())?;
+            let path = entry.path();
+            // fs::metadata 跟随符号链接(DirEntry::metadata 不跟)
+            let meta = fs::metadata(&path)
+                .ok()
+                .filter(|m| m.is_file() && m.len() > 0)?;
+            Some(((generation, mtime_ms(&meta), zstd), path, meta.len()))
+        })
+        .max_by_key(|(rank, ..)| *rank)?;
+    let header = read_header(&path).filter(|h| !h.subagent)?;
+    Some(SessionFileRef {
+        agent: AgentId::Dsh,
+        native_id: header.id,
+        file_path: path.to_string_lossy().to_string(),
+        mtime_ms: mtime,
+        size: size as i64,
+    })
+}
 
 struct DshParse {
     header: Option<DshHeader>,
@@ -187,8 +270,29 @@ fn parse_dsh_log(path: &Path, decode_images: bool) -> Result<DshParse> {
         let data = row.get("data").unwrap_or(&serde_json::Value::Null);
         match ty {
             "session" => {
+                if row
+                    .get("version")
+                    .and_then(|v| v.as_u64())
+                    .is_some_and(|v| v > NEWEST_FORMAT)
+                {
+                    p.unknown_lines += 1;
+                }
                 if let Some(h) = parse_header(&row) {
                     p.header = Some(h);
+                }
+            }
+            // v3 起系统提示是对话里的一条 system/message;v4 的 developer/message 记会话中途
+            // 的变更(工具增删是 tool-addition / tool-removal 块,没有文字)。都是给模型的
+            // 上下文、不是对话,归 Meta。图片不解码、只留占位文字:解码了转录那边就只剩图片
+            // 没有文字,这条被跳过,之后每条消息的 seq 都和索引错开一位
+            "system/message" | "developer/message" => {
+                let parsed = content_parts(
+                    data.pointer("/message/content")
+                        .unwrap_or(&serde_json::Value::Null),
+                    false,
+                );
+                if !parsed.text.is_empty() {
+                    p.messages.push(meta_msg(&parsed.text, ts));
                 }
             }
             "user/message" => {
@@ -331,9 +435,14 @@ fn parse_dsh_log(path: &Path, decode_images: bool) -> Result<DshParse> {
                 }
             }
             "tool/result" => {
-                // data.message.content = [tool-result 块]:toolCallId + 嵌套 content + isError
-                let Some(block) = data.pointer("/message/content/0") else {
-                    continue;
+                // v4:tool 角色消息自己带 toolCallId / content / isError;v0–v3:
+                // data.message.content = [tool-result 块],三样包在块里
+                let msg = data.get("message").unwrap_or(&serde_json::Value::Null);
+                let block = if msg.get("toolCallId").is_some() {
+                    msg
+                } else {
+                    msg.pointer("/content/0")
+                        .unwrap_or(&serde_json::Value::Null)
                 };
                 let Some(call_id) = block.get("toolCallId").and_then(|v| v.as_str()) else {
                     continue;
@@ -374,9 +483,9 @@ fn parse_dsh_log(path: &Path, decode_images: bool) -> Result<DshParse> {
             }
             // 信封自带 ignorable 标记 = 写端声明的纯信息性记录,读者可安全跳过
             _ if row.get("ignorable").and_then(|v| v.as_bool()) == Some(true) => {}
-            // 当前版本的其余已知词汇(含 assistant/chunk 的三种打包存储行)显式
-            // 列举,词汇表外才计 unknown——保住 schema 漂移金丝雀
-            t if KNOWN_SKIP.contains(&t) => {}
+            // 其余已知词汇(上游清单 + 老格式名字)跳过,两张表外才计 unknown——保住 schema
+            // 漂移金丝雀
+            t if UPSTREAM_EVENT_TYPES.contains(&t) || LEGACY_EVENT_TYPES.contains(&t) => {}
             _ => {
                 p.unknown_lines += 1;
             }
@@ -431,9 +540,8 @@ impl AgentAdapter for DshAdapter {
 
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         let mut refs = Vec::new();
-        // 固定两层:<project-dir>/<session-dir>/session.jsonl[.zstd],
-        // 不 walkdir 全递归(会话目录还会放别的 artifacts);根目录读不了
-        // 就本家降级为空,不把整轮扫描炸掉
+        // 固定两层:<project-dir>/<session-dir>/<日志>,不 walkdir 全递归(会话目录还会
+        // 放别的 artifacts);根目录读不了就本家降级为空,不把整轮扫描炸掉
         let Ok(projects) = fs::read_dir(&self.root) else {
             return Ok(refs);
         };
@@ -445,51 +553,29 @@ impl AgentAdapter for DshAdapter {
                 if !session.file_type().is_ok_and(|t| t.is_dir()) {
                     continue;
                 }
-                // 两个候选名都过 file_ref 漏斗;后缀并存时 sibling 裁决保证至多一个通过
-                let dir = session.path();
-                for name in ["session.jsonl.zstd", "session.jsonl"] {
-                    if let Some(r) = self.file_ref(&dir.join(name)) {
-                        refs.push(r);
-                        break;
-                    }
-                }
+                refs.extend(session_log(&session.path()));
             }
         }
         Ok(refs)
     }
 
+    /// 同一会话的几份日志,新一代恒胜(位次小者胜:v0 = 255、v4 = 251),与
+    /// `session_log` 的选代同一把尺子。list 只交出新一代还不够:库里已经记着旧代时
+    /// (0.8.2 及以前的 Wake 只认 v0 的名字,或者同步、拷贝来的新代 mtime 反而更旧),
+    /// 写库的副本裁决先比位次、再比 mtime,不给位次新代就会被挡回去
+    fn dedup_rank(&self, path: &str) -> u8 {
+        let generation = Path::new(path)
+            .file_name()
+            .and_then(|name| log_generation(&name.to_string_lossy()))
+            .map_or(0, |(generation, _)| generation);
+        u8::MAX - generation.min(u32::from(u8::MAX)) as u8
+    }
+
     fn file_ref(&self, path: &Path) -> Option<SessionFileRef> {
-        let name = path.file_name()?.to_string_lossy();
-        if name != "session.jsonl" && name != "session.jsonl.zstd" {
-            return None;
-        }
-        let meta = fs::metadata(path).ok()?;
-        if !meta.is_file() || meta.len() == 0 {
-            return None;
-        }
-        // 压缩配置换挡会新旧后缀并存:陈旧的一份让位(mtime 平局 .zstd 赢,与
-        // 写端当前默认一致)。裁决在此单点,list 与 watcher 两条入口共用——
-        // 只做在 list 会让 watcher 把陈旧 sibling 的事件当主文件解析
-        let sibling = if name == "session.jsonl" {
-            "session.jsonl.zstd"
-        } else {
-            "session.jsonl"
-        };
-        if let Ok(sib) = fs::metadata(path.with_file_name(sibling)) {
-            let (own_m, sib_m) = (mtime_ms(&meta), mtime_ms(&sib));
-            if sib_m > own_m || (sib_m == own_m && name == "session.jsonl") {
-                return None;
-            }
-        }
-        // 首行 header 给权威 id(目录名是转义过的 id);子代理会话在此过滤
-        let header = read_header(path).filter(|h| !h.subagent)?;
-        Some(SessionFileRef {
-            agent: AgentId::Dsh,
-            native_id: header.id,
-            file_path: path.to_string_lossy().to_string(),
-            mtime_ms: mtime_ms(&meta),
-            size: meta.len() as i64,
-        })
+        // 名字先粗筛(session.lock、迁移临时文件等不碰磁盘就不要),再看它是不是这个目录里
+        // 被读的那一代
+        log_generation(&path.file_name()?.to_string_lossy())?;
+        session_log(path.parent()?).filter(|r| Path::new(&r.file_path) == path)
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
@@ -513,7 +599,7 @@ impl AgentAdapter for DshAdapter {
     }
 
     fn session_paths(&self, meta: &SessionMeta) -> Vec<String> {
-        // 一目录一会话:trash 整个会话目录(session.jsonl 与未来的 artifacts 一起)
+        // 一目录一会话:trash 整个会话目录(各代日志、session.lock 与 artifacts 一起)
         match Path::new(&meta.file_path).parent() {
             Some(dir) => vec![dir.to_string_lossy().to_string()],
             None => vec![meta.file_path.clone()],
@@ -535,5 +621,30 @@ impl AgentAdapter for DshAdapter {
 
     fn data_roots(&self) -> Vec<PathBuf> {
         vec![self.root.clone()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_generation;
+
+    #[test]
+    fn log_names_carry_their_format_generation() {
+        assert_eq!(log_generation("session.jsonl"), Some((0, false)));
+        assert_eq!(log_generation("session.jsonl.zstd"), Some((0, true)));
+        assert_eq!(log_generation("session.v3.jsonl.zstd"), Some((3, true)));
+        assert_eq!(log_generation("session.v12.jsonl"), Some((12, false)));
+        // dsh 不会写的名字:v0 不带版本号、没有前导零;锁文件与别的 artifacts 不是日志
+        for name in [
+            "session.v0.jsonl",
+            "session.v03.jsonl.zstd",
+            "session.v.jsonl",
+            "session.v3a.jsonl",
+            "session.v3.jsonl.tmp",
+            "session.lock",
+            "notes.jsonl",
+        ] {
+            assert_eq!(log_generation(name), None, "{name}");
+        }
     }
 }

@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- Fix: DeepSeek Harness sessions from dsh 0.1.6 and later are indexed again, and sessions dsh has upgraded to its newer log format show their latest conversation instead of an outdated copy (#45, thanks @z1HwanG)
+
 ## [0.8.2] — 2026-09-25
 
 - New: Craft Agents sessions are indexed from its workspaces — titles, models, tool calls and token counts, with archived sessions, sub-tasks and branches, whether the session ran on a Claude connection or on ChatGPT, Copilot or Google. The copy that a Claude connection also leaves in Claude Code's history is hidden while the Craft session exists, so each conversation is listed once. Workspaces kept outside `~/.craft-agent/workspaces` can be added in Settings → Session locations. Read-only, and no Open In (#44, thanks @qiajue)
