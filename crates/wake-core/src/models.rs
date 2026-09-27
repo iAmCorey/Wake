@@ -261,6 +261,8 @@ pub struct SessionMeta {
     // app 自有状态(user_data 表)
     pub favorite: bool,
     pub pinned: bool,
+    #[serde(default)]
+    pub custom_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -676,6 +676,7 @@ mod tests {
                 source: None,
                 favorite: false,
                 pinned: false,
+                custom_title: None,
             };
             store.write_session(&meta, updated_at, &[]).unwrap();
         }

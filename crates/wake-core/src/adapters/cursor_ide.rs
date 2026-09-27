@@ -340,6 +340,7 @@ impl CursorIdeAdapter {
             source: None,
             favorite: false,
             pinned: false,
+            custom_title: None,
         }
     }
 

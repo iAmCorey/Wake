@@ -1058,6 +1058,7 @@ fn seed(agent: AgentId, root: &str, path: &str, native_id: &str, mtime: i64) -> 
             source: None,
             favorite: false,
             pinned: false,
+            custom_title: None,
         },
         fail_parse: false,
         quick_key: None,
@@ -1094,6 +1095,7 @@ fn tombstoned_session_does_not_resurrect_on_rescan() {
         source: None,
         favorite: false,
         pinned: false,
+        custom_title: None,
     };
     let r = SessionFileRef {
         agent: AgentId::Codex,

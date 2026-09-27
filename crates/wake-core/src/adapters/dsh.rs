@@ -530,6 +530,7 @@ fn build_meta(r: &SessionFileRef, p: &DshParse) -> SessionMeta {
         source: None,
         favorite: false,
         pinned: false,
+        custom_title: None,
     }
 }
 

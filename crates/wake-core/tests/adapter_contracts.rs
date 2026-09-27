@@ -3481,6 +3481,7 @@ fn mk_meta(agent: AgentId, key: &str, id: &str, title: &str, source: Option<&str
         source: source.map(String::from),
         favorite: false,
         pinned: false,
+        custom_title: None,
     }
 }
 

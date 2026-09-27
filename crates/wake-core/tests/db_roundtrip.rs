@@ -35,6 +35,7 @@ fn meta(key: &str, title: &str) -> SessionMeta {
         source: None,
         favorite: false,
         pinned: false,
+        custom_title: None,
     }
 }
 

@@ -1125,6 +1125,7 @@ mod tests {
             source: None,
             favorite: false,
             pinned: false,
+            custom_title: None,
         }
     }
     fn age(path: &Path) {

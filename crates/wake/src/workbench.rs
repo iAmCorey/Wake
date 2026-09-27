@@ -615,6 +615,27 @@ impl SessionsDelegate {
             .find(|(_, group)| group.range.contains(&flat))
             .map(|(section, group)| IndexPath::new(flat - group.range.start).section(section))
     }
+
+    /// 更新指定会话在内存模型中的标题和自定义标题，并触发视图重建。
+    fn update_row_title(&mut self, key: &str, title: &str, custom_title: Option<String>) -> bool {
+        let mut updated = false;
+        if let Some(session) = self.sessions.iter_mut().find(|s| s.key == key) {
+            session.title = title.to_string();
+            session.custom_title = custom_title.clone();
+            updated = true;
+        }
+        for children in self.children.values_mut() {
+            if let Some(session) = children.iter_mut().find(|s| s.key == key) {
+                session.title = title.to_string();
+                session.custom_title = custom_title.clone();
+                updated = true;
+            }
+        }
+        if updated {
+            self.rebuild_rows();
+        }
+        updated
+    }
 }
 
 impl ListDelegate for SessionsDelegate {
@@ -1032,6 +1053,7 @@ mod session_group_tests {
             source: None,
             favorite: false,
             pinned,
+            custom_title: None,
         }
     }
 
@@ -5235,6 +5257,118 @@ impl Workbench {
         }
     }
 
+    /// 打开重命名会话弹窗
+    fn open_rename_session_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(detail) = &self.detail else {
+            return;
+        };
+        let session_key = detail.meta.key.clone();
+        let current_title = detail.meta.title.clone();
+
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(t("Session name"))
+                .default_value(current_title)
+        });
+
+        let session_key_enter = session_key.clone();
+        cx.subscribe_in(&input, window, move |this, input, event, window, cx| {
+            if matches!(event, gpui_component::input::InputEvent::PressEnter { .. }) {
+                let name = input.read(cx).text().to_string();
+                this.apply_rename_session(&session_key_enter, &name, window, cx);
+                window.close_all_dialogs(cx);
+            }
+        })
+        .detach();
+
+        let entity = cx.entity();
+        open_closable_dialog(window, cx, move |dialog, _window, cx| {
+            let ok_entity = entity.clone();
+            let ok_input = input.clone();
+            let session_key = session_key.clone();
+            let theme = cx.theme();
+            let field_inset = BUTTON_SM_PX;
+
+            dialog
+                .title(
+                    div()
+                        .pl(field_inset)
+                        .text_size(FONT_HEADING)
+                        .font_semibold()
+                        .child(t("Rename Session")),
+                )
+                .w(px(460.))
+                .button_props(
+                    gpui_component::dialog::DialogButtonProps::default()
+                        .ok_text(t("Save"))
+                        .cancel_text(t("Cancel")),
+                )
+                .child(
+                    v_flex()
+                        .px(field_inset)
+                        .gap(SPACE_MD)
+                        .child(
+                            div()
+                                .text_size(FONT_CAPTION)
+                                .text_color(theme.muted_foreground)
+                                .child(t(
+                                    "Enter a new name for this session, or leave blank to restore default.",
+                                )),
+                        )
+                        .child(Input::new(&input).cleanable(true)),
+                )
+                .on_ok(move |_, window, cx| {
+                    let name = ok_input.read(cx).text().to_string();
+                    ok_entity.update(cx, |this, cx| {
+                        this.apply_rename_session(&session_key, &name, window, cx);
+                    });
+                    true
+                })
+        });
+    }
+
+    /// 应用重命名修改，持久化到 SQLite 并更新视图状态
+    fn apply_rename_session(
+        &mut self,
+        session_key: &str,
+        new_name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let trimmed = new_name.trim();
+        let custom_title_opt = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        };
+
+        if let Err(e) = self.store.set_custom_title(session_key, custom_title_opt) {
+            window.push_notification(
+                Notification::error(crate::tf!("Rename failed: {}", e)),
+                cx,
+            );
+            return;
+        }
+
+        // 从 store 重新查询以获得权威的有效标题（若清空自定义标题则恢复默认标题）
+        if let Ok(Some(fresh_meta)) = self.store.get_session(session_key) {
+            if let Some(detail) = &mut self.detail {
+                if detail.meta.key == session_key {
+                    detail.meta.title = fresh_meta.title.clone();
+                    detail.meta.custom_title = fresh_meta.custom_title.clone();
+                }
+            }
+            self.list_state.update(cx, |state, cx| {
+                if state.delegate_mut().update_row_title(session_key, &fresh_meta.title, fresh_meta.custom_title) {
+                    cx.notify();
+                }
+            });
+        }
+
+        self.refresh(cx);
+        self.select_list_key(session_key, false, window, cx);
+    }
+
     /// 导出:系统"另存为"选路径(issue #25,此前直接写进 Downloads),后台解析写文件;
     /// 取消无事发生
     fn do_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -6960,20 +7094,34 @@ impl Workbench {
         let session_key = meta.key.clone();
         let session_title = meta.title.clone();
         let export_entity = cx.entity();
+        let rename_entity = export_entity.clone();
         let reveal_entity = export_entity.clone();
         let delete_entity = export_entity.clone();
         // 远程会话只读:Delete 项整个不出现(阶段 1 不做远程删除——本地能
         // trash 的只有缓存副本,下次 rsync 就复活,语义是骗人的)
         let menu_is_remote = !meta.host.is_empty() || self.cleanup.open;
+
         let more_menu = Button::new("more-actions")
             .ghost()
             .rounded(RADIUS_BUTTON)
             .icon(icon("icons/more-horizontal.svg").with_size(px(16.)))
-            .dropdown_menu(move |menu, _, cx| {
+            .dropdown_menu(move |mut menu, _, cx| {
                 let export_entity = export_entity.clone();
+                let rename_entity = rename_entity.clone();
                 let reveal_entity = reveal_entity.clone();
                 let delete_entity = delete_entity.clone();
-                menu.min_w(px(210.))
+                menu = menu.min_w(px(210.));
+
+
+                menu.item(
+                        PopupMenuItem::new(t(" Rename Session"))
+                            .icon(icon("icons/pencil.svg").with_size(px(15.)))
+                            .on_click(move |_, window, cx| {
+                                rename_entity.update(cx, |this, cx| {
+                                    this.open_rename_session_dialog(window, cx);
+                                });
+                            }),
+                    )
                     .item(
                         PopupMenuItem::new(t(" Export as Markdown"))
                             .icon(icon("icons/download.svg").with_size(px(15.)))
@@ -7300,6 +7448,16 @@ impl Workbench {
                 if meta.pinned { t("Unpin") } else { t("Pin") },
                 meta.pinned,
                 cx.listener(|this, _, window, cx| this.toggle_pinned(window, cx)),
+            )
+            .into_any_element(),
+            tool_btn(
+                "rename",
+                "icons/pencil.svg",
+                "icons/pencil.svg",
+                theme.foreground,
+                t("Rename"),
+                false,
+                cx.listener(|this, _, window, cx| this.open_rename_session_dialog(window, cx)),
             )
             .into_any_element(),
             copy_path.into_any_element(),

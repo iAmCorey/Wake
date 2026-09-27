@@ -91,6 +91,7 @@ icons!(
     "folder",
     "calendar",
     "trash-2",
+    "pencil",
     "search",
     "arrow-up-down",
     "brush-cleaning",

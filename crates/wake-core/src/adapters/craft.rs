@@ -576,6 +576,7 @@ fn build_meta(r: &SessionFileRef, p: &CraftParse) -> SessionMeta {
             .then(|| "automation".to_string()),
         favorite: false,
         pinned: false,
+        custom_title: None,
     }
 }
 

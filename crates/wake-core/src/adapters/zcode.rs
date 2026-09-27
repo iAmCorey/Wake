@@ -296,6 +296,7 @@ fn build_meta(r: &SessionFileRef, row: &ZcRow, parsed: &Parsed) -> SessionMeta {
         source: None,
         favorite: false,
         pinned: false,
+        custom_title: None,
     }
 }
 

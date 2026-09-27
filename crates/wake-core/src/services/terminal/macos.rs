@@ -148,7 +148,9 @@ pub(super) fn launch_shell(term: TerminalApp, command: &str) -> anyhow::Result<(
         TerminalApp::ITerm => launch_iterm(command),
         TerminalApp::Warp => launch_warp(command),
         TerminalApp::Ghostty => launch_ghostty(command),
-        TerminalApp::Kooky | TerminalApp::ClaudeDesktop | TerminalApp::CodexDesktop => {
+        TerminalApp::Kooky
+        | TerminalApp::ClaudeDesktop
+        | TerminalApp::CodexDesktop => {
             anyhow::bail!("{} is a deep-link target", term.display_name())
         }
     }
@@ -559,6 +561,9 @@ fn owned_stem_in(p: &Path, cli_id: &str) -> Option<String> {
     .flatten()
 }
 
+
+
+
 fn launch_desktop_id(id: &str, prefix: &str, term: TerminalApp) -> ResumeOutcome {
     if !is_uuid(id) {
         return ResumeOutcome {
@@ -674,6 +679,7 @@ mod tests {
             source: None,
             favorite: false,
             pinned: false,
+            custom_title: None,
         };
         for term in [TerminalApp::ClaudeDesktop, TerminalApp::CodexDesktop] {
             let outcome = deep_link_resume(&meta, term).expect("desktop targets are deep-link");
@@ -688,6 +694,9 @@ mod tests {
                 .is_some_and(|e| e.contains(term.display_name())));
         }
     }
+
+
+
 
     #[test]
     fn shell_launch_refuses_deep_link_targets() {
