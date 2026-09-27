@@ -40,6 +40,7 @@ brands!(
     "qoder",
     "qoder-light",
     "copilot",
+    "claude",
     "copilot-light",
     "cursor",
     "cursor-light",
