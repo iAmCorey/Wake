@@ -1106,6 +1106,26 @@ impl Store {
                 now_ms()
             ],
         )?;
+        // 全局搜索命中的是 titles_fts,这里不同步的话改完标题只有列表筛选能
+        // 搜到、全局搜索永远滞后。会话行可能已不存在(删会话留下的 user_data
+        // 残留),查不到就没什么可同步的
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT title FROM sessions WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(raw) = raw {
+            let fts_title = effective_title(&conn, key, &raw);
+            conn.execute("DELETE FROM titles_fts WHERE key = ?1", params![key])?;
+            if !fts_title.is_empty() {
+                conn.execute(
+                    "INSERT INTO titles_fts(key, title) VALUES (?1, ?2)",
+                    params![key, fts_title],
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -3223,15 +3243,35 @@ fn write_session_tx(
     Ok(())
 }
 
+/// 列表展示的"生效标题":自定义标题(非空)优先,否则回扫描所得标题——与
+/// 列表查询的 COALESCE(u.custom_title, s.title) 同一规则。titles_fts 的两个
+/// 写点(upsert_session / set_custom_title)都按它写,全局搜索才不会与列表
+/// 各说各话(review 2026-09-27:改完标题全局搜索搜不到,重扫又把自定义标题
+/// 从索引里冲掉)
+fn effective_title(conn: &rusqlite::Connection, key: &str, raw: &str) -> String {
+    conn.query_row(
+        "SELECT custom_title FROM user_data WHERE session_key = ?1",
+        params![key],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+    .map(|t| t.trim().to_string())
+    .filter(|t| !t.is_empty())
+    .unwrap_or_else(|| raw.to_string())
+}
+
 fn upsert_session(tx: &rusqlite::Transaction<'_>, m: &SessionMeta, file_mtime: i64) -> Result<()> {
     // titles_fts 与 sessions.title 同步的**唯一写点**:全量、增量、quick(write_meta_only)
     // 三条路都经这里,标题一改索引即跟上。按 key 删再插(UNINDEXED 列的 DELETE 是
     // 整表扫,几千行也就微秒级),空标题不入索引
     tx.execute("DELETE FROM titles_fts WHERE key = ?1", params![m.key])?;
-    if !m.title.is_empty() {
+    // 索引写生效标题而非原始标题,自定义标题才能被全局搜索命中且在重扫后保留
+    let fts_title = effective_title(tx, &m.key, &m.title);
+    if !fts_title.is_empty() {
         tx.execute(
             "INSERT INTO titles_fts(key, title) VALUES (?1, ?2)",
-            params![m.key, m.title],
+            params![m.key, fts_title],
         )?;
     }
     tx.execute(
@@ -3436,7 +3476,7 @@ pub fn default_db_path() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{AgentId, SessionMeta};
+    use crate::models::{AgentId, SearchFilter, SessionMeta};
 
     fn make_test_meta(key: &str, title: &str) -> SessionMeta {
         SessionMeta {
@@ -3502,6 +3542,20 @@ mod tests {
             .unwrap();
         assert_eq!(found.len(), 1);
 
+        // 全局全文搜索:titles_fts 与自定义标题同步(列表能搜 ≠ 全局能搜)
+        let (hits, _) = db.search_with("Custom", &SearchFilter::default()).unwrap();
+        assert!(hits
+            .iter()
+            .any(|h| h.session.key == "session-1" && h.role == "title"));
+
+        // 重扫(upsert)不得把自定义标题从索引里冲掉
+        let meta2 = make_test_meta("session-1", "Original Title");
+        db.write_session(&meta2, 3000, &[]).unwrap();
+        let (hits, _) = db.search_with("Custom", &SearchFilter::default()).unwrap();
+        assert!(hits
+            .iter()
+            .any(|h| h.session.key == "session-1" && h.role == "title"));
+
         // 清空重命名（传空白字符），恢复默认名称
         db.set_custom_title("session-1", Some("   ")).unwrap();
         let s = db.get_session("session-1").unwrap().unwrap();
@@ -3515,5 +3569,13 @@ mod tests {
         let s = db.get_session("session-1").unwrap().unwrap();
         assert_eq!(s.title, "Original Title");
         assert_eq!(s.custom_title, None);
+
+        // 清除后:自定义词从全局搜索消失,原始标题回来
+        let (hits, _) = db.search_with("Custom", &SearchFilter::default()).unwrap();
+        assert!(hits.iter().all(|h| h.session.key != "session-1"));
+        let (hits, _) = db.search_with("Original", &SearchFilter::default()).unwrap();
+        assert!(hits
+            .iter()
+            .any(|h| h.session.key == "session-1" && h.role == "title"));
     }
 }
