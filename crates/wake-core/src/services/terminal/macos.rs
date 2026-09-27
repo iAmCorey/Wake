@@ -11,6 +11,8 @@ use anyhow::Context;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// AppleScript 双引号字符串转义
 fn applescript_quote(s: &str) -> String {
@@ -624,9 +626,30 @@ fn urlencode(input: &str) -> String {
     encoded
 }
 
-/// 探测 pi-web 运行的端口
+/// pi-web 的内建默认端口(既没有 LaunchAgent 也没有 PI_WEB_PORT 时的兜底)
+const PI_WEB_DEFAULT_PORT: u16 = 30141;
+
+/// 探测 pi-web 运行的端口。结果短缓存 5s:is_installed 挂在行渲染路径上,
+/// 每次重渲染都做 TCP 连接(默认端口路径还有 HTTP 校验)会拖慢列表
 pub fn detect_pi_web_port() -> Option<u16> {
-    // 1. 优先环境变量 PI_WEB_PORT
+    static CACHE: Mutex<Option<(Instant, Option<u16>)>> = Mutex::new(None);
+    const PROBE_TTL: Duration = Duration::from_secs(5);
+    if let Ok(guard) = CACHE.lock() {
+        if let Some((at, hit)) = *guard {
+            if at.elapsed() < PROBE_TTL {
+                return hit;
+            }
+        }
+    }
+    let hit = detect_pi_web_port_uncached();
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = Some((Instant::now(), hit));
+    }
+    hit
+}
+
+fn detect_pi_web_port_uncached() -> Option<u16> {
+    // 1. 优先环境变量 PI_WEB_PORT(显式声明,信任之,只验证在监听)
     if let Ok(val) = std::env::var("PI_WEB_PORT") {
         if let Ok(port) = val.parse::<u16>() {
             if is_port_listening(port) {
@@ -635,7 +658,8 @@ pub fn detect_pi_web_port() -> Option<u16> {
         }
     }
 
-    // 2. 尝试从 ~/Library/LaunchAgents/ 搜索 pi-web 相关的 plist 配置
+    // 2. 尝试从 ~/Library/LaunchAgents/ 搜索 pi-web 相关的 plist 配置(显式
+    //    配置,同上)
     if let Some(home) = dirs::home_dir() {
         let launch_agents = home.join("Library/LaunchAgents");
         if let Ok(entries) = std::fs::read_dir(launch_agents) {
@@ -655,20 +679,33 @@ pub fn detect_pi_web_port() -> Option<u16> {
         }
     }
 
-    // 3. 常见默认端口探测 (30141, 3000, 3001, 8080)
-    for port in [30141, 3000, 3001, 8080] {
-        if is_port_listening(port) {
-            return Some(port);
-        }
+    // 3. 无显式配置才兜底默认端口,且必须通过 HTTP 身份校验:盲探 3000/3001/8080
+    //    这类通用开发端口会把机器上任何监听服务认成 pi-web,点开就把会话链接
+    //    发给错误的服务(review 2026-09-27 P2)。pi-web 首页 <title>Pi Web</title>
+    //    是稳定标识
+    if is_port_listening(PI_WEB_DEFAULT_PORT) && pi_web_serving(PI_WEB_DEFAULT_PORT) {
+        return Some(PI_WEB_DEFAULT_PORT);
     }
 
     None
 }
 
+/// 探测端口背后的服务是不是 pi-web:抓首页找 <title>Pi Web</title>。curl
+/// 子进程与本文件其他外部调用同风格;1s 超时兜底半死的服务
+fn pi_web_serving(port: u16) -> bool {
+    Command::new("curl")
+        .args(["-s", "-m", "1", &format!("http://127.0.0.1:{port}/")])
+        .output()
+        .map(|out| {
+            let body = String::from_utf8_lossy(&out.stdout);
+            body.contains(">Pi Web<") || body.contains("content=\"Pi Web\"")
+        })
+        .unwrap_or(false)
+}
+
 /// 快速探测 TCP 端口是否在监听 (50ms 超时)
 fn is_port_listening(port: u16) -> bool {
     use std::net::{SocketAddr, TcpStream};
-    use std::time::Duration;
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok()
 }
