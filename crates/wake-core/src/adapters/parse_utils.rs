@@ -1126,7 +1126,8 @@ mod tests {
         let object = serde_json::json!({"exit_code": 0, "duration_ms": 12});
         let parsed = tool_result_parts(&object, true);
         assert!(parsed.images.is_empty());
-        let expected: serde_json::Value = serde_json::from_str(r#"{"duration_ms":12,"exit_code":0}"#).unwrap();
+        let expected: serde_json::Value =
+            serde_json::from_str(r#"{"duration_ms":12,"exit_code":0}"#).unwrap();
         let actual: serde_json::Value = serde_json::from_str(&parsed.text).unwrap();
         assert_eq!(actual, expected);
     }

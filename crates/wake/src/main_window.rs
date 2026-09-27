@@ -184,13 +184,57 @@ pub fn flush(cx: &mut App) {
     }
 }
 
-/// 立即提交主窗几何并安全退出进程。
-///
-/// 用于 Linux/Wayland 下关闭主窗口时绕过底层合成器与 calloop 事件循环因缺 wakeup
-/// 导致的假死与未响应问题。
-pub fn exit_process(cx: &mut App) -> ! {
-    flush(cx);
-    std::process::exit(0);
+/// Linux 的主窗关闭即退出;从属窗口以及其他平台仍走普通关窗。
+/// 返回 false 保留主窗,交给事件循环退出后的 GPUI shutdown 统一释放,
+/// 不在正在派发关闭事件的窗口回调里销毁它。
+pub fn should_close(window: &mut Window, cx: &mut App) -> bool {
+    let is_main = cx
+        .try_global::<MainWindow>()
+        .is_some_and(|main| AnyWindowHandle::from(main.0) == window.window_handle());
+    if cfg!(target_os = "linux") && is_main {
+        quit(cx);
+        false
+    } else {
+        true
+    }
+}
+
+/// 客户端标题栏和 CloseWindow 快捷键共用,与原生关闭请求采用相同策略。
+pub fn close(window: &mut Window, cx: &mut App) {
+    if should_close(window, cx) {
+        window.remove_window();
+    }
+}
+
+/// 先请求正常退出,让 on_app_quit、窗口释放和 watcher 的 join 有机会完成。
+/// Linux 有关窗后一直挂起的反馈,独立线程只在退出超过期限时兜底,不把
+/// 尚未定位的 Wayland/驱动/清理阻塞当作每次都要跳过析构的理由。
+pub fn quit(cx: &mut App) {
+    if cfg!(target_os = "linux") {
+        flush(cx);
+        arm_exit_timeout();
+    }
+    cx.quit();
+}
+
+const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
+
+fn arm_exit_timeout() {
+    static ARMED: std::sync::Once = std::sync::Once::new();
+    ARMED.call_once(|| {
+        // 正常退出时 main 返回会结束整个进程,无需等待这个兜底线程。
+        // 不能用 GPUI task:若主线程卡在析构或事件循环里,它也无法被调度。
+        if let Err(error) = std::thread::Builder::new()
+            .name("wake-exit-timeout".into())
+            .spawn(|| {
+                std::thread::sleep(EXIT_TIMEOUT);
+                eprintln!("wake: shutdown exceeded {EXIT_TIMEOUT:?}; forcing exit");
+                std::process::exit(0);
+            })
+        {
+            eprintln!("wake: could not start exit timeout: {error}");
+        }
+    });
 }
 
 fn load() -> Option<SavedWindow> {
@@ -271,3 +315,7 @@ pub fn centered_over_main(size: Size<Pixels>, cx: &mut App) -> (Bounds<Pixels>, 
         None => (Bounds::centered(None, size, cx), None),
     }
 }
+
+#[cfg(test)]
+#[path = "main_window_tests.rs"]
+mod tests;

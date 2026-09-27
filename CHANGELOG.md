@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix: Closing the main window on Linux requests application shutdown, with a timeout fallback if shutdown stalls. Settings windows close independently, and pending window geometry is saved before quitting (#54, thanks @bet4it).
+
 ## [0.8.4] — 2026-09-25
 
 - Fix: Remote sync skips Unix sockets and FIFOs in agent directories, preventing long cache paths from causing `mkstempsock: Invalid argument` and a persistent Sync failed status on macOS (#47).
