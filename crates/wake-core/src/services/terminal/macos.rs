@@ -7,6 +7,7 @@ use super::{
     spawn_and_reap, ResumeOutcome,
 };
 use crate::models::{AgentId, SessionMeta};
+use anyhow::Context;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
@@ -346,20 +347,53 @@ fn launch_ghostty(command: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn extract_cwd_from_command(command: &str) -> Option<String> {
+    if let Some(rest) = command.strip_prefix("cd ") {
+        if let Some(idx) = rest.find(" && ") {
+            let dir_part = &rest[..idx];
+            let dir = dir_part.trim_matches('\'').trim_matches('"');
+            if !dir.is_empty() {
+                return Some(dir.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Warp Tab Config + `warp://tab_config/<name>` deep link:TOML 落在
+/// ~/.warp/tab_configs/<name>.toml,URI 默认在**当前活动窗口**新开 tab 并
+/// 自动执行 commands(无窗口时才落到新窗口;`?new_window=true` 强制新窗口)。
+/// 实测 2026-09-27(v0.2026.08.19):命令执行、不开新窗口,无需辅助功能
+/// 权限,不碰剪贴板。注:该文件会出现在 Warp 的 + 菜单里,固定名可接受。
 fn launch_warp(command: &str) -> anyhow::Result<()> {
     if command.contains('\n') {
         anyhow::bail!("multi-line command");
     }
-    let yaml = format!(
-        "name: Wake Resume\nwindows:\n  - tabs:\n      - layout:\n          commands:\n            - exec: |-\n                {command}\n"
-    );
-    let path = std::env::temp_dir().join("wake-warp-resume.yaml");
-    std::fs::write(&path, yaml)?;
+
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .context("$HOME not set")?;
+    let tab_dir = home.join(".warp/tab_configs");
+    std::fs::create_dir_all(&tab_dir)
+        .with_context(|| format!("mkdir {} failed", tab_dir.display()))?;
+
+    // TOML 基本字符串只需转义 \ 和 ";命令保证单行,无控制字符问题
+    let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut toml = String::from("name = \"Wake Resume\"\n[[panes]]\nid = \"wake\"\ntype = \"terminal\"\n");
+    if let Some(dir) = extract_cwd_from_command(command) {
+        toml.push_str(&format!("directory = \"{}\"\n", escape(&dir)));
+    }
+    toml.push_str(&format!(
+        "commands = [\"{}\"]\nis_focused = true\n",
+        escape(command)
+    ));
+    std::fs::write(tab_dir.join("wake-resume.toml"), toml)?;
+
     let status = Command::new("open")
-        .arg(format!("warp://launch/{}", path.display()))
+        .arg("warp://tab_config/wake-resume")
         .status()?;
     if !status.success() {
-        anyhow::bail!("open warp:// failed");
+        anyhow::bail!("open warp://tab_config/wake-resume failed");
     }
     Ok(())
 }
@@ -822,6 +856,19 @@ mod tests {
                 .as_deref()
                 .is_some_and(|e| e.contains(term.display_name())));
         }
+    }
+
+    #[test]
+    fn test_extract_cwd_from_command() {
+        assert_eq!(
+            extract_cwd_from_command("cd '/Users/rick2/code' && claude --resume 'test'"),
+            Some("/Users/rick2/code".to_string())
+        );
+        assert_eq!(
+            extract_cwd_from_command("cd \"/path/to/project\" && codex resume abc"),
+            Some("/path/to/project".to_string())
+        );
+        assert_eq!(extract_cwd_from_command("claude --resume 'test'"), None);
     }
 
     #[test]
