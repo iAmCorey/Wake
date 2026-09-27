@@ -77,6 +77,7 @@ impl TerminalApp {
     /// 直接用内嵌 brands 资源,不走 ensure_app_icons 的提取缓存
     pub fn brand_icon(&self) -> Option<&'static str> {
         match self {
+            TerminalApp::ClaudeDesktop => Some("brands/claude.png"),
             TerminalApp::CodexDesktop => Some("brands/codex.png"),
             _ => None,
         }
@@ -92,8 +93,11 @@ impl TerminalApp {
             TerminalApp::Ghostty => &["/Applications/Ghostty.app"],
             TerminalApp::Kooky => &["/Applications/Kooky.app"],
             TerminalApp::ClaudeDesktop => &["/Applications/Claude.app"],
-            // Codex desktop 的 app 名与旧版 ChatGPT 同名,靠 bundle id 区分
-            TerminalApp::CodexDesktop => &["/Applications/ChatGPT.app"],
+            // Codex desktop 的 app 名可能是 Codex.app 或 ChatGPT.app
+            TerminalApp::CodexDesktop => &[
+                "/Applications/Codex.app",
+                "/Applications/ChatGPT.app",
+            ],
         };
         let home = dirs::home_dir().unwrap_or_default().join("Applications");
         for c in candidates {
@@ -124,7 +128,7 @@ impl TerminalApp {
             .unwrap_or(false)
     }
 
-    fn is_installed(&self) -> bool {
+    pub fn is_installed(&self) -> bool {
         self.resolved_app_path().is_some()
     }
 }
@@ -561,9 +565,6 @@ fn owned_stem_in(p: &Path, cli_id: &str) -> Option<String> {
     .flatten()
 }
 
-
-
-
 fn launch_desktop_id(id: &str, prefix: &str, term: TerminalApp) -> ResumeOutcome {
     if !is_uuid(id) {
         return ResumeOutcome {
@@ -694,9 +695,6 @@ mod tests {
                 .is_some_and(|e| e.contains(term.display_name())));
         }
     }
-
-
-
 
     #[test]
     fn shell_launch_refuses_deep_link_targets() {

@@ -7101,6 +7101,23 @@ impl Workbench {
         // trash 的只有缓存副本,下次 rsync 就复活,语义是骗人的)
         let menu_is_remote = !meta.host.is_empty() || self.cleanup.open;
 
+        #[cfg(target_os = "macos")]
+        let desktop_target = match meta.agent {
+            AgentId::ClaudeCode => Some((
+                terminal::TerminalApp::ClaudeDesktop,
+                t("Open in Claude Desktop"),
+                "brands/claude.png",
+            )),
+            AgentId::Codex => Some((
+                terminal::TerminalApp::CodexDesktop,
+                t("Open in Codex Desktop"),
+                "brands/codex.png",
+            )),
+            _ => None,
+        }
+        .filter(|(app, _, _)| app.is_installed());
+        #[cfg(not(target_os = "macos"))]
+        let desktop_target: Option<(terminal::TerminalApp, &'static str, &'static str)> = None;
         let more_menu = Button::new("more-actions")
             .ghost()
             .rounded(RADIUS_BUTTON)
@@ -7112,6 +7129,28 @@ impl Workbench {
                 let delete_entity = delete_entity.clone();
                 menu = menu.min_w(px(210.));
 
+                if let Some((target_app, label, brand_icon)) = desktop_target {
+                    let desktop_entity = export_entity.clone();
+                    menu = menu.item(
+                        PopupMenuItem::element(move |_, _| {
+                            h_flex()
+                                .gap(SPACE_SM)
+                                .items_center()
+                                .child(img(brand_icon).size(px(15.)))
+                                .child(label)
+                        })
+                        .on_click(move |_, window, cx| {
+                            desktop_entity.update(cx, |this, cx| {
+                                this.do_resume(
+                                    terminal::ResumeTarget::App(target_app),
+                                    true,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }),
+                    );
+                }
 
                 menu.item(
                         PopupMenuItem::new(t(" Rename Session"))
