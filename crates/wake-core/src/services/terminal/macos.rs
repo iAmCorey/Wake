@@ -44,6 +44,7 @@ pub enum TerminalApp {
     /// codex://threads/<uuid> 打开本地会话(路由 kind "localConversation",
     /// desktop 的 threads 表与 CLI 共库、行内 rollout_path 即 CLI 文件)。
     CodexDesktop,
+    PiWeb,
 }
 
 impl TerminalApp {
@@ -56,6 +57,7 @@ impl TerminalApp {
             TerminalApp::Kooky => "Kooky",
             TerminalApp::ClaudeDesktop => "Claude Desktop",
             TerminalApp::CodexDesktop => "Codex Desktop",
+            TerminalApp::PiWeb => "pi-web",
         }
     }
 
@@ -69,6 +71,7 @@ impl TerminalApp {
             TerminalApp::Kooky => "kooky",
             TerminalApp::ClaudeDesktop => "claude-desktop",
             TerminalApp::CodexDesktop => "codex-desktop",
+            TerminalApp::PiWeb => "pi-web",
         }
     }
 
@@ -79,6 +82,7 @@ impl TerminalApp {
         match self {
             TerminalApp::ClaudeDesktop => Some("brands/claude.png"),
             TerminalApp::CodexDesktop => Some("brands/codex.png"),
+            TerminalApp::PiWeb => Some("brands/pi.png"),
             _ => None,
         }
     }
@@ -98,6 +102,7 @@ impl TerminalApp {
                 "/Applications/Codex.app",
                 "/Applications/ChatGPT.app",
             ],
+            TerminalApp::PiWeb => return None,
         };
         let home = dirs::home_dir().unwrap_or_default().join("Applications");
         for c in candidates {
@@ -129,6 +134,9 @@ impl TerminalApp {
     }
 
     pub fn is_installed(&self) -> bool {
+        if matches!(self, TerminalApp::PiWeb) {
+            return detect_pi_web_port().is_some();
+        }
         self.resolved_app_path().is_some()
     }
 }
@@ -140,6 +148,7 @@ pub(super) fn deep_link_resume(meta: &SessionMeta, term: TerminalApp) -> Option<
         TerminalApp::Kooky => Some(launch_kooky(meta)),
         TerminalApp::ClaudeDesktop => Some(launch_claude_desktop(meta)),
         TerminalApp::CodexDesktop => Some(launch_desktop_id(&meta.id, "codex://threads/", term)),
+        TerminalApp::PiWeb => Some(launch_pi_web(meta)),
         _ => None,
     }
 }
@@ -154,7 +163,8 @@ pub(super) fn launch_shell(term: TerminalApp, command: &str) -> anyhow::Result<(
         TerminalApp::Ghostty => launch_ghostty(command),
         TerminalApp::Kooky
         | TerminalApp::ClaudeDesktop
-        | TerminalApp::CodexDesktop => {
+        | TerminalApp::CodexDesktop
+        | TerminalApp::PiWeb => {
             anyhow::bail!("{} is a deep-link target", term.display_name())
         }
     }
@@ -262,6 +272,7 @@ pub fn terminals_for(agent: AgentId) -> Vec<TerminalApp> {
             TerminalApp::Kooky => kooky_speaks(agent),
             TerminalApp::ClaudeDesktop => agent == AgentId::ClaudeCode,
             TerminalApp::CodexDesktop => agent == AgentId::Codex,
+            TerminalApp::PiWeb => agent == AgentId::Pi,
             _ => true,
         })
         .collect()
@@ -279,6 +290,7 @@ pub fn installed_terminals() -> &'static [TerminalApp] {
             TerminalApp::Kooky,
             TerminalApp::ClaudeDesktop,
             TerminalApp::CodexDesktop,
+            TerminalApp::PiWeb,
             TerminalApp::ITerm,
             TerminalApp::Warp,
             TerminalApp::Ghostty,
@@ -334,8 +346,6 @@ fn launch_ghostty(command: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Warp 无命令注入 CLI,走官方 Launch Configuration:写临时 yaml 再
-/// open warp://launch/<path>。exec 用 yaml 块标量,免转义。
 fn launch_warp(command: &str) -> anyhow::Result<()> {
     if command.contains('\n') {
         anyhow::bail!("multi-line command");
@@ -565,6 +575,124 @@ fn owned_stem_in(p: &Path, cli_id: &str) -> Option<String> {
     .flatten()
 }
 
+fn urlencode(input: &str) -> String {
+    let mut encoded = String::with_capacity(input.len() * 3);
+    for b in input.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(b as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    encoded
+}
+
+/// 探测 pi-web 运行的端口
+pub fn detect_pi_web_port() -> Option<u16> {
+    // 1. 优先环境变量 PI_WEB_PORT
+    if let Ok(val) = std::env::var("PI_WEB_PORT") {
+        if let Ok(port) = val.parse::<u16>() {
+            if is_port_listening(port) {
+                return Some(port);
+            }
+        }
+    }
+
+    // 2. 尝试从 ~/Library/LaunchAgents/ 搜索 pi-web 相关的 plist 配置
+    if let Some(home) = dirs::home_dir() {
+        let launch_agents = home.join("Library/LaunchAgents");
+        if let Ok(entries) = std::fs::read_dir(launch_agents) {
+            for entry in entries.flatten() {
+                let fname = entry.file_name();
+                let fname_str = fname.to_string_lossy();
+                if fname_str.contains("pi-web") && fname_str.ends_with(".plist") {
+                    if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                        if let Some(port) = parse_port_from_plist_args(&content) {
+                            if is_port_listening(port) {
+                                return Some(port);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. 常见默认端口探测 (30141, 3000, 3001, 8080)
+    for port in [30141, 3000, 3001, 8080] {
+        if is_port_listening(port) {
+            return Some(port);
+        }
+    }
+
+    None
+}
+
+/// 快速探测 TCP 端口是否在监听 (50ms 超时)
+fn is_port_listening(port: u16) -> bool {
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok()
+}
+
+/// 从 launchd plist 的 ProgramArguments 提取 `-p <port>` 或 `--port <port>`
+fn parse_port_from_plist_args(content: &str) -> Option<u16> {
+    let mut iter = content.lines();
+    while let Some(line) = iter.next() {
+        let trimmed = line.trim();
+        if trimmed == "<string>-p</string>" || trimmed == "<string>--port</string>" {
+            if let Some(next_line) = iter.next() {
+                let next_trimmed = next_line.trim();
+                if let Some(val) = next_trimmed
+                    .strip_prefix("<string>")
+                    .and_then(|s| s.strip_suffix("</string>"))
+                {
+                    if let Ok(port) = val.parse::<u16>() {
+                        return Some(port);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn launch_pi_web(meta: &SessionMeta) -> ResumeOutcome {
+    let port = match detect_pi_web_port() {
+        Some(p) => p,
+        None => {
+            return ResumeOutcome {
+                ok: false,
+                command: String::new(),
+                error: Some("pi-web is not running or listening".to_string()),
+            };
+        }
+    };
+
+    let url = if !meta.id.is_empty() {
+        format!("http://127.0.0.1:{port}/?session={}", urlencode(&meta.id))
+    } else if !meta.project_path.is_empty() {
+        format!("http://127.0.0.1:{port}/?cwd={}", urlencode(&meta.project_path))
+    } else {
+        format!("http://127.0.0.1:{port}/")
+    };
+    let ok = Command::new("open")
+        .arg(&url)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    ResumeOutcome {
+        ok,
+        command: url,
+        error: (!ok).then(|| "Couldn't open pi-web in browser".to_string()),
+    }
+}
+
 fn launch_desktop_id(id: &str, prefix: &str, term: TerminalApp) -> ResumeOutcome {
     if !is_uuid(id) {
         return ResumeOutcome {
@@ -697,11 +825,52 @@ mod tests {
     }
 
     #[test]
+    fn parse_port_from_plist() {
+        let sample = r#"
+        <key>ProgramArguments</key>
+        <array>
+            <string>/path/to/node</string>
+            <string>/path/to/pi-web</string>
+            <string>-H</string>
+            <string>0.0.0.0</string>
+            <string>-p</string>
+            <string>30141</string>
+            <string>--no-open</string>
+        </array>
+        "#;
+        assert_eq!(parse_port_from_plist_args(sample), Some(30141));
+
+        let sample_long = r#"
+        <key>ProgramArguments</key>
+        <array>
+            <string>--port</string>
+            <string>8080</string>
+        </array>
+        "#;
+        assert_eq!(parse_port_from_plist_args(sample_long), Some(8080));
+        assert_eq!(parse_port_from_plist_args("<string>foo</string>"), None);
+    }
+
+    #[test]
+    fn test_pi_web_terminals_for_pi() {
+        use crate::models::AgentId;
+        assert_eq!(TerminalApp::PiWeb.display_name(), "pi-web");
+        assert_eq!(TerminalApp::PiWeb.id(), "pi-web");
+        assert_eq!(TerminalApp::PiWeb.brand_icon(), Some("brands/pi.png"));
+        if detect_pi_web_port().is_some() {
+            assert!(TerminalApp::PiWeb.is_installed());
+            let terms = terminals_for(AgentId::Pi);
+            assert!(terms.contains(&TerminalApp::PiWeb));
+        }
+    }
+
+    #[test]
     fn shell_launch_refuses_deep_link_targets() {
         for term in [
             TerminalApp::Kooky,
             TerminalApp::ClaudeDesktop,
             TerminalApp::CodexDesktop,
+            TerminalApp::PiWeb,
         ] {
             assert!(launch_shell(term, "echo hi").is_err());
         }

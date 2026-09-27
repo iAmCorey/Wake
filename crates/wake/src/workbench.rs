@@ -7103,6 +7103,11 @@ impl Workbench {
 
         #[cfg(target_os = "macos")]
         let desktop_target = match meta.agent {
+            AgentId::Pi => Some((
+                terminal::TerminalApp::PiWeb,
+                t("Open in pi-web"),
+                "brands/pi.png",
+            )),
             AgentId::ClaudeCode => Some((
                 terminal::TerminalApp::ClaudeDesktop,
                 t("Open in Claude Desktop"),

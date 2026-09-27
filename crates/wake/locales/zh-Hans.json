@@ -199,6 +199,7 @@
   "Only the local file is removed — Codex's own records stay intact.": "只会删除本地文件 —— Codex 自己的记录不受影响。",
   "Open in Claude Desktop": "在 Claude 桌面端打开",
   "Open in Codex Desktop": "在 Codex 桌面端打开",
+  "Open in pi-web": "在 pi-web 中打开",
   "Open system trash": "打开系统废纸篓",
   "Open this session": "打开此会话",
   "Open this session in {}": "在 {} 中打开此会话",
