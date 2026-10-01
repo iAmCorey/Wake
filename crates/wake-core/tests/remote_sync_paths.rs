@@ -36,18 +36,6 @@ fn remote_sync_handles_native_cache_paths() {
         paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
         compiler.env("PATH", std::env::join_paths(paths).unwrap());
 
-        // Keep the receiver, sender and fake SSH on cwRsync's bundled runtime,
-        // without invoking Chocolatey's native rsync shim from Cygwin.
-        let cwrsync = PathBuf::from(
-            std::env::var_os("WAKE_TEST_CWRSYNC_BIN").expect("cwRsync bin directory"),
-        );
-        fs::copy(cwrsync.join("rsync.exe"), bin.join("rsync.exe")).unwrap();
-        for entry in fs::read_dir(cwrsync).unwrap() {
-            let entry = entry.unwrap();
-            if entry.path().extension().is_some_and(|ext| ext == "dll") {
-                fs::copy(entry.path(), bin.join(entry.file_name())).unwrap();
-            }
-        }
         compiler
     };
     #[cfg(not(windows))]
@@ -78,6 +66,23 @@ fn remote_sync_handles_native_cache_paths() {
         "compile fake SSH: {}",
         String::from_utf8_lossy(&compiled.stderr)
     );
+    #[cfg(windows)]
+    {
+        // Keep the receiver, sender and fake SSH on cwRsync's bundled runtime,
+        // without invoking Chocolatey's native rsync shim from Cygwin. Stage it
+        // after compilation so GCC's subprocesses cannot load this older DLL
+        // from their working directory instead of their own toolchain runtime.
+        let cwrsync = PathBuf::from(
+            std::env::var_os("WAKE_TEST_CWRSYNC_BIN").expect("cwRsync bin directory"),
+        );
+        fs::copy(cwrsync.join("rsync.exe"), bin.join("rsync.exe")).unwrap();
+        for entry in fs::read_dir(cwrsync).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().extension().is_some_and(|ext| ext == "dll") {
+                fs::copy(entry.path(), bin.join(entry.file_name())).unwrap();
+            }
+        }
+    }
     let mut paths = vec![bin];
     paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
     std::env::set_var("PATH", std::env::join_paths(paths).unwrap());

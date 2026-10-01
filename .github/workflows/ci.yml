@@ -65,14 +65,14 @@ jobs:
           "WAKE_TEST_CYGWIN_ROOT=$env:CYGWIN_ROOT" >> $env:GITHUB_ENV
           "WAKE_TEST_CWRSYNC_BIN=$env:ChocolateyInstall\lib\rsync\tools\bin" >> $env:GITHUB_ENV
 
-      # 数据层测试:adapter 解析契约 / seq 一致性 / db 往返 / 扫描终态
-      - name: Test wake-core
-        run: cargo test -p wake-core
-
       # 真 rsync + 同运行时的假 SSH,不连外网;覆盖 Windows 盘符和并行缓存目录。
       - name: Test remote sync paths
         timeout-minutes: 5
         run: cargo test -p wake-core --test remote_sync_paths -- --ignored
+
+      # 数据层测试:adapter 解析契约 / seq 一致性 / db 往返 / 扫描终态
+      - name: Test wake-core
+        run: cargo test -p wake-core
 
       # Exercise the real OS trash only with uniquely named synthetic fixtures.
       # Normal local test runs do not touch the system trash.
