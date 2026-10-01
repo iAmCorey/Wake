@@ -43,11 +43,20 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libasound2-dev libfontconfig1-dev libwayland-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libssl-dev libzstd-dev \
-            pkg-config cmake clang
+            pkg-config cmake clang rsync
+
+      - name: Install cwRsync
+        if: runner.os == 'Windows'
+        run: choco install rsync --version=6.4.8 --yes --no-progress
 
       # 数据层测试:adapter 解析契约 / seq 一致性 / db 往返 / 扫描终态
       - name: Test wake-core
         run: cargo test -p wake-core
+
+      # 真 rsync + 原生假 SSH,不连外网;覆盖 Windows 盘符和并行缓存目录。
+      - name: Test remote sync paths
+        timeout-minutes: 5
+        run: cargo test -p wake-core --test remote_sync_paths -- --ignored
 
       # Exercise the real OS trash only with uniquely named synthetic fixtures.
       # Normal local test runs do not touch the system trash.

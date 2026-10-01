@@ -352,7 +352,7 @@ fn present_remote_paths(stdout: &str) -> Vec<&'static str> {
 /// 单测卡命令形状。`-R`(--relative)让 `host:./<相对路径>` 在目标重建相对
 /// 布局;`--delete` 让远程删除传播到缓存(watcher 收 Remove 后清库内行)——
 /// 它只作用于各源树**内部**,整棵源消失由 sync_host 的缺席清理负责。
-fn rsync_args(host: &str, dest: &Path, paths: &[&str]) -> Vec<String> {
+fn rsync_args(host: &str, paths: &[&str]) -> Vec<String> {
     // -a enables special files. Override it afterwards: sockets/FIFOs carry no
     // session data, and recreating sockets under a long cache path can exceed
     // sun_path and abort openrsync's receiver (#47).
@@ -374,7 +374,9 @@ fn rsync_args(host: &str, dest: &Path, paths: &[&str]) -> Vec<String> {
         format!("ssh {}", SSH_OPTS.join(" ")),
     ]);
     args.extend(paths.iter().map(|path| format!("{host}:./{path}")));
-    args.push(dest.to_string_lossy().to_string());
+    // 目标由子进程的 cwd 指定。Windows 的 C:\... / C:/... 会被 rsync
+    // 当作 host:path,与远端源一起触发 "both be remote" (#56)。
+    args.push(".".to_string());
     args
 }
 
@@ -463,7 +465,7 @@ fn remove_cached(path: &Path) -> Result<(), String> {
 /// 是用户能看懂的原话("Permission denied (publickey)"、"Host key
 /// verification failed")
 fn probe_remote(host: &str) -> Result<Vec<&'static str>, String> {
-    let output = run_tool("ssh", "OpenSSH", &probe_args(host))?;
+    let output = run_tool("ssh", "OpenSSH", &probe_args(host), None)?;
     classify("ssh", &output, &[])?;
     Ok(present_remote_paths(&String::from_utf8_lossy(
         &output.stdout,
@@ -482,8 +484,8 @@ enum RsyncError {
 /// 行全是 ENOENT 时是探测后消失的源,交调用方重探,权限/读错误同样报 23,
 /// 照常报错(记成功会隐藏真实缺数据)。
 fn run_rsync(host: &str, dest: &Path, paths: &[&str]) -> Result<(), RsyncError> {
-    let output =
-        run_tool("rsync", "rsync", &rsync_args(host, dest, paths)).map_err(RsyncError::Other)?;
+    let output = run_tool("rsync", "rsync", &rsync_args(host, paths), Some(dest))
+        .map_err(RsyncError::Other)?;
     if output.status.code() == Some(23) && only_missing_sources(&output.stderr) {
         return Err(RsyncError::SourcesVanished(exit_error("rsync", &output)));
     }
@@ -511,16 +513,25 @@ fn run_tool(
     bin: &str,
     install_hint: &str,
     args: &[String],
+    working_dir: Option<&Path>,
 ) -> Result<std::process::Output, String> {
-    let output = std::process::Command::new(bin)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .output();
+    let mut command = std::process::Command::new(bin);
+    command.args(args).stdin(std::process::Stdio::null());
+    if let Some(dir) = working_dir {
+        // 每个 host 并行同步,只能设置子进程 cwd,不能改整个 Wake 进程的 cwd。
+        command.current_dir(dir);
+    }
+    let output = command.output();
     match output {
         Ok(o) => Ok(o),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(format!(
-            "{bin} not found on PATH — install {install_hint} to sync remote hosts"
-        )),
+        // Remove host 可能同时删掉缓存目录;这种启动失败不是缺少 rsync。
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound && working_dir.is_none_or(Path::is_dir) =>
+        {
+            Err(format!(
+                "{bin} not found on PATH — install {install_hint} to sync remote hosts"
+            ))
+        }
         Err(e) => Err(format!("failed to run {bin}: {e}")),
     }
 }
@@ -682,7 +693,7 @@ mod tests {
     #[test]
     fn rsync_args_shape() {
         let present = [".claude/projects", ".codex/state_5.sqlite"];
-        let args = rsync_args("devbox", Path::new("/tmp/cache/devbox"), &present);
+        let args = rsync_args("devbox", &present);
         assert_eq!(args[0], "-az");
         let archive = args.iter().position(|a| a == "-az").unwrap();
         let no_specials = args.iter().position(|a| a == "--no-specials").unwrap();
@@ -709,7 +720,7 @@ mod tests {
             ]
         );
         // 目标在最后
-        assert_eq!(args.last().unwrap(), "/tmp/cache/devbox");
+        assert_eq!(args.last().unwrap(), ".");
         // 各家声明的 exclude 全部落到命令行(OpenClaw 的凭证靠它挡)。`/` 在字符集里:
         // exclude 是单独一个 argv 交给本地 rsync、经协议传给发送端,不过任何 shell;
         // 带层级的模式(Craft 的 workspaces/*/sources)只匹配那一层,不误伤同名目录

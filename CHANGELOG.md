@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix: Remote sync on Windows now accepts local cache paths with drive letters, avoiding the "source and destination cannot both be remote" error before any files transfer (#56, thanks @zhyg).
+
 ## [0.8.5] — 2026-09-27
 
 - Fix: Devin CLI sessions stored under `%APPDATA%\devin` are now discovered automatically on Windows (#53, thanks @yougeqiu).
