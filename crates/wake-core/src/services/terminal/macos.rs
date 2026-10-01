@@ -7,9 +7,12 @@ use super::{
     spawn_and_reap, ResumeOutcome,
 };
 use crate::models::{AgentId, SessionMeta};
+use anyhow::Context;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// AppleScript 双引号字符串转义
 fn applescript_quote(s: &str) -> String {
@@ -44,6 +47,7 @@ pub enum TerminalApp {
     /// codex://threads/<uuid> 打开本地会话(路由 kind "localConversation",
     /// desktop 的 threads 表与 CLI 共库、行内 rollout_path 即 CLI 文件)。
     CodexDesktop,
+    PiWeb,
 }
 
 impl TerminalApp {
@@ -56,6 +60,7 @@ impl TerminalApp {
             TerminalApp::Kooky => "Kooky",
             TerminalApp::ClaudeDesktop => "Claude Desktop",
             TerminalApp::CodexDesktop => "Codex Desktop",
+            TerminalApp::PiWeb => "pi-web",
         }
     }
 
@@ -69,6 +74,7 @@ impl TerminalApp {
             TerminalApp::Kooky => "kooky",
             TerminalApp::ClaudeDesktop => "claude-desktop",
             TerminalApp::CodexDesktop => "codex-desktop",
+            TerminalApp::PiWeb => "pi-web",
         }
     }
 
@@ -77,7 +83,9 @@ impl TerminalApp {
     /// 直接用内嵌 brands 资源,不走 ensure_app_icons 的提取缓存
     pub fn brand_icon(&self) -> Option<&'static str> {
         match self {
+            TerminalApp::ClaudeDesktop => Some("brands/claude.png"),
             TerminalApp::CodexDesktop => Some("brands/codex.png"),
+            TerminalApp::PiWeb => Some("brands/pi.png"),
             _ => None,
         }
     }
@@ -92,8 +100,12 @@ impl TerminalApp {
             TerminalApp::Ghostty => &["/Applications/Ghostty.app"],
             TerminalApp::Kooky => &["/Applications/Kooky.app"],
             TerminalApp::ClaudeDesktop => &["/Applications/Claude.app"],
-            // Codex desktop 的 app 名与旧版 ChatGPT 同名,靠 bundle id 区分
-            TerminalApp::CodexDesktop => &["/Applications/ChatGPT.app"],
+            // Codex desktop 的 app 名可能是 Codex.app 或 ChatGPT.app
+            TerminalApp::CodexDesktop => &[
+                "/Applications/Codex.app",
+                "/Applications/ChatGPT.app",
+            ],
+            TerminalApp::PiWeb => return None,
         };
         let home = dirs::home_dir().unwrap_or_default().join("Applications");
         for c in candidates {
@@ -124,7 +136,10 @@ impl TerminalApp {
             .unwrap_or(false)
     }
 
-    fn is_installed(&self) -> bool {
+    pub fn is_installed(&self) -> bool {
+        if matches!(self, TerminalApp::PiWeb) {
+            return detect_pi_web_port().is_some();
+        }
         self.resolved_app_path().is_some()
     }
 }
@@ -136,6 +151,7 @@ pub(super) fn deep_link_resume(meta: &SessionMeta, term: TerminalApp) -> Option<
         TerminalApp::Kooky => Some(launch_kooky(meta)),
         TerminalApp::ClaudeDesktop => Some(launch_claude_desktop(meta)),
         TerminalApp::CodexDesktop => Some(launch_desktop_id(&meta.id, "codex://threads/", term)),
+        TerminalApp::PiWeb => Some(launch_pi_web(meta)),
         _ => None,
     }
 }
@@ -148,7 +164,10 @@ pub(super) fn launch_shell(term: TerminalApp, command: &str) -> anyhow::Result<(
         TerminalApp::ITerm => launch_iterm(command),
         TerminalApp::Warp => launch_warp(command),
         TerminalApp::Ghostty => launch_ghostty(command),
-        TerminalApp::Kooky | TerminalApp::ClaudeDesktop | TerminalApp::CodexDesktop => {
+        TerminalApp::Kooky
+        | TerminalApp::ClaudeDesktop
+        | TerminalApp::CodexDesktop
+        | TerminalApp::PiWeb => {
             anyhow::bail!("{} is a deep-link target", term.display_name())
         }
     }
@@ -256,6 +275,7 @@ pub fn terminals_for(agent: AgentId) -> Vec<TerminalApp> {
             TerminalApp::Kooky => kooky_speaks(agent),
             TerminalApp::ClaudeDesktop => agent == AgentId::ClaudeCode,
             TerminalApp::CodexDesktop => agent == AgentId::Codex,
+            TerminalApp::PiWeb => agent == AgentId::Pi,
             _ => true,
         })
         .collect()
@@ -273,6 +293,7 @@ pub fn installed_terminals() -> &'static [TerminalApp] {
             TerminalApp::Kooky,
             TerminalApp::ClaudeDesktop,
             TerminalApp::CodexDesktop,
+            TerminalApp::PiWeb,
             TerminalApp::ITerm,
             TerminalApp::Warp,
             TerminalApp::Ghostty,
@@ -328,22 +349,53 @@ fn launch_ghostty(command: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Warp 无命令注入 CLI,走官方 Launch Configuration:写临时 yaml 再
-/// open warp://launch/<path>。exec 用 yaml 块标量,免转义。
+fn extract_cwd_from_command(command: &str) -> Option<String> {
+    if let Some(rest) = command.strip_prefix("cd ") {
+        if let Some(idx) = rest.find(" && ") {
+            let dir_part = &rest[..idx];
+            let dir = dir_part.trim_matches('\'').trim_matches('"');
+            if !dir.is_empty() {
+                return Some(dir.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Warp Tab Config + `warp://tab_config/<name>` deep link:TOML 落在
+/// ~/.warp/tab_configs/<name>.toml,URI 默认在**当前活动窗口**新开 tab 并
+/// 自动执行 commands(无窗口时才落到新窗口;`?new_window=true` 强制新窗口)。
+/// 实测 2026-09-27(v0.2026.08.19):命令执行、不开新窗口,无需辅助功能
+/// 权限,不碰剪贴板。注:该文件会出现在 Warp 的 + 菜单里,固定名可接受。
 fn launch_warp(command: &str) -> anyhow::Result<()> {
     if command.contains('\n') {
         anyhow::bail!("multi-line command");
     }
-    let yaml = format!(
-        "name: Wake Resume\nwindows:\n  - tabs:\n      - layout:\n          commands:\n            - exec: |-\n                {command}\n"
-    );
-    let path = std::env::temp_dir().join("wake-warp-resume.yaml");
-    std::fs::write(&path, yaml)?;
+
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .context("$HOME not set")?;
+    let tab_dir = home.join(".warp/tab_configs");
+    std::fs::create_dir_all(&tab_dir)
+        .with_context(|| format!("mkdir {} failed", tab_dir.display()))?;
+
+    // TOML 基本字符串只需转义 \ 和 ";命令保证单行,无控制字符问题
+    let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut toml = String::from("name = \"Wake Resume\"\n[[panes]]\nid = \"wake\"\ntype = \"terminal\"\n");
+    if let Some(dir) = extract_cwd_from_command(command) {
+        toml.push_str(&format!("directory = \"{}\"\n", escape(&dir)));
+    }
+    toml.push_str(&format!(
+        "commands = [\"{}\"]\nis_focused = true\n",
+        escape(command)
+    ));
+    std::fs::write(tab_dir.join("wake-resume.toml"), toml)?;
+
     let status = Command::new("open")
-        .arg(format!("warp://launch/{}", path.display()))
+        .arg("warp://tab_config/wake-resume")
         .status()?;
     if !status.success() {
-        anyhow::bail!("open warp:// failed");
+        anyhow::bail!("open warp://tab_config/wake-resume failed");
     }
     Ok(())
 }
@@ -559,6 +611,159 @@ fn owned_stem_in(p: &Path, cli_id: &str) -> Option<String> {
     .flatten()
 }
 
+fn urlencode(input: &str) -> String {
+    let mut encoded = String::with_capacity(input.len() * 3);
+    for b in input.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(b as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    encoded
+}
+
+/// pi-web 的内建默认端口(既没有 LaunchAgent 也没有 PI_WEB_PORT 时的兜底)
+const PI_WEB_DEFAULT_PORT: u16 = 30141;
+
+/// 探测 pi-web 运行的端口。结果短缓存 5s:is_installed 挂在行渲染路径上,
+/// 每次重渲染都做 TCP 连接(默认端口路径还有 HTTP 校验)会拖慢列表
+pub fn detect_pi_web_port() -> Option<u16> {
+    static CACHE: Mutex<Option<(Instant, Option<u16>)>> = Mutex::new(None);
+    const PROBE_TTL: Duration = Duration::from_secs(5);
+    if let Ok(guard) = CACHE.lock() {
+        if let Some((at, hit)) = *guard {
+            if at.elapsed() < PROBE_TTL {
+                return hit;
+            }
+        }
+    }
+    let hit = detect_pi_web_port_uncached();
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = Some((Instant::now(), hit));
+    }
+    hit
+}
+
+fn detect_pi_web_port_uncached() -> Option<u16> {
+    // 1. 优先环境变量 PI_WEB_PORT(显式声明,信任之,只验证在监听)
+    if let Ok(val) = std::env::var("PI_WEB_PORT") {
+        if let Ok(port) = val.parse::<u16>() {
+            if is_port_listening(port) {
+                return Some(port);
+            }
+        }
+    }
+
+    // 2. 尝试从 ~/Library/LaunchAgents/ 搜索 pi-web 相关的 plist 配置(显式
+    //    配置,同上)
+    if let Some(home) = dirs::home_dir() {
+        let launch_agents = home.join("Library/LaunchAgents");
+        if let Ok(entries) = std::fs::read_dir(launch_agents) {
+            for entry in entries.flatten() {
+                let fname = entry.file_name();
+                let fname_str = fname.to_string_lossy();
+                if fname_str.contains("pi-web") && fname_str.ends_with(".plist") {
+                    if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                        if let Some(port) = parse_port_from_plist_args(&content) {
+                            if is_port_listening(port) {
+                                return Some(port);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. 无显式配置才兜底默认端口,且必须通过 HTTP 身份校验:盲探 3000/3001/8080
+    //    这类通用开发端口会把机器上任何监听服务认成 pi-web,点开就把会话链接
+    //    发给错误的服务(review 2026-09-27 P2)。pi-web 首页 <title>Pi Web</title>
+    //    是稳定标识
+    if is_port_listening(PI_WEB_DEFAULT_PORT) && pi_web_serving(PI_WEB_DEFAULT_PORT) {
+        return Some(PI_WEB_DEFAULT_PORT);
+    }
+
+    None
+}
+
+/// 探测端口背后的服务是不是 pi-web:抓首页找 <title>Pi Web</title>。curl
+/// 子进程与本文件其他外部调用同风格;1s 超时兜底半死的服务
+fn pi_web_serving(port: u16) -> bool {
+    Command::new("curl")
+        .args(["-s", "-m", "1", &format!("http://127.0.0.1:{port}/")])
+        .output()
+        .map(|out| {
+            let body = String::from_utf8_lossy(&out.stdout);
+            body.contains(">Pi Web<") || body.contains("content=\"Pi Web\"")
+        })
+        .unwrap_or(false)
+}
+
+/// 快速探测 TCP 端口是否在监听 (50ms 超时)
+fn is_port_listening(port: u16) -> bool {
+    use std::net::{SocketAddr, TcpStream};
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok()
+}
+
+/// 从 launchd plist 的 ProgramArguments 提取 `-p <port>` 或 `--port <port>`
+fn parse_port_from_plist_args(content: &str) -> Option<u16> {
+    let mut iter = content.lines();
+    while let Some(line) = iter.next() {
+        let trimmed = line.trim();
+        if trimmed == "<string>-p</string>" || trimmed == "<string>--port</string>" {
+            if let Some(next_line) = iter.next() {
+                let next_trimmed = next_line.trim();
+                if let Some(val) = next_trimmed
+                    .strip_prefix("<string>")
+                    .and_then(|s| s.strip_suffix("</string>"))
+                {
+                    if let Ok(port) = val.parse::<u16>() {
+                        return Some(port);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn launch_pi_web(meta: &SessionMeta) -> ResumeOutcome {
+    let port = match detect_pi_web_port() {
+        Some(p) => p,
+        None => {
+            return ResumeOutcome {
+                ok: false,
+                command: String::new(),
+                error: Some("pi-web is not running or listening".to_string()),
+            };
+        }
+    };
+
+    let url = if !meta.id.is_empty() {
+        format!("http://127.0.0.1:{port}/?session={}", urlencode(&meta.id))
+    } else if !meta.project_path.is_empty() {
+        format!("http://127.0.0.1:{port}/?cwd={}", urlencode(&meta.project_path))
+    } else {
+        format!("http://127.0.0.1:{port}/")
+    };
+    let ok = Command::new("open")
+        .arg(&url)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    ResumeOutcome {
+        ok,
+        command: url,
+        error: (!ok).then(|| "Couldn't open pi-web in browser".to_string()),
+    }
+}
+
 fn launch_desktop_id(id: &str, prefix: &str, term: TerminalApp) -> ResumeOutcome {
     if !is_uuid(id) {
         return ResumeOutcome {
@@ -674,6 +879,7 @@ mod tests {
             source: None,
             favorite: false,
             pinned: false,
+            custom_title: None,
         };
         for term in [TerminalApp::ClaudeDesktop, TerminalApp::CodexDesktop] {
             let outcome = deep_link_resume(&meta, term).expect("desktop targets are deep-link");
@@ -690,11 +896,65 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_cwd_from_command() {
+        assert_eq!(
+            extract_cwd_from_command("cd '/Users/rick2/code' && claude --resume 'test'"),
+            Some("/Users/rick2/code".to_string())
+        );
+        assert_eq!(
+            extract_cwd_from_command("cd \"/path/to/project\" && codex resume abc"),
+            Some("/path/to/project".to_string())
+        );
+        assert_eq!(extract_cwd_from_command("claude --resume 'test'"), None);
+    }
+
+    #[test]
+    fn parse_port_from_plist() {
+        let sample = r#"
+        <key>ProgramArguments</key>
+        <array>
+            <string>/path/to/node</string>
+            <string>/path/to/pi-web</string>
+            <string>-H</string>
+            <string>0.0.0.0</string>
+            <string>-p</string>
+            <string>30141</string>
+            <string>--no-open</string>
+        </array>
+        "#;
+        assert_eq!(parse_port_from_plist_args(sample), Some(30141));
+
+        let sample_long = r#"
+        <key>ProgramArguments</key>
+        <array>
+            <string>--port</string>
+            <string>8080</string>
+        </array>
+        "#;
+        assert_eq!(parse_port_from_plist_args(sample_long), Some(8080));
+        assert_eq!(parse_port_from_plist_args("<string>foo</string>"), None);
+    }
+
+    #[test]
+    fn test_pi_web_terminals_for_pi() {
+        use crate::models::AgentId;
+        assert_eq!(TerminalApp::PiWeb.display_name(), "pi-web");
+        assert_eq!(TerminalApp::PiWeb.id(), "pi-web");
+        assert_eq!(TerminalApp::PiWeb.brand_icon(), Some("brands/pi.png"));
+        if detect_pi_web_port().is_some() {
+            assert!(TerminalApp::PiWeb.is_installed());
+            let terms = terminals_for(AgentId::Pi);
+            assert!(terms.contains(&TerminalApp::PiWeb));
+        }
+    }
+
+    #[test]
     fn shell_launch_refuses_deep_link_targets() {
         for term in [
             TerminalApp::Kooky,
             TerminalApp::ClaudeDesktop,
             TerminalApp::CodexDesktop,
+            TerminalApp::PiWeb,
         ] {
             assert!(launch_shell(term, "echo hi").is_err());
         }

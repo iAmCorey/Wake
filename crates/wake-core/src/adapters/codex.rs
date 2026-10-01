@@ -955,6 +955,7 @@ fn build_meta(r: &SessionFileRef, p: &CodexParse, archived_dir: &Path) -> Sessio
         source: p.source.clone(),
         favorite: false,
         pinned: false,
+        custom_title: None,
     }
 }
 
@@ -1143,6 +1144,7 @@ impl AgentAdapter for CodexAdapter {
                     source: row.source.clone(),
                     favorite: false,
                     pinned: false,
+                    custom_title: None,
                 },
             );
         }

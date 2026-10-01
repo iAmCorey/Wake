@@ -199,6 +199,7 @@ impl OpenclawAdapter {
             source: hint.channel.clone().filter(|c| !c.is_empty() && c != "cli"),
             favorite: false,
             pinned: false,
+            custom_title: None,
         }
     }
 

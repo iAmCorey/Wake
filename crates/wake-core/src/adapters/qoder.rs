@@ -629,6 +629,7 @@ fn build_meta(r: &SessionFileRef, parsed: &QoderParse) -> SessionMeta {
         source: None,
         favorite: false,
         pinned: false,
+        custom_title: None,
     }
 }
 

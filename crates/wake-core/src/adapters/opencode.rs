@@ -278,6 +278,7 @@ impl OpencodeAdapter {
             source: row.source(db),
             favorite: false,
             pinned: false,
+            custom_title: None,
         }
     }
 

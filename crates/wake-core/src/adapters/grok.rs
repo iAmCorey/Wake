@@ -22,6 +22,20 @@ pub struct GrokAdapter {
     group: Mutex<Option<Arc<GroupCtx>>>,
 }
 
+/// 空壳判定的字节扫描上限:钩子流水撑死几 KB,超过必然有过对话内容
+const STUB_SCAN_MAX: u64 = 64 * 1024;
+
+/// updates.jsonl 里是否出现过任意消息 chunk(user/agent/thought 共用后缀)
+fn file_has_message_chunk(path: &Path) -> bool {
+    let Ok(bytes) = fs::read(path) else {
+        // 读不出(权限/竞态删除)不当空壳处理,交给解析层报错
+        return true;
+    };
+    bytes
+        .windows(b"message_chunk".len())
+        .any(|w| w == b"message_chunk")
+}
+
 impl GrokAdapter {
     pub fn new() -> Self {
         let grok_home = super::home_dir().unwrap_or_default().join(".grok");
@@ -388,6 +402,7 @@ fn build_meta(
         source: None,
         favorite: false,
         pinned: false,
+        custom_title: None,
     }
 }
 
@@ -443,6 +458,15 @@ impl AgentAdapter for GrokAdapter {
         }
         let session_dir = path.parent()?;
         let mut r = default_file_ref(self.agent(), path)?;
+        // 空壳会话过滤:Grok 在会话创建时就落盘,没发过消息就关掉的会话
+        // 流水里只剩插件钩子(hook_execution)等元事件(2026-09-27 用户报
+        // "Untitled 空记录"),解析出 0 条消息、标题回退成 Untitled。小文件
+        // 整读判一次是否含消息 chunk(user/agent/thought 共用 `message_chunk`
+        // 后缀),不含就不列为会话;用户发出首条消息后文件变更会再次触发
+        // file_ref,自然重新入库。大文件必有对话内容,不做字节扫描。
+        if r.size <= STUB_SCAN_MAX as i64 && !file_has_message_chunk(path) {
+            return None;
+        }
         r.native_id = session_dir.file_name()?.to_string_lossy().to_string();
         Some(r)
     }

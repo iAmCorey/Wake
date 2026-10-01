@@ -69,10 +69,11 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 );
 
 CREATE TABLE IF NOT EXISTS user_data (
-  session_key TEXT PRIMARY KEY,
-  favorite    INTEGER DEFAULT 0,
-  pinned      INTEGER DEFAULT 0,
-  updated_at  INTEGER
+  session_key  TEXT PRIMARY KEY,
+  favorite     INTEGER DEFAULT 0,
+  pinned       INTEGER DEFAULT 0,
+  custom_title TEXT,
+  updated_at   INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS tombstones (
@@ -309,6 +310,10 @@ fn open_conn(path: &Path) -> Result<Connection> {
             "INSERT INTO titles_fts(key, title) SELECT key, title FROM sessions WHERE title != ''",
             [],
         )?;
+    }
+    // custom_title 迁移(2026-09-11 会话自定义标题加列;NULL = 默认标题)
+    if !table_has_column(&conn, "user_data", "custom_title")? {
+        conn.execute("ALTER TABLE user_data ADD COLUMN custom_title TEXT", [])?;
     }
     Ok(conn)
 }
@@ -1085,6 +1090,45 @@ impl Store {
         Ok(())
     }
 
+    /// 设置会话自定义标题。传入 None 或空字符串表示清除自定义标题，恢复使用原始标题。
+    pub fn set_custom_title(&self, key: &str, custom_title: Option<&str>) -> Result<()> {
+        let conn = self.write.lock().unwrap();
+        let title = custom_title.map(str::trim).filter(|s| !s.is_empty());
+        conn.execute(
+            "INSERT INTO user_data(session_key, favorite, pinned, custom_title, updated_at)
+             VALUES (?1, 0, 0, ?2, ?3)
+             ON CONFLICT(session_key) DO UPDATE SET
+               custom_title = excluded.custom_title,
+               updated_at = excluded.updated_at",
+            params![
+                key,
+                title,
+                now_ms()
+            ],
+        )?;
+        // 全局搜索命中的是 titles_fts,这里不同步的话改完标题只有列表筛选能
+        // 搜到、全局搜索永远滞后。会话行可能已不存在(删会话留下的 user_data
+        // 残留),查不到就没什么可同步的
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT title FROM sessions WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(raw) = raw {
+            let fts_title = effective_title(&conn, key, &raw);
+            conn.execute("DELETE FROM titles_fts WHERE key = ?1", params![key])?;
+            if !fts_title.is_empty() {
+                conn.execute(
+                    "INSERT INTO titles_fts(key, title) VALUES (?1, ?2)",
+                    params![key, fts_title],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     /// 应用级 KV 偏好(Open In 目标记忆等 UI 状态)。value 语义由调用方定
     /// (多为 json),不存在回 None
     pub fn pref_get(&self, key: &str) -> Option<String> {
@@ -1127,7 +1171,7 @@ impl Store {
         let rows = stmt.query_map([], |r| {
             Ok(crate::cleanup::IndexedSession {
                 meta: row_to_meta(r)?,
-                parent: r.get(19)?,
+                parent: r.get(20)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -2782,9 +2826,9 @@ impl Store {
 }
 
 const SESSION_COLS: &str =
-    "s.key, s.agent_id, s.native_id, s.title, s.project_path, s.project_name,
+    "s.key, s.agent_id, s.native_id, COALESCE(u.custom_title, s.title), s.project_path, s.project_name,
     s.git_branch, s.created_at, s.updated_at, s.message_count, s.tokens_used, s.model, s.source,
-    s.archived, s.file_path, s.file_size, COALESCE(u.favorite,0), COALESCE(u.pinned,0), s.host";
+    s.archived, s.file_path, s.file_size, COALESCE(u.favorite,0), COALESCE(u.pinned,0), s.host, u.custom_title";
 
 const ROOT_WHEN_HIDING_ARCHIVED: &str = "(s.parent_key = '' OR NOT EXISTS (
        SELECT 1 FROM sessions p WHERE p.key = s.parent_key AND p.archived = 0
@@ -2804,23 +2848,23 @@ const ROOT_MESSAGES_ALL: &str =
     "s.message_count + COALESCE((SELECT SUM(c.message_count) FROM sessions c
       WHERE c.parent_key = s.key), 0)";
 const ROOT_SESSION_COLS_ACTIVE: &str =
-    "s.key, s.agent_id, s.native_id, s.title, s.project_path, s.project_name,
+    "s.key, s.agent_id, s.native_id, COALESCE(u.custom_title, s.title), s.project_path, s.project_name,
      s.git_branch, s.created_at,
      MAX(s.updated_at, COALESCE((SELECT MAX(c.updated_at) FROM sessions c
        WHERE c.parent_key = s.key AND c.archived = 0), 0)),
      s.message_count + COALESCE((SELECT SUM(c.message_count) FROM sessions c
        WHERE c.parent_key = s.key AND c.archived = 0), 0),
      s.tokens_used, s.model, s.source, s.archived, s.file_path, s.file_size,
-     COALESCE(u.favorite,0), COALESCE(u.pinned,0), s.host";
+     COALESCE(u.favorite,0), COALESCE(u.pinned,0), s.host, u.custom_title";
 const ROOT_SESSION_COLS_ALL: &str =
-    "s.key, s.agent_id, s.native_id, s.title, s.project_path, s.project_name,
+    "s.key, s.agent_id, s.native_id, COALESCE(u.custom_title, s.title), s.project_path, s.project_name,
      s.git_branch, s.created_at,
      MAX(s.updated_at, COALESCE((SELECT MAX(c.updated_at) FROM sessions c
        WHERE c.parent_key = s.key), 0)),
      s.message_count + COALESCE((SELECT SUM(c.message_count) FROM sessions c
        WHERE c.parent_key = s.key), 0),
      s.tokens_used, s.model, s.source, s.archived, s.file_path, s.file_size,
-     COALESCE(u.favorite,0), COALESCE(u.pinned,0), s.host";
+     COALESCE(u.favorite,0), COALESCE(u.pinned,0), s.host, u.custom_title";
 
 fn child_filter_sql(
     filter: &SessionFilter,
@@ -2895,8 +2939,9 @@ fn push_session_filters(
         .map(str::trim)
         .filter(|q| !q.is_empty())
     {
-        wheres.push("(s.title LIKE ? ESCAPE '\\' OR s.project_name LIKE ? ESCAPE '\\')".into());
+        wheres.push("(COALESCE(u.custom_title, s.title) LIKE ? ESCAPE '\\' OR s.title LIKE ? ESCAPE '\\' OR s.project_name LIKE ? ESCAPE '\\')".into());
         let like = format!("%{}%", escape_like(q));
+        args.push(Box::new(like.clone()));
         args.push(Box::new(like.clone()));
         args.push(Box::new(like));
     }
@@ -3082,6 +3127,7 @@ fn row_to_meta(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         favorite: r.get::<_, i64>(16)? == 1,
         pinned: r.get::<_, i64>(17)? == 1,
         host: r.get(18)?,
+        custom_title: r.get(19)?,
     })
 }
 
@@ -3197,15 +3243,35 @@ fn write_session_tx(
     Ok(())
 }
 
+/// 列表展示的"生效标题":自定义标题(非空)优先,否则回扫描所得标题——与
+/// 列表查询的 COALESCE(u.custom_title, s.title) 同一规则。titles_fts 的两个
+/// 写点(upsert_session / set_custom_title)都按它写,全局搜索才不会与列表
+/// 各说各话(review 2026-09-27:改完标题全局搜索搜不到,重扫又把自定义标题
+/// 从索引里冲掉)
+fn effective_title(conn: &rusqlite::Connection, key: &str, raw: &str) -> String {
+    conn.query_row(
+        "SELECT custom_title FROM user_data WHERE session_key = ?1",
+        params![key],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+    .map(|t| t.trim().to_string())
+    .filter(|t| !t.is_empty())
+    .unwrap_or_else(|| raw.to_string())
+}
+
 fn upsert_session(tx: &rusqlite::Transaction<'_>, m: &SessionMeta, file_mtime: i64) -> Result<()> {
     // titles_fts 与 sessions.title 同步的**唯一写点**:全量、增量、quick(write_meta_only)
     // 三条路都经这里,标题一改索引即跟上。按 key 删再插(UNINDEXED 列的 DELETE 是
     // 整表扫,几千行也就微秒级),空标题不入索引
     tx.execute("DELETE FROM titles_fts WHERE key = ?1", params![m.key])?;
-    if !m.title.is_empty() {
+    // 索引写生效标题而非原始标题,自定义标题才能被全局搜索命中且在重扫后保留
+    let fts_title = effective_title(tx, &m.key, &m.title);
+    if !fts_title.is_empty() {
         tx.execute(
             "INSERT INTO titles_fts(key, title) VALUES (?1, ?2)",
-            params![m.key, m.title],
+            params![m.key, fts_title],
         )?;
     }
     tx.execute(
@@ -3405,4 +3471,111 @@ pub fn default_db_path() -> std::path::PathBuf {
         }
     }
     db
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{AgentId, SearchFilter, SessionMeta};
+
+    fn make_test_meta(key: &str, title: &str) -> SessionMeta {
+        SessionMeta {
+            key: key.to_string(),
+            agent: AgentId::ClaudeCode,
+            id: key.to_string(),
+            title: title.to_string(),
+            project_path: "/tmp/project".to_string(),
+            project_name: "test-proj".to_string(),
+            git_branch: Some("main".to_string()),
+            created_at: 1000,
+            updated_at: 2000,
+            message_count: 5,
+            tokens_used: Some(100),
+            model: Some("claude-3-5-sonnet".to_string()),
+            source: None,
+            archived: false,
+            file_path: "/tmp/s.json".to_string(),
+            size_bytes: 512,
+            favorite: false,
+            pinned: false,
+            host: String::new(),
+            custom_title: None,
+        }
+    }
+
+    #[test]
+    fn test_set_custom_title_and_coalesce() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Store::open(&db_path).unwrap();
+
+        let meta = make_test_meta("session-1", "Original Title");
+        db.write_session(&meta, 1000, &[]).unwrap();
+
+        // 初始状态：未重命名
+        let s = db.get_session("session-1").unwrap().unwrap();
+        assert_eq!(s.title, "Original Title");
+        assert_eq!(s.custom_title, None);
+
+        // 重命名为 "My Custom Session"
+        db.set_custom_title("session-1", Some("My Custom Session")).unwrap();
+        let s = db.get_session("session-1").unwrap().unwrap();
+        assert_eq!(s.title, "My Custom Session");
+        assert_eq!(s.custom_title.as_deref(), Some("My Custom Session"));
+
+        // 按自定义标题搜索
+        let (found, _) = db
+            .list_sessions(&SessionFilter {
+                title_query: Some("Custom".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].title, "My Custom Session");
+
+        // 按原标题搜索也能匹配
+        let (found, _) = db
+            .list_sessions(&SessionFilter {
+                title_query: Some("Original".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(found.len(), 1);
+
+        // 全局全文搜索:titles_fts 与自定义标题同步(列表能搜 ≠ 全局能搜)
+        let (hits, _) = db.search_with("Custom", &SearchFilter::default()).unwrap();
+        assert!(hits
+            .iter()
+            .any(|h| h.session.key == "session-1" && h.role == "title"));
+
+        // 重扫(upsert)不得把自定义标题从索引里冲掉
+        let meta2 = make_test_meta("session-1", "Original Title");
+        db.write_session(&meta2, 3000, &[]).unwrap();
+        let (hits, _) = db.search_with("Custom", &SearchFilter::default()).unwrap();
+        assert!(hits
+            .iter()
+            .any(|h| h.session.key == "session-1" && h.role == "title"));
+
+        // 清空重命名（传空白字符），恢复默认名称
+        db.set_custom_title("session-1", Some("   ")).unwrap();
+        let s = db.get_session("session-1").unwrap().unwrap();
+        assert_eq!(s.title, "Original Title");
+        assert_eq!(s.custom_title, None);
+
+        // 传 None，恢复默认名称
+        db.set_custom_title("session-1", Some("Temp Title")).unwrap();
+        assert_eq!(db.get_session("session-1").unwrap().unwrap().title, "Temp Title");
+        db.set_custom_title("session-1", None).unwrap();
+        let s = db.get_session("session-1").unwrap().unwrap();
+        assert_eq!(s.title, "Original Title");
+        assert_eq!(s.custom_title, None);
+
+        // 清除后:自定义词从全局搜索消失,原始标题回来
+        let (hits, _) = db.search_with("Custom", &SearchFilter::default()).unwrap();
+        assert!(hits.iter().all(|h| h.session.key != "session-1"));
+        let (hits, _) = db.search_with("Original", &SearchFilter::default()).unwrap();
+        assert!(hits
+            .iter()
+            .any(|h| h.session.key == "session-1" && h.role == "title"));
+    }
 }

@@ -159,6 +159,7 @@ fn build_meta(r: &SessionFileRef, side: &Sidecar, messages: &[TranscriptMessage]
         source: None,
         favorite: false,
         pinned: false,
+        custom_title: None,
     }
 }
 

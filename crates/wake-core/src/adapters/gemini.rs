@@ -193,6 +193,7 @@ fn build_meta(r: &SessionFileRef, p: &GeminiParse, cwd: &str) -> SessionMeta {
         source: None,
         favorite: false,
         pinned: false,
+        custom_title: None,
     }
 }
 

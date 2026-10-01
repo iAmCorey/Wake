@@ -209,6 +209,7 @@ fn build_meta(
         source: None,
         favorite: false,
         pinned: false,
+        custom_title: None,
     }
 }
 

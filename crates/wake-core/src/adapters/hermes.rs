@@ -167,6 +167,7 @@ impl HermesAdapter {
             source: row.source.clone().filter(|s| !s.is_empty() && s != "cli"),
             favorite: false,
             pinned: false,
+            custom_title: None,
         }
     }
 

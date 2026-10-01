@@ -90,6 +90,7 @@ impl AntigravityAdapter {
             source: None,
             favorite: false,
             pinned: false,
+            custom_title: None,
         }
     }
 

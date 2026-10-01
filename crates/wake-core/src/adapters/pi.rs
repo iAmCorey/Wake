@@ -162,6 +162,7 @@ fn build_meta(agent: AgentId, r: &SessionFileRef, p: &PiParse) -> SessionMeta {
         source: None,
         favorite: false,
         pinned: false,
+        custom_title: None,
     }
 }
 

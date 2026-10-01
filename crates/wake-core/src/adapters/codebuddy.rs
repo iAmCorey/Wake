@@ -420,6 +420,7 @@ fn build_meta(agent: AgentId, r: &SessionFileRef, parsed: &ParseResult) -> Sessi
         source: None,
         favorite: false,
         pinned: false,
+        custom_title: None,
     }
 }
 
