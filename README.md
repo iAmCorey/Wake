@@ -75,6 +75,8 @@ Before you add a host:
 - SSH has to work without prompts: load your key into an agent (Wake runs without a terminal, so it can never answer a passphrase prompt) and connect once from a terminal so the host key is already trusted
 - `rsync` is needed on both ends — macOS and most Linux distributions ship one; on Windows install it yourself
 
+On Windows, use `rsync` and `ssh` from the same Cygwin/cwRsync distribution. Put its `bin` directory ahead of Windows OpenSSH in `PATH`, then restart Wake. For Chocolatey's `rsync` package, this directory is `%ChocolateyInstall%\lib\rsync\tools\bin`; the package exposes only `rsync` on `PATH` by default. Check `where.exe rsync` and `where.exe ssh` to confirm both resolve there. Windows' built-in OpenSSH may pass Wake's initial connection check but is [incompatible with Cygwin rsync's transport](https://cygwin.com/pipermail/cygwin/2022-March/251153.html). Test the bundled SSH's key, agent and host configuration before adding a host.
+
 How it works, and what it doesn't do yet:
 
 - Wake first asks the remote which of the known agent directories exist, then mirrors only those with `rsync` into `remotes/<host>/` under its own data directory. Only session data and sidecar files are copied, never credentials, and nothing on the remote is ever written

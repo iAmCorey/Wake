@@ -49,11 +49,27 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install rsync --version=6.4.8 --yes --no-progress
 
+      - name: Install compiler for the Cygwin SSH fixture
+        if: runner.os == 'Windows'
+        id: cygwin
+        uses: cygwin/cygwin-install-action@3f0a3f9f988f7e96b8c18098ae05eaec175f5b52 # v6
+        with:
+          packages: gcc-core
+          add-to-path: 'false'
+
+      - name: Configure Windows remote sync test
+        if: runner.os == 'Windows'
+        env:
+          CYGWIN_ROOT: ${{ steps.cygwin.outputs.root }}
+        run: |
+          "WAKE_TEST_CYGWIN_ROOT=$env:CYGWIN_ROOT" >> $env:GITHUB_ENV
+          "WAKE_TEST_CWRSYNC_BIN=$env:ChocolateyInstall\lib\rsync\tools\bin" >> $env:GITHUB_ENV
+
       # 数据层测试:adapter 解析契约 / seq 一致性 / db 往返 / 扫描终态
       - name: Test wake-core
         run: cargo test -p wake-core
 
-      # 真 rsync + 原生假 SSH,不连外网;覆盖 Windows 盘符和并行缓存目录。
+      # 真 rsync + 同运行时的假 SSH,不连外网;覆盖 Windows 盘符和并行缓存目录。
       - name: Test remote sync paths
         timeout-minutes: 5
         run: cargo test -p wake-core --test remote_sync_paths -- --ignored

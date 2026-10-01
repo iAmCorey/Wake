@@ -1,6 +1,7 @@
 //! Real rsync on all three platforms, including cwRsync on Windows (#56).
 //! This single test owns its process environment; all data and child working
-//! directories are synthetic. CI explicitly runs it after installing rsync.
+//! directories are synthetic. CI explicitly runs it after installing rsync and
+//! a C compiler (Cygwin GCC on Windows, to match cwRsync's transport runtime).
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -16,24 +17,60 @@ impl Drop for RestoreCwd {
 }
 
 #[test]
-#[ignore = "requires rsync and rustc; installed and run explicitly in CI"]
+#[ignore = "requires rsync and a C compiler; installed and run explicitly in CI"]
 fn remote_sync_handles_native_cache_paths() {
-    let version = Command::new("rsync").arg("--version").output().unwrap();
-    assert!(version.status.success(), "rsync must be installed");
     let tmp = tempfile::tempdir().unwrap();
     let bin = tmp.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
-    // A native executable works with both Cygwin rsync and native Windows process
-    // creation, unlike the Unix-only shell fixture in remote_sync.rs.
-    let ssh = bin.join(format!("ssh{}", std::env::consts::EXE_SUFFIX));
-    let compiled = Command::new("rustc")
-        .arg("--edition=2021")
-        .arg(concat!(
+
+    // Cygwin rsync's transport uses Cygwin descriptors, so a native Windows
+    // fixture cannot forward them. Compile for the same runtime instead.
+    #[cfg(windows)]
+    let mut compiler = {
+        let root = PathBuf::from(
+            std::env::var_os("WAKE_TEST_CYGWIN_ROOT").expect("Cygwin installation for GCC"),
+        );
+        let mut compiler = Command::new(root.join("bin/env.exe"));
+        compiler.arg("/usr/bin/gcc");
+        let mut paths = vec![root.join("bin")];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        compiler.env("PATH", std::env::join_paths(paths).unwrap());
+
+        // Keep the receiver, sender and fake SSH on cwRsync's bundled runtime,
+        // without invoking Chocolatey's native rsync shim from Cygwin.
+        let cwrsync = PathBuf::from(
+            std::env::var_os("WAKE_TEST_CWRSYNC_BIN").expect("cwRsync bin directory"),
+        );
+        fs::copy(cwrsync.join("rsync.exe"), bin.join("rsync.exe")).unwrap();
+        for entry in fs::read_dir(cwrsync).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().extension().is_some_and(|ext| ext == "dll") {
+                fs::copy(entry.path(), bin.join(entry.file_name())).unwrap();
+            }
+        }
+        compiler
+    };
+    #[cfg(not(windows))]
+    let mut compiler = Command::new("cc");
+    fs::copy(
+        concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/remote_sync_ssh.rs"
-        ))
+            "/tests/fixtures/remote_sync_ssh.c"
+        ),
+        bin.join("remote_sync_ssh.c"),
+    )
+    .unwrap();
+    let compiled = compiler
+        .current_dir(&bin)
+        .args([
+            "-std=c11",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "remote_sync_ssh.c",
+        ])
         .arg("-o")
-        .arg(&ssh)
+        .arg(format!("ssh{}", std::env::consts::EXE_SUFFIX))
         .output()
         .unwrap();
     assert!(
@@ -44,6 +81,8 @@ fn remote_sync_handles_native_cache_paths() {
     let mut paths = vec![bin];
     paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
     std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+    let version = Command::new("rsync").arg("--version").output().unwrap();
+    assert!(version.status.success(), "rsync must be installed");
     let remote = tmp.path().join("remote");
     std::env::set_var("WAKE_TEST_REMOTE_HOME", &remote);
     let local_home = tmp.path().join("empty-home");
