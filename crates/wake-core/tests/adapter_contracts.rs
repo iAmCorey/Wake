@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use wake_core::adapters::antigravity::AntigravityAdapter;
+use wake_core::adapters::antigravity_ide::AntigravityIdeAdapter;
 use wake_core::adapters::claude::ClaudeAdapter;
 use wake_core::adapters::codebuddy::CodebuddyAdapter;
 use wake_core::adapters::codex::CodexAdapter;
@@ -122,9 +123,11 @@ fn fs_ref(agent: AgentId, path: &Path, native_id: &str) -> SessionFileRef {
 }
 
 /// 默认 roster 的实例数。**不等于 `AgentId::ALL.len()`**:Cursor 一家有两个
-/// 数据源(CLI 的 agent-transcripts 与 IDE 的 state.vscdb),各占一个实例。
-/// 新增 agent 或给某家再加数据源时,这个数跟着加一——契约要卡的是"漏了实例
-/// 就爆",而不是"每家恰好一个"
+/// 数据源(CLI 的 agent-transcripts 与 IDE 的 state.vscdb),各占一个实例、
+/// 共用 `AgentId::Cursor`。Antigravity 同样两个数据源,但 CLI 与 IDE 是两个
+/// `AgentId`(`Antigravity` / `AntigravityIde`),各自只算一份,不产生额外实例。
+/// 新增 agent、或给某家再加一个**共用 AgentId**的数据源时,这个数跟着加一——
+/// 契约要卡的是"漏了实例就爆",而不是"每家恰好一个"
 const DEFAULT_INSTANCES: usize = AgentId::ALL.len() + 1;
 
 /// SQLite 型 agent 的虚拟路径引用(`<db>#<id>`,与 sqlite_ro::virtual_path 同构)
@@ -1975,6 +1978,79 @@ fn antigravity_parse_contract() {
     assert!(t.mainline[0].text.contains("encrypted"));
     assert_eq!(s.units.len(), 1);
     assert!(s.units[0].text.contains("QR overlay polish"));
+}
+
+#[test]
+fn antigravity_ide_parse_contract() {
+    let _env = setup();
+    let fixture_dir = fixture("antigravity/brain");
+    let adapter = AntigravityIdeAdapter::new().with_custom_root(fixture_dir.clone());
+    assert_eq!(adapter.agent(), AgentId::AntigravityIde);
+
+    let refs = adapter.list_session_files().expect("antigravity ide list");
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].native_id, "ag-ide-0001");
+    assert!(refs[0].file_path.ends_with("transcript.jsonl"));
+
+    let s = adapter.parse_session(&refs[0]).expect("parse_session");
+    let t = adapter
+        .parse_transcript(&refs[0])
+        .expect("parse_transcript");
+
+    assert_eq!(s.meta.title, "Fix the button layout on the dashboard");
+    assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx");
+    assert_eq!(s.meta.project_name, "wakefx");
+    assert_eq!(s.meta.model.as_deref(), Some("Gemini 3.7 Flash (High)"));
+    assert_eq!(s.meta.message_count, 5); // 2 user + 2 assistant + 1 checkpoint
+
+    assert_eq!(t.mainline.len(), 5);
+    assert_eq!(t.mainline[0].role, Role::User);
+    assert_eq!(t.mainline[0].text, "Fix the button layout on the dashboard");
+
+    // 用户贴图存在同会话 .user_uploaded/,按文件名毫秒戳回挂到最近的用户消息
+    assert_eq!(t.mainline[0].images.len(), 1);
+    assert_eq!(t.mainline[0].images[0].media_type, "image/png");
+    assert!(t.mainline[0].images[0].bytes.starts_with(b"\x89PNG"));
+    assert_eq!(
+        t.mainline[0].images[0].text_offset,
+        t.mainline[0].text.len()
+    );
+    assert!(t.mainline[1..].iter().all(|m| m.images.is_empty()));
+
+    assert_eq!(t.mainline[1].role, Role::Assistant);
+    assert!(t.mainline[1]
+        .thinking
+        .as_ref()
+        .unwrap()
+        .contains("check the layout structure"));
+    assert_eq!(t.mainline[1].tool_calls.len(), 2);
+    assert_eq!(t.mainline[1].tool_calls[0].name, "view_file");
+    assert_eq!(
+        t.mainline[1].tool_calls[0].output.as_deref(),
+        Some("pub fn render_buttons() {}")
+    );
+    assert_eq!(t.mainline[1].tool_calls[1].name, "run_command");
+    assert_eq!(
+        t.mainline[1].tool_calls[1].output.as_deref(),
+        Some("test result: ok. 5 passed")
+    );
+    assert!(t.mainline[1].text.contains("I have examined the layout"));
+
+    assert_eq!(t.mainline[2].role, Role::System);
+    assert_eq!(t.mainline[2].kind, MessageKind::CompactSummary);
+
+    assert_eq!(t.mainline[3].role, Role::User);
+    assert_eq!(t.mainline[3].text, "Looks good, please commit the changes");
+
+    assert_eq!(t.mainline[4].role, Role::Assistant);
+    assert_eq!(t.mainline[4].text, "Committed successfully.");
+
+    assert_seq_contract(adapter.as_ref(), &refs[0]);
+
+    let fr = adapter
+        .file_ref(Path::new(&refs[0].file_path))
+        .expect("file_ref");
+    assert_eq!(fr.native_id, "ag-ide-0001");
 }
 
 // ---------------------------------------------------------------- seq 契约

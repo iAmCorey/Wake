@@ -16,7 +16,7 @@
 //! ①openrsync(macOS 15+ 的 /usr/bin/rsync)做发送端时,某个源连父目录
 //! 都不存在会让它中止整份文件列表,排在后面的源全部静默不传,退出码却
 //! 只是 23;②rsync 家族只要发送端遇到任何 I/O 错误(缺源即算)就整体跳过
-//! 删除阶段——没有哪台机器二十一家全装,`--delete` 就永远不会生效。
+//! 删除阶段——没有哪台机器二十二家全装,`--delete` 就永远不会生效。
 //!
 //! 同步跑在**独立于扫描的线程**(Workbench::spawn_remote_sync):本地扫描
 //! 不等网络,不可达 host 只拖慢自己;缓存落盘由 watcher 增量收编,同步
@@ -49,7 +49,7 @@ pub struct RemoteAgentLayout {
     pub exclude: &'static [&'static str],
 }
 
-/// 二十一家的远程布局。远程主机按 Linux/macOS 默认路径假设(两平台一致,
+/// 二十二家的远程布局。远程主机按 Linux/macOS 默认路径假设(两平台一致,
 /// 均为 home 相对;OpenCode 的 XDG 变体、CODEX_HOME 这类 env 覆盖在远端
 /// 探测不到,阶段 1 不支持非默认远程布局)。
 pub const REMOTE_LAYOUTS: &[RemoteAgentLayout] = &[
@@ -162,6 +162,14 @@ pub const REMOTE_LAYOUTS: &[RemoteAgentLayout] = &[
             ".gemini/antigravity-cli/conversation_summaries.db",
             ".gemini/antigravity-cli/conversation_summaries.db-wal",
         ],
+        exclude: &[],
+    },
+    RemoteAgentLayout {
+        agent: AgentId::AntigravityIde,
+        // brain 就是数据根本身;拿它当 mount,with_custom_root 靠目录名识别
+        // (未同步时目录还不存在,is_dir 判据会失真)。projects.json 与 gemini 同源
+        mount: ".gemini/antigravity-ide/brain",
+        sync_paths: &[".gemini/antigravity-ide/brain", ".gemini/projects.json"],
         exclude: &[],
     },
     RemoteAgentLayout {
