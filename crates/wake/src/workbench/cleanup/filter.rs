@@ -3,9 +3,12 @@ use super::*;
 use gpui_component::Selectable as _;
 use std::collections::BTreeSet;
 
-const FILTER_WIDTH: Pixels = px(468.);
-const SOURCE_WIDTH: Pixels = px(232.);
-const AGENT_WIDTH: Pixels = px(153.);
+const FILTER_WIDTH: Zpx = Zpx(468.);
+/// 浮层上下要让出的高度:触发钮在页头里的下沿(约 64)+ 浮层自己上下的内边距 + 底部留白。
+/// 放大档位下内容会比窗口高,超出的部分在中间那段里滚,标题与 Clear / Done 始终看得见
+const FILTER_CHROME: Zpx = Zpx(112.);
+const SOURCE_WIDTH: Zpx = Zpx(232.);
+const AGENT_WIDTH: Zpx = Zpx(153.);
 
 fn source_choices(
     inventory: &CleanupInventory,
@@ -62,7 +65,7 @@ fn choice_button(id: impl Into<ElementId>, selected: bool, cx: &App) -> Button {
     let theme = cx.theme();
     Button::new(id)
         .small()
-        .h(px(28.))
+        .h(zpx(28.))
         .px(SPACE_SM)
         .rounded(RADIUS_BUTTON)
         .custom(
@@ -146,16 +149,16 @@ fn multi_choice(
 fn option_label(button: Button, label: &str, selected: bool, cx: &App) -> Button {
     button
         .relative()
-        .pr(px(20.))
+        .pr(zpx(20.))
         .label(clip_display(label, 24))
         .tooltip(label.to_owned())
         .child(div().flex_1())
         .child(
             icon("icons/check.svg")
-                .with_size(px(10.))
+                .with_size(zpx(10.))
                 .absolute()
-                .right(SPACE_XS - px(20.))
-                .top(px(9.))
+                .right(SPACE_XS - zpx(20.))
+                .top(zpx(9.))
                 .text_color(if selected {
                     cx.theme().primary
                 } else {
@@ -172,7 +175,7 @@ fn agent_label(
     cx: &App,
 ) -> Button {
     // 行首 6px 处放 15px 品牌图,文字从 6 + 15 + ICON_TEXT_GAP 起(与别处图标-文字同距)
-    let text_start = px(6.) + px(15.) + ICON_TEXT_GAP;
+    let text_start = zpx(6.) + zpx(15.) + ICON_TEXT_GAP;
     option_label(button, label, selected, cx)
         .pl(text_start)
         .child(
@@ -180,9 +183,9 @@ fn agent_label(
             // to the reserved leading slot without shifting text on selection.
             div()
                 .absolute()
-                .left(px(6.) - text_start)
-                .top(px(6.5))
-                .size(px(15.))
+                .left(zpx(6.) - text_start)
+                .top(zpx(6.5))
+                .size(zpx(15.))
                 .child(leading),
         )
 }
@@ -249,7 +252,7 @@ impl Workbench {
             .child(
                 h_flex()
                     .w_full()
-                    .p(px(2.))
+                    .p(zpx(2.))
                     .rounded(theme.radius)
                     .bg(theme.secondary)
                     .children(
@@ -325,7 +328,7 @@ impl Workbench {
                 )
                 .w(AGENT_WIDTH),
                 label,
-                img(agent.brand_icon(theme.mode.is_dark())).size(px(15.)),
+                img(agent.brand_icon(theme.mode.is_dark())).size(zpx(15.)),
                 selected,
                 cx,
             ));
@@ -369,7 +372,7 @@ impl Workbench {
         v_flex()
             .id("cleanup-filter-sources")
             .w_full()
-            .max_h((window.viewport_size().height - px(542.)).clamp(px(100.), px(264.)))
+            .max_h((window.viewport_size().height - zpx(542.)).clamp(zpx(100.), zpx(264.)))
             .overflow_y_scroll()
             .track_scroll(&this.cleanup.filter_scroll)
             .gap(SPACE_LG)
@@ -384,11 +387,11 @@ impl Workbench {
                 v.child(
                     v_flex()
                         .w_full()
-                        .min_h(px(80.))
+                        .min_h(zpx(80.))
                         .items_center()
                         .justify_center()
                         .gap(SPACE_SM)
-                        .child(icon("icons/search.svg").with_size(px(20.)))
+                        .child(icon("icons/search.svg").with_size(zpx(20.)))
                         .child(
                             div()
                                 .text_size(FONT_CAPTION)
@@ -416,7 +419,7 @@ impl Workbench {
             .on_click(move |_, window, cx| {
                 focus_input.update(cx, |input, cx| input.focus(window, cx));
             })
-            .child(icon("icons/search.svg").with_size(px(13.)).flex_shrink_0())
+            .child(icon("icons/search.svg").with_size(zpx(13.)).flex_shrink_0())
             .child(
                 Input::new(input)
                     .appearance(false)
@@ -430,10 +433,10 @@ impl Workbench {
                     Button::new("cleanup-clear-source-search")
                         .ghost()
                         .small()
-                        .size(px(24.))
+                        .size(zpx(24.))
                         .p_0()
                         .rounded(RADIUS_BUTTON)
-                        .icon(icon("icons/circle-x.svg").with_size(px(14.)))
+                        .icon(icon("icons/circle-x.svg").with_size(zpx(14.)))
                         .tooltip(t("Clear search"))
                         .on_click(move |_, window, cx| {
                             clear_input.update(cx, |input, cx| {
@@ -465,7 +468,7 @@ impl Workbench {
                     .rounded(RADIUS_BUTTON)
                     .icon(
                         icon("icons/sliders-horizontal.svg")
-                            .with_size(px(16.))
+                            .with_size(zpx(16.))
                             .text_color(if has_filters(&self.cleanup.options) {
                                 theme.primary
                             } else {
@@ -484,17 +487,12 @@ impl Workbench {
                 let options = &this.cleanup.options;
                 let popover = cx.entity();
                 let clear_entity = entity.clone();
-                v_flex()
-                    .w(FILTER_WIDTH)
+                let body = v_flex()
+                    .id("cleanup-filter-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
                     .gap(SPACE_LG)
-                    .child(
-                        h_flex().h(px(28.)).items_center().child(
-                            div()
-                                .text_size(FONT_HEADING)
-                                .font_semibold()
-                                .child(t("Filter")),
-                        ),
-                    )
                     .child(
                         v_flex()
                             .gap(SPACE_MD)
@@ -570,16 +568,30 @@ impl Workbench {
                                     )
                                     .when_some(this.cleanup.filter_input.as_ref(), |row, input| {
                                         row.child(
-                                            div().w(px(284.)).child(Self::cleanup_source_search(
+                                            div().w(zpx(284.)).child(Self::cleanup_source_search(
                                                 &entity, input, cx,
                                             )),
                                         )
                                     }),
                             )
                             .child(Self::cleanup_filter_sources(&entity, window, cx)),
+                    );
+                v_flex()
+                    .w(FILTER_WIDTH)
+                    .max_h(window.viewport_size().height - FILTER_CHROME)
+                    .gap(SPACE_LG)
+                    .child(
+                        h_flex().h(zpx(28.)).flex_shrink_0().items_center().child(
+                            div()
+                                .text_size(FONT_HEADING)
+                                .font_semibold()
+                                .child(t("Filter")),
+                        ),
                     )
+                    .child(body)
                     .child(
                         h_flex()
+                            .flex_shrink_0()
                             .gap(SPACE_MD)
                             .items_center()
                             .justify_between()
@@ -627,7 +639,7 @@ impl Workbench {
                                     cx,
                                 )
                                 .map(action_button)
-                                .min_w(px(80.))
+                                .min_w(zpx(80.))
                                 .bg(cx.theme().primary)
                                 .on_click(move |_, window, cx| {
                                     popover.update(cx, |state, cx| state.dismiss(window, cx))

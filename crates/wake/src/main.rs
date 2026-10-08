@@ -16,6 +16,7 @@ mod prefs;
 mod settings;
 mod theme;
 mod ui;
+mod ui_zoom;
 mod update;
 mod workbench;
 
@@ -59,8 +60,8 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
         TitlebarOptions {
             title: None,
             appears_transparent: true,
-            // 44px Wake 顶部净空中垂直居中 13.5px traffic lights。
-            traffic_light_position: Some(point(px(20.), px(15.))),
+            // 44px Wake 顶部净空中垂直居中 13.5px traffic lights;界面缩放时随之挪位
+            traffic_light_position: Some(ui_zoom::traffic_lights(ui_zoom::MAIN_LIGHTS_TOP)),
         }
     } else {
         TitlebarOptions {
@@ -74,7 +75,7 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<WindowHandle<Root>> {
             titlebar: Some(titlebar),
             window_bounds: Some(window_bounds),
             display_id,
-            window_min_size: Some(size(px(940.), px(620.))),
+            window_min_size: Some(main_window::MAIN_MIN_SIZE),
             // Linux 桌面按它归组窗口、匹配 .desktop(StartupWMClass=wake)
             app_id: Some("wake".into()),
             // Wayland 显式请求 CSD(2026-08-24 Codex review):默认的 Server
@@ -214,6 +215,8 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("up", PaletteUp, Some(PALETTE_CONTEXT)),
         KeyBinding::new("down", PaletteDown, Some(PALETTE_CONTEXT)),
     ];
+    // 界面缩放(全局,键位表在 ui_zoom,与设置页的提示同源)
+    keys.extend(ui_zoom::key_bindings());
     if cfg!(target_os = "macos") {
         keys.extend([
             KeyBinding::new("secondary-h", Hide, None),
@@ -269,6 +272,19 @@ pub(crate) fn app_menus() -> Vec<Menu> {
         ],
         disabled: false,
     });
+    // 界面缩放三项(全局监听器,见 ui_zoom::register)。
+    // 有了名为 View 的菜单,AppKit 会在它末尾自动补系统的 "Enter Full Screen"(macOS
+    // 惯例全屏就住在这里),所以 Window 菜单不再放 Wake 自己的全屏项,免得两项重复;
+    // ⌃⌘F 的 ToggleFullScreen 绑定照留
+    let view = Menu {
+        name: t("View").into(),
+        items: vec![
+            MenuItem::action(t("Zoom In"), ui_zoom::ZoomIn),
+            MenuItem::action(t("Zoom Out"), ui_zoom::ZoomOut),
+            MenuItem::action(t("Actual Size"), ui_zoom::ActualSize),
+        ],
+        disabled: false,
+    };
     // 名字必须**逐字**是 "Window",不能翻译:gpui_macos 的 create_menu_bar
     // 里是 `if menu_config.name == "Window"` 才调 `setWindowsMenu_`,译成
     // 「窗口」后 AppKit 就不再把它当系统窗口菜单,自动维护的已打开窗口列表
@@ -281,7 +297,6 @@ pub(crate) fn app_menus() -> Vec<Menu> {
         items: vec![
             MenuItem::action(t("Minimize"), Minimize),
             MenuItem::action(t("Zoom"), Zoom),
-            MenuItem::action(t("Toggle Full Screen"), ToggleFullScreen),
             MenuItem::separator(),
             MenuItem::action(t("Main Window"), ShowMainWindow),
         ],
@@ -299,6 +314,7 @@ pub(crate) fn app_menus() -> Vec<Menu> {
             disabled: false,
         }),
         edit,
+        Some(view),
         window,
     ]
     .into_iter()
@@ -316,6 +332,8 @@ fn main() {
         gpui_component::init(cx);
         // 必须在 set_menus 与开任何窗之前:两者的文案都在构造那一刻求值
         i18n::init();
+        // 缩放档位要赶在套主题(rem 跟着它)与开窗(traffic light 位置)之前
+        ui_zoom::init();
         theme::sync_appearance(None, cx);
 
         cx.on_action(|_: &Quit, cx| main_window::quit(cx));
@@ -336,6 +354,7 @@ fn main() {
         cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
         cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
         cx.on_action(|_: &ShowMainWindow, cx| show_main_window(cx, |_, _| {}));
+        ui_zoom::register(cx);
         // 无窗时的菜单兜底:有窗时这些 action 由 Workbench/Settings 的视图
         // 消费(元素级监听器默认截断传播,不会走到这);全部窗口关掉后菜单项
         // 只认全局监听器,没有就置灰——先把主窗拉回来再转发

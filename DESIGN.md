@@ -266,12 +266,23 @@ emoji 不再承担界面或正文结构图标职责。
 - 双模式使用同一语义结构，只有 token 值变化。
 - 最小窗口宽度必须保证标题、主操作和更多菜单不互相挤压。
 
+### 界面缩放(2026-10-08,issue #51)
+
+- 档位 100 / 110 / 125 / 150%,默认 100,只放大不缩小(用户 2026-10-08 定,去掉了 90 与 175);⌘+ / ⌘− / ⌘0(其他平台 Ctrl)、显示菜单的 Zoom In / Zoom Out / Actual Size、Settings → Appearance 的 Zoom 是同一个设置,两扇窗一起变。Appearance 是独立的设置页(Theme + Zoom 两行;主题行叫 Theme,页才叫 Appearance),不放 General(用户同日定)。快捷键在任何焦点下都有效(弹窗里、下拉刚关、设置窗在前);到头时什么也不做。
+- **整体等比放大**:字号、间距、圆角、图标、行高、栏宽都乘同一个倍数——100% 档的设计稿就是唯一的设计,本文所有尺寸都指 100% 档。只有三类不跟着放大:1px 发丝线、窗口尺寸(最小尺寸 940×620 只在开窗时定)、traffic lights 本身的大小。
+- traffic lights 跟着挪位:红灯中心压在放大后的侧栏中轴(26.75 × 倍数)上、在放大后的顶部净空里垂直居中——放大后的界面与 100% 档同构,中轴关系不变。
+- 窗口不够宽时两条定宽栏(侧栏、会话流)按比例收窄,给阅读区留 380,最窄退回 100% 档的宽度;设置窗的侧栏同理给内容区留 540。弹窗宽度与 ⌘K 面板高度夹在窗口之内。窄栏里放不下的内容一律截断(头部徽章、侧栏 agent 名),不允许互相压盖。
+- 换档时对话流与 Memory 列表按比例重量行高,阅读位置不跳。
+- 设置窗不随档位改变自己的大小(开着时换档,150% 下 820×600 只够放 100% 的三分之二内容),所以设置卡片放不下时**右侧控件换到标题下一行**、标题列至少 180;设置各页(General / Appearance / Data / Connect / Updates 走同一个页骨架)与设置侧栏都可滚动。Insights 的概览大数字放不下就换行;热力图与趋势图共用的周格在栏宽放不下 53 周时等比收窄格子(标签列不缩),一年始终完整、两图周列仍对齐。
+
 ## 实现守则
+
+- 尺寸一律经 `ui::Zpx`(常量)/ `ui::zpx(…)`(表达式)取值,不要再写裸 `px(…)`——裸 px 不会跟着缩放;只有 1px 发丝线、零值、已按倍数算好的实际宽度与测试例外。`ui.rs` 的 `bare_pixel_sizes_do_not_creep_back` 按文件卡裸 px 的个数,只许减不许增。
 
 - 先改标准结构和控件，再添加自定义材质面。
 - 颜色只改 `theme.rs`；图标必须登记到 `assets.rs`，路径包含后缀(`.svg` / `.png`,漏后缀 = 静默空白)。
 - 所有交互元素先设置 `.id()` 再绑定点击或滚动行为。
-- 每个窗口根节点在内容之后必须挂 `ui::overlay_layers(window, cx)`(封装 `Root::render_dialog_layer`、`Root::render_notification_layer` 与"点面板外关闭"的 sentinel,顺序即契约);普通弹窗经 `ui::open_closable_dialog` 打开,确认类用 `open_alert_dialog`。
+- 每个窗口根节点在内容之后必须挂 `ui::overlay_layers(window, cx)`(封装 `Root::render_dialog_layer`、`Root::render_notification_layer` 与"点面板外关闭"的 sentinel,顺序即契约);普通弹窗经 `ui::open_closable_dialog` 打开,确认类用 `ui::open_alert`(两者都收设计稿宽度:随缩放放大、夹进窗口,内边距也随缩放;不要裸调 `window.open_dialog` / `open_alert_dialog`)。
 - 对原始 Agent 数据目录继续只读；任何视觉改造不得破坏刷新、搜索跳转、恢复或删除语义。
 - 术语统一:用户可见文案一律说 **Refresh** 与 **Session**,不出现 scan / rescan / rebuild / index(这些只保留在数据层内部命名中)。
 

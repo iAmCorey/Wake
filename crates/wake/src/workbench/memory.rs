@@ -66,12 +66,19 @@ pub(super) struct MemoryState {
     sync_pending: bool,
 }
 
+impl MemoryState {
+    /// 换过缩放档位:行高按旧倍数量过,按比例重量(见 Workbench::sync_zoom)
+    pub(super) fn remeasure(&self) {
+        self.list.remeasure();
+    }
+}
+
 impl Default for MemoryState {
     fn default() -> Self {
         Self {
             docs: Vec::new(),
             rows: Vec::new(),
-            list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(200.)),
+            list: gpui::ListState::new(0, gpui::ListAlignment::Top, zpx(200.)),
             loading: false,
             selected: None,
             loaded: None,
@@ -358,8 +365,8 @@ impl Workbench {
                 } else {
                     empty_state_card(
                         "icons/file-text.svg",
-                        px(58.),
-                        px(24.),
+                        zpx(58.),
+                        zpx(24.),
                         t("No memory files yet"),
                         t("Agents write these as they work: Claude Code's auto-memory, Codex's memories, ZCode's project memory. They show up here once they exist."),
                         cx,
@@ -374,7 +381,7 @@ impl Workbench {
             .h_full()
             .child(
                 v_flex()
-                    .w(SESSION_STREAM_WIDTH)
+                    .w(self.columns().1)
                     .h_full()
                     .flex_shrink_0()
                     .bg(theme.colors.list)
@@ -512,7 +519,7 @@ impl Workbench {
                                     .text_color(theme.muted_foreground)
                                     .child(
                                         img(d.agent.brand_icon(theme.mode.is_dark()))
-                                            .size(px(15.))
+                                            .size(zpx(15.))
                                             .flex_shrink_0(),
                                     )
                                     // 项目徽章与会话行同款(muted 胶囊;用户级 / 没归属的
@@ -575,7 +582,7 @@ impl Workbench {
             crate::tf!("Updated {}", abs_date(doc.updated_at)).into();
         let mut lead: Vec<AnyElement> = vec![
             img(doc.agent.brand_icon(dark))
-                .size(px(15.))
+                .size(zpx(15.))
                 .flex_shrink_0()
                 .into_any_element(),
             div()
@@ -594,7 +601,7 @@ impl Workbench {
             Button::new("memory-reveal")
                 .ghost()
                 .rounded(RADIUS_BUTTON)
-                .icon(icon("icons/folder.svg").with_size(px(16.)))
+                .icon(icon("icons/folder.svg").with_size(zpx(16.)))
                 .tooltip(reveal_in_fm())
                 .on_click(move |_, _, _| {
                     terminal::reveal_in_file_manager(&reveal_path);
@@ -603,7 +610,7 @@ impl Workbench {
             Button::new("memory-copy-path")
                 .ghost()
                 .rounded(RADIUS_BUTTON)
-                .icon(icon("icons/copy.svg").with_size(px(16.)))
+                .icon(icon("icons/copy.svg").with_size(zpx(16.)))
                 .tooltip(t("Copy path"))
                 .on_click(move |_, _, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
@@ -616,7 +623,7 @@ impl Workbench {
                 .gap(ICON_TEXT_GAP)
                 .child(
                     icon("icons/file-text.svg")
-                        .with_size(px(12.))
+                        .with_size(zpx(12.))
                         .flex_shrink_0(),
                 )
                 .child(div().min_w_0().truncate().child(tilde_path(&source_path)))
@@ -627,7 +634,7 @@ impl Workbench {
                 .items_center()
                 .child(
                     icon("icons/calendar.svg")
-                        .with_size(px(12.))
+                        .with_size(zpx(12.))
                         .flex_shrink_0(),
                 )
                 .child(

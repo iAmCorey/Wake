@@ -24,6 +24,10 @@ use std::time::Duration;
 
 /// 首次启动的主窗尺寸
 const MAIN_SIZE: Size<Pixels> = size(px(1180.), px(760.));
+/// 两扇窗的最小尺寸。gpui 只在开窗那一刻设它(macOS `setContentMinSize_`),运行时改不了,
+/// 所以界面放大后定宽栏要给其余部分让位(`ui::rails_factor`),让位的量从这里推出
+pub const MAIN_MIN_SIZE: Size<Pixels> = size(px(940.), px(620.));
+pub const SETTINGS_MIN_SIZE: Size<Pixels> = size(px(720.), px(520.));
 
 /// 主窗句柄。无窗时的菜单兜底与 Window → Main Window 据此找主窗,从属窗口
 /// 据此取主窗几何

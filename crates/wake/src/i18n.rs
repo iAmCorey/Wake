@@ -624,6 +624,7 @@ mod tests {
             include_str!("workbench/memory.rs"),
             include_str!("settings.rs"),
             include_str!("main.rs"),
+            include_str!("ui_zoom.rs"),
             include_str!("index_lock.rs"),
             include_str!("markdown_links.rs"),
             include_str!("format.rs"),

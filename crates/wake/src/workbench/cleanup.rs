@@ -74,8 +74,8 @@ impl Default for CleanupState {
         }
     }
 }
-const CLEANUP_DATE_WIDTH: Pixels = px(112.);
-const CLEANUP_SIZE_WIDTH: Pixels = px(88.);
+const CLEANUP_DATE_WIDTH: Zpx = Zpx(112.);
+const CLEANUP_SIZE_WIDTH: Zpx = Zpx(88.);
 
 fn bytes(n: u64) -> String {
     if n == 0 {
@@ -274,7 +274,7 @@ fn cleanup_review_item(
                 .min_w_0()
                 .child(
                     img(item.root.agent.brand_icon(theme.mode.is_dark()))
-                        .size(px(16.))
+                        .size(zpx(16.))
                         .flex_shrink_0(),
                 )
                 .child(div().flex_1().min_w_0().child(cleanup_title(
@@ -309,7 +309,7 @@ fn cleanup_review_item(
                 .child(
                     Button::new(SharedString::from(format!("review-files-{key}")))
                         .ghost()
-                        .h(px(28.))
+                        .h(zpx(28.))
                         .px(SPACE_SM)
                         .text_size(FONT_CAPTION)
                         .rounded(RADIUS_BUTTON)
@@ -319,7 +319,7 @@ fn cleanup_review_item(
                             } else {
                                 "icons/chevron-right.svg"
                             })
-                            .with_size(px(12.)),
+                            .with_size(zpx(12.)),
                         )
                         .label(crate::tf!("Source files ({})", files.len()))
                         .on_click(move |_, window, _| {
@@ -353,7 +353,7 @@ fn cleanup_review_item(
                                 v_flex()
                                     .flex_1()
                                     .min_w_0()
-                                    .gap(px(2.))
+                                    .gap(zpx(2.))
                                     .child(cleanup_path(
                                         path,
                                         SharedString::from(format!(
@@ -430,14 +430,14 @@ fn cleanup_session_title(
         .when(pinned, |v| {
             v.child(
                 icon("icons/pin-filled.svg")
-                    .with_size(px(11.))
+                    .with_size(zpx(11.))
                     .text_color(cx.theme().primary),
             )
         })
         .when(starred, |v| {
             v.child(
                 icon("icons/star-filled.svg")
-                    .with_size(px(11.))
+                    .with_size(zpx(11.))
                     .text_color(rgb(crate::theme::STAR_YELLOW)),
             )
         })
@@ -684,14 +684,15 @@ impl Workbench {
     fn confirm_cleanup(&self, review: CleanupReview, window: &mut Window, cx: &mut Context<Self>) {
         if review.ready.is_empty() {
             let entity = cx.entity();
-            open_closable_dialog(window, cx, move |dialog, window, cx| {
+            open_closable_dialog(window, cx, 640., move |dialog, window, cx| {
                 let entity = entity.clone();
-                dialog.title(t("Unable to clean up these sessions")).width(px(640.))
+                dialog.title(t("Unable to clean up these sessions"))
                     .child(v_flex().gap(SPACE_MD)
                         .child(div().text_size(FONT_CAPTION).text_color(cx.theme().muted_foreground)
                             .child(t("The selected sessions could not be verified. No files were moved.")))
+                        // 预留量按 100% 档估的,放大后可能比窗口还高:下限保证列表看得见几行
                         .child(v_flex().id("cleanup-blocked-list")
-                            .max_h((window.viewport_size().height - px(380.)).min(px(360.)))
+                            .max_h((window.viewport_size().height - zpx(380.)).clamp(zpx(96.), zpx(360.)))
                             .overflow_y_scroll()
                             .child(cleanup_review_issues(&review.skipped, cx)))
                         .child(h_flex().justify_end().child(
@@ -709,7 +710,7 @@ impl Workbench {
         let skipped = Rc::new(review.skipped);
         let expanded = Rc::new(std::cell::RefCell::new(HashSet::new()));
         let entity = cx.entity();
-        window.open_alert_dialog(cx, move |dialog, window, cx| {
+        open_alert(window, cx, 640., move |dialog, window, cx| {
             let items = chosen.clone();
             let entity = entity.clone();
             let theme = cx.theme();
@@ -721,7 +722,6 @@ impl Workbench {
             };
             dialog
                 .title(div().text_size(FONT_HEADING).font_semibold().child(title))
-                .width(px(640.))
                 .confirm()
                 .button_props(
                     gpui_component::dialog::DialogButtonProps::default()
@@ -804,7 +804,11 @@ impl Workbench {
                         .child(
                             v_flex()
                                 .id("cleanup-review-files")
-                                .max_h((window.viewport_size().height - px(420.)).min(px(300.)))
+                                // 同上:放大档位下给列表留一个正的下限
+                                .max_h(
+                                    (window.viewport_size().height - zpx(420.))
+                                        .clamp(zpx(96.), zpx(300.)),
+                                )
                                 .overflow_y_scroll()
                                 .when(!skipped.is_empty(), |v| {
                                     v.child(div().font_medium().child(t("To delete")))
@@ -1041,7 +1045,7 @@ impl Workbench {
             .ghost()
             .disabled(state.busy)
             .rounded(RADIUS_BUTTON)
-            .icon(icon("icons/arrow-up-down.svg").with_size(px(16.)))
+            .icon(icon("icons/arrow-up-down.svg").with_size(zpx(16.)))
             .tooltip(crate::tf!(
                 "Sort by {} · {}",
                 sort_label(current),
@@ -1084,7 +1088,7 @@ impl Workbench {
                             }),
                     );
                 }
-                menu.min_w(px(180.))
+                menu.min_w(zpx(180.))
             })
             .anchor(Anchor::TopRight);
         let chosen = self.cleanup_chosen();
@@ -1183,7 +1187,7 @@ impl Workbench {
                         Button::new("cleanup-refresh")
                             .ghost()
                             .rounded(RADIUS_BUTTON)
-                            .icon(icon("icons/refresh-cw.svg").with_size(px(16.)))
+                            .icon(icon("icons/refresh-cw.svg").with_size(zpx(16.)))
                             .tooltip(t("Refresh"))
                             .disabled(state.loading || state.busy)
                             .on_click(
@@ -1200,7 +1204,7 @@ impl Workbench {
                 .min_h_0()
                 .child(
                     h_flex()
-                        .h(px(44.))
+                        .h(zpx(44.))
                         .flex_shrink_0()
                         .px(SPACE_XXL)
                         .gap(SPACE_MD)
@@ -1303,8 +1307,8 @@ impl Workbench {
                     v.child(v_flex().flex_1().items_center().justify_center().child(
                         empty_state_card(
                             "icons/inbox.svg",
-                            px(58.),
-                            px(24.),
+                            zpx(58.),
+                            zpx(24.),
                             t("No sessions match these filters"),
                             t("Try a different agent, project, or filter."),
                             cx,

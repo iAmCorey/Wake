@@ -97,6 +97,7 @@ icons!(
     "arrow-up-down",
     "brush-cleaning",
     "sliders-horizontal",
+    "palette",
     "check",
     "copy",
     "pin-filled",

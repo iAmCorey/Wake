@@ -34,7 +34,7 @@ Corey 本人(独立开发者,主力工具 Claude Code 与 Codex,中文为主)。
 
 ## Brand Commitments
 
-名称 Wake(2026-08-14 由 Vibex 更名;取「船迹」——agent 驶过的痕迹,兼「唤醒」恢复会话之意)。界面语言以英文为源(2026-08-14 由中文切换,用户反馈中文 UI 词汇观感生硬),0.5.2 起经 i18n 层出译文、内置简体中文、首次启动跟随系统语言,Settings → General 可固定某一种。视觉基准(用户 2026-08-14 确认):现代 macOS 原生规范,工艺对标 Things / Bear(优雅轻盈的原生感);支持跟随系统或固定浅/深外观。agent 品牌色作为功能性识别色保留(Claude 橙 #D97757、Codex 绿 #12A06B 等,见 models.rs)。Session locations 自 0.2.9 起归入独立 Settings 窗口,主界面只保留齿轮入口;Settings 固定为 General / Locations / Remote hosts / Connect / Data / Updates / About(Remote hosts 为 0.4.0 新增,Connect 为 0.5.0 新增),不提供默认 “Open In” 终端选择。
+名称 Wake(2026-08-14 由 Vibex 更名;取「船迹」——agent 驶过的痕迹,兼「唤醒」恢复会话之意)。界面语言以英文为源(2026-08-14 由中文切换,用户反馈中文 UI 词汇观感生硬),0.5.2 起经 i18n 层出译文、内置简体中文、首次启动跟随系统语言,Settings → General 可固定某一种。视觉基准(用户 2026-08-14 确认):现代 macOS 原生规范,工艺对标 Things / Bear(优雅轻盈的原生感);支持跟随系统或固定浅/深外观;界面整体可放大到 110% / 125% / 150%(2026-10-08,issue #51:⌘+ / ⌘− / ⌘0、显示菜单、Settings → Appearance,文字、控件、侧栏与对话一起放大)。agent 品牌色作为功能性识别色保留(Claude 橙 #D97757、Codex 绿 #12A06B 等,见 models.rs)。Session locations 自 0.2.9 起归入独立 Settings 窗口,主界面只保留齿轮入口;Settings 固定为 General / Appearance / Locations / Remote hosts / Connect / Data / Updates / About(Appearance 为 2026-10-08 新增:外观与界面缩放,General 只剩语言)(Remote hosts 为 0.4.0 新增,Connect 为 0.5.0 新增),不提供默认 “Open In” 终端选择。
 
 ## Evidence on Hand
 

@@ -136,6 +136,12 @@ It prints what the MCP tools return, asserted byte for byte in the test suite ap
 
 To make an agent reach for it without being told, install the bundled skill with `npx skills add iAmCorey/Wake` (or copy `skills/wake/` into `~/.claude/skills/wake/`). Claude Code can go one step further and receive the project's recent sessions the moment a session starts, through a `SessionStart` hook that runs `wake-cli` — the recipe is in [docs/cli.md](docs/cli.md#teaching-an-agent-to-use-it).
 
+## Zoom
+
+Everything in Wake — text, controls, the sidebar and the transcript — can be
+enlarged to 110%, 125% or 150% with ⌘+ / ⌘− / ⌘0 (Ctrl on Linux and Windows),
+the **View** menu on macOS, or **Settings → Appearance**. The level is remembered.
+
 ## Language
 
 Wake's interface follows your system language on first launch and falls back to
@@ -153,7 +159,7 @@ welcome. See [crates/wake/locales/README.md](crates/wake/locales/README.md).
 - Credential files (`auth.json` and friends) are never read
 - Remote hosts are mirrored read-only with `rsync` over your existing SSH setup: only session data and its sidecar files come across (never credentials), nothing on the remote machine is ever written, and the mirror lives inside Wake's own data directory (`remotes/<host>/`), so removing the host removes it
 - No background network requests — the only network actions are a user-initiated update check against Wake's public GitHub Release metadata and, if you configure remote hosts, SSH/rsync to those hosts on launch, refresh, and Sync now; session data is never sent anywhere else
-- Wake's own index lives at `~/Library/Application Support/wake/wake.db` (Linux: `~/.local/share/wake`, Windows: `%LOCALAPPDATA%\wake`) and can be rebuilt from scratch at any time (stars/pins live in a separate table and survive rebuilds). Three small preference files (`appearance`, `language`, `window.json`) sit beside it on macOS, under `~/.config/wake` on Linux and `%APPDATA%\wake` on Windows; Open In and export-folder choices live in the index database's `prefs` table
+- Wake's own index lives at `~/Library/Application Support/wake/wake.db` (Linux: `~/.local/share/wake`, Windows: `%LOCALAPPDATA%\wake`) and can be rebuilt from scratch at any time (stars/pins live in a separate table and survive rebuilds). Four small preference files (`appearance`, `language`, `zoom`, `window.json`) sit beside it on macOS, under `~/.config/wake` on Linux and `%APPDATA%\wake` on Windows; Open In and export-folder choices live in the index database's `prefs` table
 
 ## Performance
 

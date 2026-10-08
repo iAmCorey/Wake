@@ -78,11 +78,11 @@ impl Workbench {
         div()
             .w_full()
             .px(SPACE_LG)
-            .py(px(2.))
+            .py(zpx(2.))
             .child(
                 list_row_shell(
                     SharedString::from(format!("cleanup-{key}")),
-                    px(60.),
+                    zpx(60.),
                     selected,
                     theme,
                 )
@@ -153,14 +153,14 @@ impl Workbench {
                                         .text_color(theme.muted_foreground)
                                         .child(
                                             img(meta.agent.brand_icon(theme.mode.is_dark()))
-                                                .size(px(15.))
+                                                .size(zpx(15.))
                                                 .flex_shrink_0(),
                                         )
                                         .child(
                                             div()
                                                 .id(("cleanup-source", ix))
                                                 .min_w_0()
-                                                .max_w(px(128.))
+                                                .max_w(zpx(128.))
                                                 .child(badge(
                                                     meta.project_name.clone(),
                                                     theme.muted,
