@@ -1,11 +1,11 @@
 # Changelog
 
-## [Unreleased]
+## [0.8.7] — 2026-10-09
 
 - New: Kilo Code sessions are indexed — from the database the VS Code extension, the `kilo` CLI and the JetBrains plugin share (`~/.local/share/kilo/kilo.db`, read-only), and from the legacy extension's task folders in VS Code and other VS Code-based editors. Titles, models, thinking, tool calls and token counts included; legacy sub-tasks are listed under the task that started them, and a legacy task the new extension has imported is listed once. Open In continues a session with `kilo --session` in its project directory (legacy tasks have no Open In). On remote hosts only the legacy tasks are mirrored, since `kilo.db` also holds Kilo's credentials (#59, thanks @ICEY4040727)
-- Fix: OpenCode sessions show the slash command that started a sub-agent instead of an empty message, and on Windows they are grouped under the same project as other agents' sessions
 - New: Enlarge the whole interface to 110%, 125% or 150% with ⌘+ / ⌘− / ⌘0 (Ctrl on Linux and Windows), the new View menu, or the new Settings → Appearance page, which also takes over the light / dark choice from General; the level is remembered (#51, thanks @kyomind)
 - New: Antigravity conversations are read in full from the plain-text transcripts recent versions of the desktop app and the IDE save — messages, thinking, tool calls with their output, the model and pasted images — and conversations from the IDE carry an IDE badge. Conversations without a transcript are still listed from Antigravity's index, as before. The agent is now called Antigravity instead of Antigravity CLI (#52, thanks @iroha3)
+- Fix: OpenCode sessions show the slash command that started a sub-agent instead of an empty message, and on Windows they are grouped under the same project as other agents' sessions
 - Fix: Kimi Code sessions are listed on Windows, and sessions from the Kimi Code desktop app show the assistant's replies and thinking instead of only your prompts (#61, thanks @noohpyt)
 - Fix: Kimi Code CLI sessions show the assistant's replies, thinking and tool calls too, and background-task notifications and other system messages no longer appear as things you typed
 - Fix: Forked Kimi Code sessions are listed under the session they came from without repeating its history, archived Kimi sessions are marked archived, renaming or archiving a session in Kimi shows up in Wake right away, sessions imported from the old kimi-cli are listed, and `KIMI_CODE_HOME` is respected
