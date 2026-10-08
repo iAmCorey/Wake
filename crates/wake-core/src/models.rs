@@ -26,13 +26,14 @@ pub enum AgentId {
     Zcode,
     CraftAgents,
     Devin,
+    Kilo,
 }
 
 impl AgentId {
-    /// 全部二十一家,**枚举声明序**(= Ord = 用户钉的侧栏展示序;面板成组、
+    /// 全部二十二家,**枚举声明序**(= Ord = 用户钉的侧栏展示序;面板成组、
     /// 表单下拉共用同一顺序)。曾误抄 create_adapters 的构造序,下拉与侧栏
     /// 排序当场对不上——契约测试现在卡它与 Ord 一致
-    pub const ALL: [AgentId; 21] = [
+    pub const ALL: [AgentId; 22] = [
         AgentId::ClaudeCode,
         AgentId::Codex,
         AgentId::Grok,
@@ -54,6 +55,7 @@ impl AgentId {
         AgentId::Zcode,
         AgentId::CraftAgents,
         AgentId::Devin,
+        AgentId::Kilo,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -79,6 +81,7 @@ impl AgentId {
             AgentId::Zcode => "zcode",
             AgentId::CraftAgents => "craft-agents",
             AgentId::Devin => "devin",
+            AgentId::Kilo => "kilo",
         }
     }
 
@@ -105,6 +108,7 @@ impl AgentId {
             "zcode" => Some(AgentId::Zcode),
             "craft-agents" => Some(AgentId::CraftAgents),
             "devin" => Some(AgentId::Devin),
+            "kilo" => Some(AgentId::Kilo),
             _ => None,
         }
     }
@@ -123,7 +127,7 @@ impl AgentId {
             AgentId::Omp => "Oh My Pi",
             AgentId::Grok => "Grok Build",
             AgentId::Kimi => "Kimi Code",
-            AgentId::Antigravity => "Antigravity CLI",
+            AgentId::Antigravity => "Antigravity",
             AgentId::Dsh => "DeepSeek Harness",
             AgentId::Hermes => "Hermes Agent",
             AgentId::Openclaw => "OpenClaw",
@@ -132,6 +136,7 @@ impl AgentId {
             AgentId::Zcode => "ZCode",
             AgentId::CraftAgents => "Craft Agents",
             AgentId::Devin => "Devin",
+            AgentId::Kilo => "Kilo Code",
         }
     }
 
@@ -223,6 +228,15 @@ impl AgentId {
                     "brands/devin.png"
                 } else {
                     "brands/devin-light.png"
+                }
+            }
+            // lobe-icons 的 kilocode 字形(方框里的像素 "kilo",与官方标志同形),只有单色版,
+            // 同 Cursor / Devin 按模式取白版或深墨版
+            AgentId::Kilo => {
+                if dark {
+                    "brands/kilo.png"
+                } else {
+                    "brands/kilo-light.png"
                 }
             }
         }
@@ -970,7 +984,7 @@ pub const UNTITLED: &str = "Untitled";
 /// 会话 key 的唯一构造点:本地 `{agent}:{native_id}`,远程
 /// `{agent}:{host}:{native_id}`。scanner 的墓碑查询、watcher 的幸存者反查、
 /// 远程装饰器的 key 改写都走这里——"远程 key 长什么样"只此一处知识。
-/// (二十一家 adapter 的本地两段构造保留各自 `format!`,它们从不涉及 host。)
+/// (二十二家 adapter 的本地两段构造保留各自 `format!`,它们从不涉及 host。)
 pub fn session_key(agent: AgentId, host: &str, native_id: &str) -> String {
     if host.is_empty() {
         format!("{}:{native_id}", agent.as_str())

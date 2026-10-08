@@ -39,6 +39,11 @@ impl Drop for ImageDecodeBudgetGuard {
     }
 }
 
+/// 预算还放不放得下 `bytes`(只看不扣):读文件之前先问,放不下的连读都不读
+fn image_decode_budget_allows(bytes: usize) -> bool {
+    IMAGE_DECODE_REMAINING.with(|remaining| remaining.get().is_none_or(|left| bytes <= left))
+}
+
 fn consume_image_decode_budget(bytes: usize) -> bool {
     IMAGE_DECODE_REMAINING.with(|remaining| match remaining.get() {
         Some(left) if bytes <= left => {
@@ -68,6 +73,26 @@ pub fn project_name_of(cwd: &str) -> String {
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "Unknown project".to_string())
+}
+
+/// 项目路径的规范形。Windows 形状的路径(`c:\…`、`C:/…`、`//server/…`)盘符改大写,
+/// 在 Windows 上斜杠换成反斜杠:VS Code 的 fsPath 写小写盘符,OpenCode 系把目录存成
+/// 正斜杠(它自己读出来时再换回),原样用就与别家记下的 `C:\…` 分成两个项目。
+/// POSIX 路径(含远程镜像来的)原样
+pub fn canonical_project_path(path: &str) -> String {
+    let drive = matches!(path.as_bytes(), [d, b':', b'\\' | b'/', ..] if d.is_ascii_alphabetic());
+    if !drive && !path.starts_with("//") {
+        return path.to_string();
+    }
+    let mut out = if cfg!(windows) {
+        path.replace('/', "\\")
+    } else {
+        path.to_string()
+    };
+    if drive {
+        out[..1].make_ascii_uppercase();
+    }
+    out
 }
 
 /// user 消息的 kind:注入内容归 Meta 折叠
@@ -631,6 +656,56 @@ pub fn decode_data_uri(uri: &str) -> Option<ImageAttachment> {
     decode_base64_image(data, Some(media_type))
 }
 
+/// 会话自己目录里的图片文件(Antigravity 的 `.user_uploaded/`)→ 图片附件。只给 adapter 自己
+/// 枚举出来的文件用,**不要拿转录内容里写的路径来调**——那条路一律不解引用本地路径(见
+/// `image_parser_never_dereferences_local_paths`)。解开符号链接后必须仍在 `session` 目录里:
+/// 远程镜像原样保留符号链接,指到外面的会读到本机的文件(中间哪一层目录是链接都一样)。
+/// 类型按字节嗅探;解码预算与 base64 那条路同一份(调用方的解析要开着
+/// `transcript_image_decode_budget`),按 stat 到的大小先问预算再读
+pub fn image_from_session_file(
+    session: &std::path::Path,
+    path: &std::path::Path,
+) -> Option<ImageAttachment> {
+    let real = std::fs::canonicalize(path).ok()?;
+    if !real.starts_with(std::fs::canonicalize(session).ok()?) {
+        return None;
+    }
+    let len = std::fs::metadata(&real).ok()?.len();
+    if len == 0 || len > MAX_IMAGE_BYTES || !image_decode_budget_allows(len as usize) {
+        return None;
+    }
+    attachment_from_bytes(std::fs::read(&real).ok()?, None)
+}
+
+/// URI / 目录名里的 percent-encoding(`%2F` → `/`)。逐字节解,不成对的 `%` 原样留着,
+/// 后面跟着多字节字符也不会切坏(按 `&str` 下标切会 panic)
+pub fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut ix = 0;
+    while ix < bytes.len() {
+        if bytes[ix] == b'%' && ix + 2 < bytes.len() {
+            if let (Some(high), Some(low)) = (hex_digit(bytes[ix + 1]), hex_digit(bytes[ix + 2])) {
+                out.push((high << 4) | low);
+                ix += 3;
+                continue;
+            }
+        }
+        out.push(bytes[ix]);
+        ix += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_digit(c: u8) -> Option<u8> {
+    Some(match c {
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        b'A'..=b'F' => c - b'A' + 10,
+        _ => return None,
+    })
+}
+
 fn attachment_from_bytes(bytes: Vec<u8>, media_type: Option<&str>) -> Option<ImageAttachment> {
     if bytes.is_empty() || bytes.len() as u64 > MAX_IMAGE_BYTES {
         return None;
@@ -1036,6 +1111,32 @@ pub fn make_preview(input: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percent_decode_walks_bytes() {
+        assert_eq!(percent_decode("/Users/a%20b/%E4%B8%AD"), "/Users/a b/中");
+        // 不成对的 `%`、后面跟多字节字符的 `%` 原样留着,不 panic
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%中%z9"), "%中%z9");
+    }
+
+    /// Windows 形状的项目路径换成别家记的写法:盘符大写、Windows 上正斜杠换反斜杠;
+    /// POSIX 路径(含远程镜像来的)原样
+    #[test]
+    fn project_paths_are_canonical() {
+        assert_eq!(canonical_project_path("/Users/x/app"), "/Users/x/app");
+        assert_eq!(canonical_project_path(r"c:\Users\x\app"), r"C:\Users\x\app");
+        if cfg!(windows) {
+            assert_eq!(canonical_project_path("c:/Users/x/app"), r"C:\Users\x\app");
+            assert_eq!(
+                canonical_project_path("//nas/share/app"),
+                r"\\nas\share\app"
+            );
+        } else {
+            assert_eq!(canonical_project_path("c:/Users/x/app"), "C:/Users/x/app");
+            assert_eq!(canonical_project_path("//nas/share/app"), "//nas/share/app");
+        }
+    }
 
     #[test]
     fn clip_chars_counts_characters() {

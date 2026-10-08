@@ -1,0 +1,22 @@
+[
+ {
+  "role": "user",
+  "content": [
+   {
+    "type": "text",
+    "text": "<task>\n迁移过的旧任务\n</task>"
+   }
+  ],
+  "ts": 1736600001000
+ },
+ {
+  "role": "assistant",
+  "content": [
+   {
+    "type": "text",
+    "text": "旧任务的回答"
+   }
+  ],
+  "ts": 1736600002000
+ }
+]

@@ -1,0 +1,22 @@
+[
+ {
+  "role": "user",
+  "content": [
+   {
+    "type": "text",
+    "text": "<task>\nCursor 里跑的旧任务\n</task>"
+   }
+  ],
+  "ts": 1736700001000
+ },
+ {
+  "role": "assistant",
+  "content": [
+   {
+    "type": "text",
+    "text": "好"
+   }
+  ],
+  "ts": 1736700002000
+ }
+]

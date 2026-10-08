@@ -134,14 +134,14 @@ fn batch_sessions(batch: &CleanupBatch) -> usize {
         .sum()
 }
 
-const HISTORY_ROW_HEIGHT: Pixels = px(88.);
+const HISTORY_ROW_HEIGHT: Zpx = Zpx(88.);
 
 fn history_status(status: Outcome, cx: &App) -> impl IntoElement {
     let color = status.color(cx);
     div()
         .flex_shrink_0()
         .px(SPACE_SM)
-        .py(px(3.))
+        .py(zpx(3.))
         .rounded(RADIUS_BUTTON)
         .bg(color.opacity(0.08))
         .text_size(FONT_LABEL)
@@ -177,14 +177,14 @@ impl Workbench {
             .items_start()
             .window_control_area(WindowControlArea::Drag)
             .child(
-                div().pt(px(24.)).child(
+                div().pt(zpx(24.)).child(
                     Button::new("cleanup-history-back")
                         .ghost()
                         .map(action_button)
                         .with_size(gpui_component::Size::Medium)
-                        .w(px(32.))
+                        .w(zpx(32.))
                         .px_0()
-                        .icon(icon("icons/chevron-left.svg").with_size(px(16.)))
+                        .icon(icon("icons/chevron-left.svg").with_size(zpx(16.)))
                         .tooltip(parent)
                         .disabled(self.cleanup.busy)
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -236,8 +236,8 @@ impl Workbench {
         let count = self.cleanup.history.len();
         let available_height =
             (window.viewport_size().height - LIBRARY_IDENTITY_HEIGHT - SPACE_SM - SPACE_XXL)
-                .max(HISTORY_ROW_HEIGHT);
-        let panel_height = (HISTORY_ROW_HEIGHT * count as f32 + px(2.)).min(available_height);
+                .max(HISTORY_ROW_HEIGHT.get());
+        let panel_height = (HISTORY_ROW_HEIGHT * count as f32 + zpx(2.)).min(available_height);
         v_flex()
             .flex_1()
             .min_h_0()
@@ -250,8 +250,8 @@ impl Workbench {
                 view.child(div().flex_1().flex().items_center().justify_center().child(
                     empty_state_card(
                         "icons/brush-cleaning.svg",
-                        px(58.),
-                        px(26.),
+                        zpx(58.),
+                        zpx(26.),
                         t("No cleanup history yet"),
                         t("Your cleanup results will appear here."),
                         cx,
@@ -358,14 +358,14 @@ impl Workbench {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .size(px(36.))
+                    .size(zpx(36.))
                     .flex_shrink_0()
                     .rounded(theme.radius)
                     .bg(theme.background)
                     .when_some(first, |view, record| {
                         view.child(
                             img(record.candidate.root.agent.brand_icon(theme.mode.is_dark()))
-                                .size(px(22.)),
+                                .size(zpx(22.)),
                         )
                     }),
             )
@@ -373,7 +373,7 @@ impl Workbench {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap(px(6.))
+                    .gap(zpx(6.))
                     .child(
                         div()
                             .id(("cleanup-history-title", ix))
@@ -402,7 +402,7 @@ impl Workbench {
                 v_flex()
                     .flex_shrink_0()
                     .items_end()
-                    .gap(px(6.))
+                    .gap(zpx(6.))
                     .child(
                         div()
                             .text_size(FONT_HEADING)
@@ -413,7 +413,7 @@ impl Workbench {
             )
             .child(
                 icon("icons/chevron-right.svg")
-                    .with_size(px(14.))
+                    .with_size(zpx(14.))
                     .text_color(theme.muted_foreground)
                     .flex_shrink_0(),
             )
@@ -447,7 +447,7 @@ impl Workbench {
                                 .w_full()
                                 .max_w(READER_MAX_WIDTH)
                                 .pt(SPACE_SM)
-                                .pb(px(40.))
+                                .pb(zpx(40.))
                                 .gap(SPACE_XXL)
                                 .child(
                                     v_flex()
@@ -466,13 +466,13 @@ impl Workbench {
                                                         .flex()
                                                         .items_center()
                                                         .justify_center()
-                                                        .size(px(36.))
+                                                        .size(zpx(36.))
                                                         .flex_shrink_0()
                                                         .rounded(theme.radius)
                                                         .bg(status.color(cx).opacity(0.08))
                                                         .child(
                                                             icon(status.icon())
-                                                                .with_size(px(18.))
+                                                                .with_size(zpx(18.))
                                                                 .text_color(status.color(cx)),
                                                         ),
                                                 )
@@ -480,7 +480,7 @@ impl Workbench {
                                                     v_flex()
                                                         .flex_1()
                                                         .min_w_0()
-                                                        .gap(px(6.))
+                                                        .gap(zpx(6.))
                                                         .child(
                                                             div()
                                                                 .text_size(FONT_HEADING)
@@ -498,7 +498,7 @@ impl Workbench {
                                                     v_flex()
                                                         .flex_shrink_0()
                                                         .items_end()
-                                                        .gap(px(4.))
+                                                        .gap(zpx(4.))
                                                         .child(
                                                             div()
                                                                 .text_size(FONT_TITLE)
@@ -650,14 +650,14 @@ impl Workbench {
                     .items_center()
                     .child(
                         img(candidate.root.agent.brand_icon(theme.mode.is_dark()))
-                            .size(px(24.))
+                            .size(zpx(24.))
                             .flex_shrink_0(),
                     )
                     .child(
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .gap(px(6.))
+                            .gap(zpx(6.))
                             .child(cleanup_title(candidate, ("history-session-title", ix), cx))
                             .child(
                                 div()
@@ -697,7 +697,7 @@ impl Workbench {
                     .id(("cleanup-result-files", ix))
                     .role(accesskit::Role::Button)
                     .aria_label(format!("{} · {}", candidate.root.title, file_label))
-                    .h(px(40.))
+                    .h(zpx(40.))
                     .px(SPACE_LG)
                     .gap(ICON_TEXT_GAP)
                     .border_t_1()
@@ -724,7 +724,7 @@ impl Workbench {
                             cx.stop_propagation();
                         }
                     }))
-                    .child(icon("icons/folder.svg").with_size(px(14.)))
+                    .child(icon("icons/folder.svg").with_size(zpx(14.)))
                     .child(div().flex_1().child(file_label))
                     .child(
                         icon(if expanded {
@@ -732,7 +732,7 @@ impl Workbench {
                         } else {
                             "icons/chevron-right.svg"
                         })
-                        .with_size(px(14.)),
+                        .with_size(zpx(14.)),
                     ),
             )
             .when(expanded, |view| {

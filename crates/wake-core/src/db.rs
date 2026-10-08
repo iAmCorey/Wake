@@ -207,8 +207,11 @@ CREATE TABLE IF NOT EXISTS claimed_sessions (
 ///       wake_lookups、记忆层一起回填——开发库可能戳着 5 或 6,换代判据是精确不等,
 ///       两个都跳过;
 /// "8" = Cursor 会话补上模型与 token(IDE 库的 modelInfo / modelConfig / usageData /
-///       tokenCount;转录胜出的会话向同一个 composer 借),老行靠这轮重解析回填。
-pub const FTS_FORMAT: &str = "8";
+///       tokenCount;转录胜出的会话向同一个 composer 借),老行靠这轮重解析回填;
+/// "9" = OpenCode 系(OpenCode / ZCode / 新增的 Kilo Code)认得 subtask / agent / retry /
+///       compaction 四种 part(subtask 写回用户敲的 `/命令`,其余不再计未知行),Windows 上
+///       OpenCode 存的 `C:/…` 目录换回反斜杠,老行靠这轮重解析回填。
+pub const FTS_FORMAT: &str = "9";
 
 fn open_conn(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent() {

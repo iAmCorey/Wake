@@ -297,7 +297,6 @@
   "Thu": "周四",
   "Thursdays": "周四",
   "Today": "今天",
-  "Toggle Full Screen": "切换全屏",
   "Tokens": "Token",
   "Transcript limit reached": "已达转录上限",
   "Trash": "废纸篓",
@@ -472,5 +471,13 @@
   "Check": "检查",
   "To restore, choose Put Back in Trash, then click Check.": "要恢复文件，请在废纸篓中选择“放回原处”，然后点击检查。",
   "Restore the files in your system trash, then click Check.": "在系统回收站中还原文件，然后点击检查。",
-  "No restored sessions found. Check the file locations below.": "未找到已还原的会话，请检查下方文件位置。"
+  "No restored sessions found. Check the file locations below.": "未找到已还原的会话，请检查下方文件位置。",
+  "View": "显示",
+  "Zoom In": "放大",
+  "Zoom Out": "缩小",
+  "Actual Size": "实际大小",
+  "Make text and controls larger or smaller.": "放大或缩小文字与控件。",
+  "Couldn't save zoom: {}": "无法保存缩放设置:{}",
+  "Choose the language Wake uses.": "选择 Wake 的界面语言。",
+  "Theme": "主题"
 }

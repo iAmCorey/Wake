@@ -16,6 +16,9 @@ chrono.workspace = true
 zstd.workspace = true
 base64.workspace = true
 sha2 = "0.10"
+# Kilo Code 旧任务导入新版时的会话 id 是 sha1(任务 id)(adapters/kilo.rs);
+# uuid 已经把它带进了工作区,不是新下载
+sha1_smol = "1"
 
 # Linux 废纸篓:freedesktop Trash spec 的纯库实现
 # (macOS 走 Finder/osascript,行为已验证不动)

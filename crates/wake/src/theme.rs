@@ -113,6 +113,9 @@ pub fn agent_series_color(agent: wake_core::models::AgentId) -> u32 {
         // 标志是单色的,给一档天蓝(Devin Desktop 的主色系),蓝色家族里离 Gemini、
         // Cursor 都最远的一档
         Devin => 0x3BB3F1,
+        // 品牌柠檬黄 #F7F569 在白底上几乎看不见(对比 1.15),压深一档;离 Hermes 的
+        // 金色 ΔE00 11.9(色板里最近的一对只有 5.4)
+        Kilo => 0xC8C035,
     }
 }
 
@@ -260,14 +263,18 @@ pub fn apply_wake_theme(cx: &mut App) {
     // 系统 UI 字体);写死 `.AppleSystemUIFont` 会让非 mac 平台每个字重都
     // 走一遍"找不到→回落"的错误路径(2026-08-25 review)
     theme.font_family = ".SystemUIFont".into();
-    theme.font_size = gpui::px(14.);
-    theme.radius = gpui::px(8.);
+    // 界面缩放(ui_zoom):gpui-component 的组件按 rem 排版,Root 每帧把 rem 设成
+    // font_size;等宽字号(TextView 代码块)与两档圆角是组件直接读的像素值,一并乘上。
+    // 13 是 gpui-component 的默认等宽字号,100% 档与缩放落地前相同
+    theme.font_size = crate::ui::zpx(14.);
+    theme.mono_font_size = crate::ui::zpx(13.);
+    theme.radius = crate::ui::zpx(8.);
     // 聚焦态只把边框染成 ring 色,不画框外的环:gpui-component 的环是元素框外
     // 2px 的绝对定位子元素,任何裁切祖先(弹窗面板、滚动列表、圆角容器)都会
     // 切掉一截——Add host / Add location 表单与设置页里实测残缺(2026-09-03
     // 用户反馈两轮)。上游自己的建议就是版式裁切多的应用关掉它,边框不占空间
     theme.focus_ring = false;
-    theme.radius_lg = gpui::px(12.);
+    theme.radius_lg = crate::ui::zpx(12.);
     theme.shadow = true;
 }
 

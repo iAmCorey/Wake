@@ -50,7 +50,7 @@ impl RemoteAdapter {
     }
 }
 
-/// 对一个 host 构造整组远程实例:二十一家模板 × `with_custom_root`(缓存内
+/// 对一个 host 构造整组远程实例:二十二家模板 × `with_custom_root`(缓存内
 /// 挂载点,见 remote::REMOTE_LAYOUTS)× 装饰器。追加进 roster 的 active 尾部
 /// (不进 Session locations 面板)。`templates` 由 roster 唯一构造点传入
 /// (不变量 8:本模块不得自行二次 create_adapters());产物的数据根 100%
@@ -62,10 +62,11 @@ pub fn create_remote_adapters(
 ) -> Vec<Box<dyn AgentAdapter>> {
     let mut out: Vec<Box<dyn AgentAdapter>> = Vec::new();
     for layout in crate::remote::REMOTE_LAYOUTS {
-        let Some(template) = templates.iter().find(|a| a.agent() == layout.agent) else {
+        let mount = host_cache.join(layout.mount);
+        let Some(template) = super::custom_root_template(templates, layout.agent, &mount) else {
             continue;
         };
-        let inner = template.with_custom_root(host_cache.join(layout.mount));
+        let inner = template.with_custom_root(mount);
         out.push(Box::new(RemoteAdapter::new(inner, host)));
     }
     out
@@ -203,6 +204,10 @@ impl AgentAdapter for RemoteAdapter {
             self.inner.with_custom_root(dir),
             self.host.clone(),
         ))
+    }
+
+    fn claims_custom_root(&self, dir: &Path) -> bool {
+        self.inner.claims_custom_root(dir)
     }
 
     fn supports_individual_root_removal(&self) -> bool {

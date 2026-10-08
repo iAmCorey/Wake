@@ -153,6 +153,8 @@ pub fn agent_bin(agent: AgentId) -> Option<&'static str> {
         // 发消息,不是能在终端里接着聊的界面
         AgentId::CraftAgents => None,
         AgentId::Devin => Some("devin"),
+        // npm 包 @kilocode/cli 装出 `kilo` 与 `kilocode` 两个同一份的命令
+        AgentId::Kilo => Some("kilo"),
     }
 }
 
@@ -223,6 +225,11 @@ fn resume_args(meta: &SessionMeta) -> Option<(Vec<String>, bool)> {
         // Devin 会话按 cwd 分桶(`devin list` 只列当前目录),`--resume <id>`
         // 在原项目目录启动
         AgentId::Devin => Some((vec!["--resume".into(), id.into()], true)),
+        // Kilo 新版(OpenCode 分支)与 OpenCode 同形制;VS Code 扩展的会话与 CLI 同库,
+        // 一样续得上。会话按项目目录记,在原目录启动工具才落在原处。旧版扩展的任务
+        // 新版 CLI 不认(导入 kilo.db 之前它不在库里)——胜出副本是旧任务文件就不画
+        AgentId::Kilo if crate::adapters::kilo::is_legacy_task(&meta.file_path) => None,
+        AgentId::Kilo => Some((vec!["--session".into(), id.into()], true)),
         // Kiro / Gemini CLI 没有按会话 id 续会话的形制
         AgentId::Kiro | AgentId::Gemini => None,
     }
@@ -700,6 +707,7 @@ mod tests {
             ),
             (AgentId::Codebuddy, vec!["--resume", id], true),
             (AgentId::Devin, vec!["--resume", id], true),
+            (AgentId::Kilo, vec!["--session", id], true),
         ] {
             let meta = remote_meta(agent, id, "");
             let (args, cwd) = super::resume_args(&meta).unwrap();
@@ -711,6 +719,25 @@ mod tests {
             );
             assert!(super::ssh_resume_command(&meta).is_some());
         }
+    }
+
+    /// Kilo 旧版扩展的任务没有 CLI 续得上(新版 `kilo --session` 只认 kilo.db 里的
+    /// 会话);胜出副本是 kilo.db 那份时照常给
+    #[test]
+    fn kilo_legacy_tasks_have_no_resume() {
+        let mut meta = remote_meta(
+            AgentId::Kilo,
+            "ses_migrated_0123456789abcdef0123456789",
+            "/w",
+        );
+        meta.file_path =
+            "/h/.vscode-server/data/User/globalStorage/kilocode.kilo-code/tasks/t1/api_conversation_history.json"
+                .into();
+        assert!(super::resume_args(&meta).is_none());
+        assert!(super::resume_targets(&meta).is_empty());
+        meta.file_path =
+            "/h/.local/share/kilo/kilo.db#ses_migrated_0123456789abcdef0123456789".into();
+        assert!(super::resume_args(&meta).is_some());
     }
 
     #[test]

@@ -11,6 +11,7 @@ pub mod dsh;
 pub mod gemini;
 pub mod grok;
 pub mod hermes;
+pub mod kilo;
 pub mod kimi;
 pub mod kiro;
 pub mod openclaw;
@@ -52,7 +53,8 @@ pub trait AgentAdapter: Send + Sync {
     }
     /// 枚举全部会话文件。契约是"枚举必须廉价、绝不做全量解析":多数家纯 stat,
     /// SQLite 型跑元数据查询,dsh 读有界首行(子代理标志只存在于文件头)。
-    /// 故障就地降级为空列表,不外溢炸掉整轮扫描。
+    /// 根不在就是确定没有,降级为 Ok(空);Err 只表示"这一刻读不出"(库在却打不开)——
+    /// scanner 冻结这一家这一轮(库里归它的行原样留着),别家照常。
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>>;
     /// watcher 事件路径 → 本 adapter 的会话文件引用;None = 非会话文件
     /// (边车、子代理转录等)。默认:非空 .jsonl,stem 即 native_id。
@@ -169,7 +171,7 @@ pub trait AgentAdapter: Send + Sync {
     /// 拥有本家 session 文件的位置",凭据/配置/索引这类不产生会话的文件不列。
     /// 新增 adapter 必须实现:没有默认值,漏了编译就过不去
     fn data_roots(&self) -> Vec<std::path::PathBuf>;
-    /// 文件监听根目录。默认 = data_roots 中现存的目录,二十一家实测全部吻合:
+    /// 文件监听根目录。默认 = data_roots 中现存的目录,二十二家实测全部吻合:
     /// 目录型给出自己的 root,SQLite 型的根是库文件、天然筛空(watcher 只认
     /// .jsonl,库变更靠启动/手动刷新),codex 的 sessions + archived 一并覆盖。
     /// 只有当监听范围确实不同于数据根时才覆写——否则一次根路径搬迁
@@ -188,6 +190,12 @@ pub trait AgentAdapter: Send + Sync {
     /// 侧档(gemini projects.json / kimi session_index / codex state DB)必须
     /// 全部相对 `dir` 派生,落回默认家目录就会拿错树。新增 adapter 必须实现。
     fn with_custom_root(&self, dir: std::path::PathBuf) -> Box<dyn AgentAdapter>;
+    /// 一家多源时,自定义 location(与远程挂载点)交给哪个实例构造:认领它的实例来,
+    /// 都不认领就交同家第一个实例(`custom_root_template`)。按路径**形状**判——远程挂载点
+    /// 在同步落盘前就要定形,别依赖存在性。默认不认领;Kilo 的旧版实例认领扩展的任务目录
+    fn claims_custom_root(&self, _dir: &std::path::Path) -> bool {
+        false
+    }
     /// 是否允许 Session locations 单独压制某条默认数据根。多数 adapter 的多个
     /// 根共同组成一个不可拆 location；OpenCode 的 stable/next 库则彼此独立。
     fn supports_individual_root_removal(&self) -> bool {
@@ -268,9 +276,42 @@ pub(crate) fn env_dir(key: &str) -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+/// VS Code 系编辑器的用户数据目录(`<数据根>/<编辑器>`,下面是 `User/globalStorage`):
+/// macOS 在 `~/Library/Application Support`,Windows 在 `%APPDATA%`,Linux 在
+/// `$XDG_CONFIG_HOME`(缺省 `~/.config`)。只做路径推导、不探存在性。全从 `home_dir()`
+/// 派生——`dirs::config_dir()` 在 Windows 上走 SHGetKnownFolderPath,WAKE_HOME 改道对它
+/// 无效。Cursor IDE 的 state.vscdb 与 Kilo 旧版扩展的任务目录共用
+pub(crate) fn vscode_user_data(editor: &str) -> std::path::PathBuf {
+    let home = home_dir().unwrap_or_default();
+    let base = if cfg!(target_os = "macos") {
+        home.join("Library").join("Application Support")
+    } else if cfg!(target_os = "windows") {
+        home.join("AppData").join("Roaming")
+    } else {
+        env_dir("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"))
+    };
+    base.join(editor)
+}
+
+/// 自定义 location / 远程挂载点 `dir` 交给同家哪个实例构造(见 `claims_custom_root`)
+pub(crate) fn custom_root_template<'a>(
+    base: &'a [Box<dyn AgentAdapter>],
+    agent: AgentId,
+    dir: &Path,
+) -> Option<&'a dyn AgentAdapter> {
+    let same = || {
+        base.iter()
+            .map(|a| a.as_ref())
+            .filter(move |a| a.agent() == agent)
+    };
+    same()
+        .find(|a| a.claims_custom_root(dir))
+        .or_else(|| same().next())
+}
+
 /// 各家数据根共用的 HOME。**全部 adapter 必须走这里**,不要直接
 /// `dirs::home_dir()`——`WAKE_HOME` 是整组 adapter 的统一改道开关:
-/// 契约测试靠它把二十一家指向 fixture 目录,而 `dirs::home_dir()` 只在
+/// 契约测试靠它把二十二家指向 fixture 目录,而 `dirs::home_dir()` 只在
 /// POSIX 上看 `$HOME`,Windows 上走 SHGetKnownFolderPath、无论如何都指向
 /// 真实用户目录(于是 Windows 上的契约测试全部落空,2026-08-25 review)。
 /// 对用户它顺带是便携安装/多档案切换的手动开关。
@@ -278,10 +319,10 @@ pub(crate) fn home_dir() -> Option<std::path::PathBuf> {
     env_dir("WAKE_HOME").or_else(dirs::home_dir)
 }
 
-/// 全量二十一家 roster,**不按 detect 过滤**。这是全应用唯一的构造点:
+/// 全量二十二家 roster,**不按 detect 过滤**。这是全应用唯一的构造点:
 /// scanner/watcher/resume/Session locations 面板共享 Workbench 启动时的
-/// 同一份实例。缺根的家由各自 list_session_files 降级为 Ok(空)(scanner
-/// 对 Err 会 `?` 截断整轮,新 adapter 必须维持这条降级约定,contract 测试
+/// 同一份实例。缺根的家由各自 list_session_files 降级为 Ok(空)(Err 会让
+/// scanner 把这一家这一轮当成"读不出"冻结住,缺根不是读不出,contract 测试
 /// 有卡)。**不要为任何用途二次构造 roster**:根路径是构造时刻对 env
 /// (CODEX_HOME/XDG_DATA_HOME)与文件系统的快照,两份实例可能解析出不同的
 /// 根,UI 就会展示一个扫描器并不在读的路径。
@@ -289,7 +330,9 @@ pub(crate) fn home_dir() -> Option<std::path::PathBuf> {
 /// **家数 ≠ 实例数**:Cursor 一家有两个数据源(CLI 的 agent-transcripts
 /// 与 IDE 的 state.vscdb),各占一个实例、共用 `AgentId::Cursor`。两源对
 /// 同一 composer 都有记录时(IDE 会话在 JSONL 侧是只含 turn_ended 的空壳),
-/// 由 scanner 的同家同 ID 去重按 mtime/size 裁决
+/// 由 scanner 的同家同 ID 去重按 `dedup_rank` 裁决。Kilo Code 同理:新版的
+/// kilo.db 在前,旧版扩展的任务目录在后(自定义 location 与远程挂载按
+/// `claims_custom_root` 挑实例)
 pub fn create_adapters() -> Vec<Box<dyn AgentAdapter>> {
     vec![
         Box::new(claude::ClaudeAdapter::new()),
@@ -314,6 +357,8 @@ pub fn create_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(zcode::ZcodeAdapter::new()),
         Box::new(craft::CraftAdapter::new()),
         Box::new(devin::DevinAdapter::new()),
+        Box::new(opencode::OpencodeAdapter::kilo()),
+        Box::new(kilo::KiloLegacyAdapter::new()),
     ]
 }
 
@@ -342,9 +387,7 @@ fn create_adapters_with_root_overrides(
     let customs: Vec<Box<dyn AgentAdapter>> = custom_roots
         .iter()
         .filter_map(|(agent, root)| {
-            base.iter()
-                .find(|a| a.agent() == *agent)
-                .map(|a| a.with_custom_root(root.clone()))
+            custom_root_template(&base, *agent, root).map(|a| a.with_custom_root(root.clone()))
         })
         .collect();
     let mut v: Vec<Box<dyn AgentAdapter>> = Vec::new();

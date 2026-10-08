@@ -2,37 +2,140 @@
 //! 规则:所有 UI 字号必须引用本模块常量,禁止裸 px 数字与 rem 工具类
 //! (text_sm 等按 rem=14px 折算会产生 12.25px 这类幽灵值)。
 //! 颜色只用三级:foreground(主文字)/muted_foreground(辅助)/primary(强调)。
+//!
+//! 尺寸随界面缩放(`ui_zoom`):常量写成 `Zpx`,表达式里的字面量写 `zpx(…)`。
+//! 裸 `px` 只留给不该跟着放大的东西:1px 发丝线、窗口尺寸、测试。
 use std::collections::HashSet;
+use std::ops::{Add, Mul, Neg, Sub};
 
 use gpui::{
-    div, px, AnyElement, App, Div, Global, Hsla, InteractiveElement as _, IntoElement, MouseButton,
-    Pixels, Styled, Window, WindowId,
+    div, px, AbsoluteLength, AnyElement, App, DefiniteLength, Div, Global, Hsla,
+    InteractiveElement as _, IntoElement, Length, MouseButton, Pixels, Styled, Window, WindowId,
 };
 use gpui_component::{
-    button::Button, dialog::Dialog, h_flex, ActiveTheme as _, Root, Sizable as _, WindowExt as _,
+    button::Button,
+    dialog::{AlertDialog, Dialog},
+    h_flex, ActiveTheme as _, Root, Sizable as _, WindowExt as _,
 };
 
+// ---------------- 界面缩放 ----------------
+
+/// 设计稿上的像素值(100% 档的读数),取用时乘当前缩放倍数。尺寸常量一律定义成它;
+/// 传给 gpui 的样式方法时经下面的 From 自动换算,参与算术时直接落成 `Pixels`
+#[derive(Clone, Copy, Debug)]
+pub struct Zpx(pub f32);
+
+/// 表达式里的设计稿像素:`zpx(12.)` 就是当前档位下的 12px
+pub fn zpx(value: f32) -> Pixels {
+    px(value * crate::ui_zoom::factor())
+}
+
+impl Zpx {
+    /// 当前档位下的实际像素
+    pub fn get(self) -> Pixels {
+        zpx(self.0)
+    }
+}
+
+impl From<Zpx> for Pixels {
+    fn from(value: Zpx) -> Self {
+        value.get()
+    }
+}
+
+impl From<Zpx> for AbsoluteLength {
+    fn from(value: Zpx) -> Self {
+        value.get().into()
+    }
+}
+
+impl From<Zpx> for DefiniteLength {
+    fn from(value: Zpx) -> Self {
+        value.get().into()
+    }
+}
+
+impl From<Zpx> for Length {
+    fn from(value: Zpx) -> Self {
+        value.get().into()
+    }
+}
+
+impl From<Zpx> for gpui_component::Size {
+    fn from(value: Zpx) -> Self {
+        value.get().into()
+    }
+}
+
+impl From<Zpx> for gpui_component::button::ButtonRounded {
+    fn from(value: Zpx) -> Self {
+        value.get().into()
+    }
+}
+
+impl Mul<f32> for Zpx {
+    type Output = Pixels;
+    fn mul(self, rhs: f32) -> Pixels {
+        self.get() * rhs
+    }
+}
+
+impl Neg for Zpx {
+    type Output = Pixels;
+    fn neg(self) -> Pixels {
+        -self.get()
+    }
+}
+
+impl<T: Into<Pixels>> Add<T> for Zpx {
+    type Output = Pixels;
+    fn add(self, rhs: T) -> Pixels {
+        self.get() + rhs.into()
+    }
+}
+
+impl<T: Into<Pixels>> Sub<T> for Zpx {
+    type Output = Pixels;
+    fn sub(self, rhs: T) -> Pixels {
+        self.get() - rhs.into()
+    }
+}
+
+impl Add<Zpx> for Pixels {
+    type Output = Pixels;
+    fn add(self, rhs: Zpx) -> Pixels {
+        self + rhs.get()
+    }
+}
+
+impl Sub<Zpx> for Pixels {
+    type Output = Pixels;
+    fn sub(self, rhs: Zpx) -> Pixels {
+        self - rhs.get()
+    }
+}
+
 /// 产品展示名（About）——medium
-pub const FONT_DISPLAY: Pixels = px(28.);
+pub const FONT_DISPLAY: Zpx = Zpx(28.);
 /// 上下文大标题(中栏头部)——semibold
-pub const FONT_TITLE: Pixels = px(22.);
+pub const FONT_TITLE: Zpx = Zpx(22.);
 /// 区块标题(详情页会话标题)——semibold
-pub const FONT_HEADING: Pixels = px(16.);
+pub const FONT_HEADING: Zpx = Zpx(16.);
 /// 界面正文(导航行/列表标题/按钮/输入);列表标题用 medium
-pub const FONT_BODY: Pixels = px(14.);
+pub const FONT_BODY: Zpx = Zpx(14.);
 /// 辅助说明(列表副行/元信息/占位/空态提示/侧栏子级行)
-pub const FONT_CAPTION: Pixels = px(12.);
+pub const FONT_CAPTION: Zpx = Zpx(12.);
 /// 标签(分组头/计数/快捷键徽标/状态栏);组头 semibold + 大写
-pub const FONT_LABEL: Pixels = px(11.);
+pub const FONT_LABEL: Zpx = Zpx(11.);
 
 // ---- 对话区附档(详情逐消息渲染,经用户逐轮校准,与六档并存)----
 
 /// 用户气泡正文(比 FONT_BODY 收半档,气泡内更紧凑)
-pub const FONT_MSG_USER: Pixels = px(13.5);
+pub const FONT_MSG_USER: Zpx = Zpx(13.5);
 /// 助手平铺正文
-pub const FONT_MSG_BODY: Pixels = px(13.);
+pub const FONT_MSG_BODY: Zpx = Zpx(13.);
 /// thinking 摘要行(斜体)
-pub const FONT_MSG_THINKING: Pixels = px(11.5);
+pub const FONT_MSG_THINKING: Zpx = Zpx(11.5);
 
 // ---------------- 平台文案 ----------------
 // 同一处 UI 在不同平台叫不同名字/键(Finder vs File Explorer vs 文件管理器、
@@ -120,38 +223,41 @@ trash_copy!("Trash", "Trash");
 /// ⌘K 面板的唯一绑定串——main.rs 的 bind_keys 与下方徽标同源,改键只动这里
 pub const SEARCH_KEYSTROKE: &str = "secondary-k";
 
-/// 搜索快捷键徽标,从真实绑定串派生("⌘K"/"Ctrl+K"——secondary→平台键
-/// 与显示形制都由 gpui/Kbd 持有,这里零平台知识)
+/// 快捷键徽标,从真实绑定串派生("⌘K"/"Ctrl+K"——secondary→平台键与显示形制都由
+/// gpui/Kbd 持有,这里零平台知识)。绑定串是写死的常量,解析不了是代码错
+pub fn key_hint(keystroke: &str) -> String {
+    let key = gpui::Keystroke::parse(keystroke).expect("binding keystrokes parse");
+    gpui_component::kbd::Kbd::format(&key)
+}
+
+/// 搜索快捷键徽标
 pub fn search_key_hint() -> &'static str {
     use std::sync::OnceLock;
     static HINT: OnceLock<String> = OnceLock::new();
-    HINT.get_or_init(|| {
-        let key = gpui::Keystroke::parse(SEARCH_KEYSTROKE).expect("SEARCH_KEYSTROKE parses");
-        gpui_component::kbd::Kbd::format(&key)
-    })
+    HINT.get_or_init(|| key_hint(SEARCH_KEYSTROKE))
 }
 
 // ---------------- 间距与结构 ----------------
-// 间距刻度:4px 网格。新代码一律引用常量或显式 px();
+// 间距刻度:4px 网格。新代码一律引用常量或显式 zpx();
 // 注意 gpui 的 rem 间距类有幽灵值(rem=14px 下 p_2p5=8.75px、p_3=10.5px,
 // 均不在网格上)——对齐敏感处禁止使用,存量逐步迁移。
 
-pub const SPACE_XS: Pixels = px(4.);
-pub const SPACE_SM: Pixels = px(8.);
-pub const SPACE_MD: Pixels = px(12.);
-pub const SPACE_LG: Pixels = px(16.);
-pub const SPACE_XL: Pixels = px(20.);
-pub const SPACE_XXL: Pixels = px(24.);
+pub const SPACE_XS: Zpx = Zpx(4.);
+pub const SPACE_SM: Zpx = Zpx(8.);
+pub const SPACE_MD: Zpx = Zpx(12.);
+pub const SPACE_LG: Zpx = Zpx(16.);
+pub const SPACE_XL: Zpx = Zpx(20.);
+pub const SPACE_XXL: Zpx = Zpx(24.);
 
 /// 图标 / 品牌图与紧随其后的文字之间的间距——全应用只此一个值(侧栏行与组头、列表
 /// 元信息行、详情与阅读面头部及元信息行、⌘K 结果、Insights 榜单、Open In 菜单、状态行、
 /// 设置页与清理页的行)。用户 2026-09-22 定统一:原先 4 / 6 / 7 / 8 / 12 各处不一。
 /// 不在 4px 网格上是有意的——品牌 PNG 没有留白,8px 显得空、4px 又贴;lucide 线条图标
 /// 自带约 1.5px 留白,6px 几何间距视觉上约 7.5px。卡片级的 24px 头像不在此列
-pub const ICON_TEXT_GAP: Pixels = px(6.);
+pub const ICON_TEXT_GAP: Zpx = Zpx(6.);
 
 /// 侧栏容器水平内边距(行的 hover/选中胶囊左右各留这么多)。
-pub const SIDEBAR_EDGE: Pixels = px(10.);
+pub const SIDEBAR_EDGE: Zpx = Zpx(10.);
 
 // ---- 侧栏中轴:LEAD_AXIS = 26.75 ----
 // traffic light 实测左缘 20、直径 13.5,中心即 26.75。侧栏每一行的行首元素
@@ -160,28 +266,31 @@ pub const SIDEBAR_EDGE: Pixels = px(10.);
 // 图标左缘就会落在 17.75,比红灯左缘还靠左 2.25,这是预期而非错位。
 // 两个内边距(LEAD_INSET / TITLE_INSET)是同一条轴推出来的,改一个必须重算另一个。
 
+/// 侧栏中轴(100% 档)。界面缩放时 traffic light 跟着它挪(`ui_zoom::traffic_lights`)
+pub const LEAD_AXIS: Zpx = Zpx(26.75);
+
 /// 行首槽位:取最大前导元素(品牌图 18px)的尺寸;槽位内**居中**,
 /// 于是 14/15px 的小图标中心也落在轴上。
-pub const LEAD_BOX: Pixels = px(18.);
+pub const LEAD_BOX: Zpx = Zpx(18.);
 /// 侧栏导航行的线条图标边长(品牌图占满 18px 槽位,线条图标比实心品牌图视觉轻,小一档
 /// 才平衡);组头的折叠 chevron 同一档,描边粗细才一致
-pub const NAV_ICON: Pixels = px(15.);
+pub const NAV_ICON: Zpx = Zpx(15.);
 /// 行左内边距 = 26.75(轴) − 9(槽位半宽) − 10(SIDEBAR_EDGE,容器那一半)
-pub const LEAD_INSET: Pixels = px(7.75);
+pub const LEAD_INSET: Zpx = Zpx(LEAD_AXIS.0 - LEAD_BOX.0 / 2. - SIDEBAR_EDGE.0);
 /// 分组项(agent/项目)相对轴的右缩进,表达从属。
 /// 压轴的只有主导航行与组头;分组项一律偏这么多。
-pub const SUB_INDENT: Pixels = px(12.);
+pub const SUB_INDENT: Zpx = Zpx(12.);
 // 组头(Agents / Projects)没有自己的内边距常量:NAV_ICON 的 chevron 按自己的框居中压轴
 //(见 workbench.rs group_header);靠首字母字形宽度反推的 GROUP_HEAD_INSET 已删(2026-09-22)。
 /// 侧栏标题 "Wake" 的左内边距:同样让首字母 W 的字形中心落在轴上。
 /// 实测 16px semibold 的 W 宽 14.25、左承距 0.5,文字左缘需 19.65;
 /// 减去容器的 SIDEBAR_EDGE 得 9.15,取 9.0(2x 屏下 0.5px 以下的差会被光栅化吃掉)。
-pub const TITLE_INSET: Pixels = px(9.);
+pub const TITLE_INSET: Zpx = Zpx(9.);
 /// 侧栏主导航行高(固定区:All Sessions/Starred;搜索框同高)
-pub const ROW_HEIGHT: Pixels = px(32.);
+pub const ROW_HEIGHT: Zpx = Zpx(32.);
 /// 侧栏子级行高(分组展开项:agent/项目)——比主导航低一级,
 /// 配 FONT_CAPTION 形成侧栏纵向层级(macOS 原生侧栏惯例)
-pub const ROW_HEIGHT_SUB: Pixels = px(26.);
+pub const ROW_HEIGHT_SUB: Zpx = Zpx(26.);
 
 /// 侧栏搜索入口与局部搜索输入共用的外壳；文字输入本身不再叠加组件默认边框。
 pub fn search_field_frame(cx: &App) -> Div {
@@ -204,7 +313,7 @@ pub fn search_field_frame(cx: &App) -> Div {
 // 四档见 DESIGN.md:面板 12 = `theme.radius_lg`,列表与侧栏选择 8 = `theme.radius`
 // (这两档走主题 token),其余三档无 token,在此定名以免散成魔法数字。
 /// 按钮圆角。**用户钉死 6px,勿改**
-pub const RADIUS_BUTTON: Pixels = px(6.);
+pub const RADIUS_BUTTON: Zpx = Zpx(6.);
 
 /// Page and dialog actions use fixed pixels; the library's rem-based Small
 /// preset becomes 21px at Wake's 14px rem size and crowds mixed-size footers.
@@ -220,25 +329,25 @@ pub fn action_button(button: Button) -> Button {
 }
 
 /// 快捷键标签
-pub const RADIUS_KBD: Pixels = px(5.);
+pub const RADIUS_KBD: Zpx = Zpx(5.);
 /// 小胶囊 badge(项目名 / model / source / 各处计数共用)
-pub const RADIUS_BADGE: Pixels = px(4.);
+pub const RADIUS_BADGE: Zpx = Zpx(4.);
 /// 对话正文内联图片缩略图。
-pub const IMAGE_THUMB: Pixels = px(104.);
-pub const RADIUS_IMAGE: Pixels = px(10.);
+pub const IMAGE_THUMB: Zpx = Zpx(104.);
+pub const RADIUS_IMAGE: Zpx = Zpx(10.);
 pub const IMAGE_SCRIM: f32 = 0.62;
 /// 数据可视化小色块(热力图、分布柱、图例)，统一保持方格读数感。
-pub const RADIUS_CELL: Pixels = px(2.);
+pub const RADIUS_CELL: Zpx = Zpx(2.);
 
 // ---------------- 组件度量派生 ----------------
 
 /// gpui-component `Size::Small` 按钮的水平内边距(px_3 @ rem14 = 10.5)。
 /// location 表单的"内容轴"对齐从它派生——组件升级或 rem 基准变更先核此值
-pub const BUTTON_SM_PX: Pixels = px(10.5);
+pub const BUTTON_SM_PX: Zpx = Zpx(10.5);
 /// gpui-component `Size::Small` 按钮高度(h_6 = 24),手排胶囊钮取齐用
-pub const BUTTON_SM_H: Pixels = px(24.);
+pub const BUTTON_SM_H: Zpx = Zpx(24.);
 /// 页面与确认框操作按钮的高度，避免与组件的 rem 尺寸混用。
-pub const BUTTON_ACTION_H: Pixels = px(32.);
+pub const BUTTON_ACTION_H: Zpx = Zpx(32.);
 
 // ---------------- 交互态文字 ----------------
 
@@ -248,15 +357,15 @@ pub const BUTTON_ACTION_H: Pixels = px(32.);
 /// 把该元素 base 的字号原样重申;禁止在 hover/active 里裸调 `text_color`
 /// (图标-only 元素除外:图标尺寸走 `with_size`,不受 text 替换影响)。
 pub trait TextColored: Styled + Sized {
-    fn text_colored(self, color: Hsla, size: Pixels) -> Self {
-        self.text_color(color).text_size(size)
+    fn text_colored(self, color: Hsla, size: impl Into<Pixels>) -> Self {
+        self.text_color(color).text_size(size.into())
     }
 }
 
 impl<T: Styled + Sized> TextColored for T {}
 
 /// Wake 主窗口的透明标题栏高度。28px 详情操作条上下各保留 8px。
-pub const WINDOW_TITLEBAR_HEIGHT: Pixels = px(44.);
+pub const WINDOW_TITLEBAR_HEIGHT: Zpx = Zpx(44.);
 
 // ---- 弹窗「点面板外关闭」补丁 ----
 //
@@ -279,17 +388,55 @@ pub const WINDOW_TITLEBAR_HEIGHT: Pixels = px(44.);
 struct ClosableDialogs(HashSet<WindowId>);
 impl Global for ClosableDialogs {}
 
-/// 打开可点面板外关闭的普通弹窗(确认类用 gpui-component 的 `open_alert_dialog`);
-/// Wake 里不要再裸调 `window.open_dialog`
-pub fn open_closable_dialog<F>(window: &mut Window, cx: &mut App, build: F)
+/// 弹窗宽度:设计稿宽度随缩放放大,但不超出窗口——gpui-component 的 Dialog 不会把
+/// 自己夹进窗口,宽出来就两边一起出界(150% 档下 640 宽的弹窗就比最小窗口宽)
+fn dialog_width(design: f32, window: &Window) -> Pixels {
+    zpx(design).min(window.viewport_size().width - SPACE_XXL * 2.)
+}
+
+/// 打开可点面板外关闭的普通弹窗(确认类用 `open_alert`);Wake 里不要再裸调
+/// `window.open_dialog` / `open_alert_dialog`。`width` 是设计稿宽度:两个入口都按上面的
+/// 规则定宽、把组件写死的 16px 内边距换成随缩放的同值,build 里不必再写 `.w()`
+pub fn open_closable_dialog<F>(window: &mut Window, cx: &mut App, width: f32, build: F)
 where
     F: Fn(Dialog, &mut Window, &mut App) -> Dialog + 'static,
 {
     window.open_dialog(cx, move |dialog, window, cx| {
         let id = window.window_handle().window_id();
         cx.default_global::<ClosableDialogs>().0.insert(id);
-        build(dialog, window, cx)
+        let width = dialog_width(width, window);
+        build(dialog.p(SPACE_LG), window, cx).w(width)
     });
+}
+
+/// 打开确认类弹窗(gpui-component 的 AlertDialog,面板外点击不关),尺寸规则同上
+pub fn open_alert<F>(window: &mut Window, cx: &mut App, width: f32, build: F)
+where
+    F: Fn(AlertDialog, &mut Window, &mut App) -> AlertDialog + 'static,
+{
+    window.open_alert_dialog(cx, move |dialog, window, cx| {
+        let width = dialog_width(width, window);
+        build(dialog.p(SPACE_LG), window, cx).width(width)
+    });
+}
+
+/// 定宽栏(侧栏、会话流、设置侧栏,合计设计宽 `rails`)的缩放倍数:跟着界面缩放放大,
+/// 但给窗口其余部分留出它们在 100% 档最小窗口里拿到的宽度(`min_window − rails`)——
+/// 窗口最小尺寸只在开窗那一刻定、运行时改不了,档位一高就能把其余部分挤没;不够宽时
+/// 等比收窄,最窄退回 100%
+pub fn rails_factor(rails: f32, viewport_width: Pixels, min_window: Pixels) -> f32 {
+    rails_factor_at(
+        rails,
+        f32::from(viewport_width),
+        f32::from(min_window),
+        crate::ui_zoom::factor(),
+    )
+}
+
+fn rails_factor_at(rails: f32, viewport_width: f32, min_window: f32, factor: f32) -> f32 {
+    ((viewport_width - (min_window - rails)) / rails)
+        .min(factor)
+        .max(1.)
 }
 
 /// 窗口根节点内容之后的三层 overlay:dialog、notification、点面板外关闭的 sentinel,
@@ -320,4 +467,124 @@ pub fn overlay_layers(window: &mut Window, cx: &mut App) -> Vec<AnyElement> {
         .into_iter()
         .flatten()
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rails_factor_at;
+
+    /// 非测试代码里裸 `px(` 的个数(`zpx(`、`.px(` 之类不算);`#[cfg(test)]` 的模块按
+    /// 花括号配对跳过
+    fn bare_px_count(src: &str) -> usize {
+        let mut count = 0;
+        let mut depth: Option<i32> = None;
+        let mut gated = false;
+        for line in src.lines() {
+            let trimmed = line.trim_start();
+            let delta = line.matches('{').count() as i32 - line.matches('}').count() as i32;
+            if let Some(d) = depth.as_mut() {
+                *d += delta;
+                if *d <= 0 {
+                    depth = None;
+                }
+                continue;
+            }
+            if trimmed.starts_with("#[cfg(") && trimmed.contains("test") {
+                gated = true;
+                continue;
+            }
+            if gated {
+                if trimmed.starts_with("#[") {
+                    continue;
+                }
+                gated = false;
+                let is_mod = ["mod ", "pub mod ", "pub(crate) mod "]
+                    .iter()
+                    .any(|head| trimmed.starts_with(head));
+                if is_mod && delta > 0 {
+                    depth = Some(delta);
+                    continue;
+                }
+            }
+            count += line
+                .match_indices("px(")
+                .filter(|(at, _)| {
+                    line[..*at]
+                        .chars()
+                        .next_back()
+                        .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '.'))
+                })
+                .count();
+        }
+        count
+    }
+
+    /// 裸 `px` 不随界面缩放(issue #51):新增的尺寸要写 `zpx(…)` / `Zpx(…)`。这里按文件
+    /// 数一遍,只许减不许增——真该是固定像素的(1px 发丝线、零值、已经按倍数算好的实际
+    /// 宽度)就把上限改大,让这个决定在 review 里看得见
+    #[test]
+    fn bare_pixel_sizes_do_not_creep_back() {
+        const FILES: &[(&str, &str, usize)] = &[
+            ("workbench.rs", include_str!("workbench.rs"), 17),
+            (
+                "workbench/memory.rs",
+                include_str!("workbench/memory.rs"),
+                1,
+            ),
+            (
+                "workbench/cleanup.rs",
+                include_str!("workbench/cleanup.rs"),
+                1,
+            ),
+            (
+                "workbench/cleanup/filter.rs",
+                include_str!("workbench/cleanup/filter.rs"),
+                8,
+            ),
+            (
+                "workbench/cleanup/history.rs",
+                include_str!("workbench/cleanup/history.rs"),
+                1,
+            ),
+            (
+                "workbench/cleanup/rows.rs",
+                include_str!("workbench/cleanup/rows.rs"),
+                0,
+            ),
+            ("settings.rs", include_str!("settings.rs"), 2),
+            ("ui.rs", include_str!("ui.rs"), 1),
+            ("ui_zoom.rs", include_str!("ui_zoom.rs"), 2),
+            ("main.rs", include_str!("main.rs"), 0),
+            ("theme.rs", include_str!("theme.rs"), 0),
+            ("markdown_links.rs", include_str!("markdown_links.rs"), 0),
+        ];
+        for (name, src, limit) in FILES {
+            let count = bare_px_count(src);
+            assert!(
+                count <= *limit,
+                "{name}: {count} bare px() calls (limit {limit}); sizes must use zpx()/Zpx to follow \
+                 the zoom level, or raise the limit if this one really is a fixed pixel"
+            );
+        }
+    }
+
+    #[test]
+    fn rails_keep_their_width_at_100_percent() {
+        // 主窗:侧栏 224 + 会话流 336,最小窗口 940
+        for width in [940., 1200., 2560.] {
+            assert_eq!(rails_factor_at(560., width, 940., 1.), 1.);
+        }
+    }
+
+    #[test]
+    fn zoomed_rails_grow_but_leave_the_rest_room() {
+        // 窗口够宽:按倍数放大
+        assert_eq!(rails_factor_at(560., 2560., 940., 1.5), 1.5);
+        // 不够宽:收窄到其余部分留够 380
+        let factor = rails_factor_at(560., 1100., 940., 1.5);
+        assert!((560. * factor - 720.).abs() < 0.01);
+        // 最窄退回 100% 档;设置窗侧栏同一条规则
+        assert_eq!(rails_factor_at(560., 940., 940., 1.5), 1.);
+        assert_eq!(rails_factor_at(180., 720., 720., 1.5), 1.);
+    }
 }

@@ -15,9 +15,51 @@ use std::path::{Path, PathBuf};
 /// 仍用 session 表,正文改放 session_message(type 列
 /// user|synthetic|assistant,data JSON)。早期 preview 曾用 session_v2 表,这里也
 /// 保持兼容。parent_id 非空 = 子代理,不进列表。
+///
+/// Kilo Code 是同一个引擎上的另一个产品(见 `Flavor`),`OpencodeAdapter::kilo()`
+/// 读它的 `~/.local/share/kilo/kilo.db`——WorkBuddy 之于 CodeBuddy 的同一种孪生
 pub struct OpencodeAdapter {
+    flavor: &'static Flavor,
     dbs: Vec<OcDb>,
 }
+
+/// 跑在 OpenCode 引擎上的产品。Kilo Code 2026-04 起整个换成 OpenCode 的分支(VS Code
+/// 扩展在后台起 `kilo serve`,CLI 与 JetBrains 插件同一个引擎),三端共用一个库,表与
+/// OpenCode 同形;差别只有下面这几项
+struct Flavor {
+    agent: AgentId,
+    /// `$XDG_DATA_HOME`(缺省 `~/.local/share`)下的目录名。Windows 上同样是
+    /// `%USERPROFILE%\.local\share`(两家都用 xdg-basedir,它在 Windows 上也这么算)
+    dir: &'static str,
+    /// 常驻 roster 的固定候选库名:没装也在,装上后普通刷新就能发现
+    db_names: &'static [&'static str],
+    /// 指定库的环境变量:绝对路径,或相对数据目录的文件名(两家同一规则)
+    db_env: &'static str,
+    /// 有没有 OpenCode 2 的 preview / next 渠道:那边的会话打 opencode2 徽章,resume 据此
+    /// 换 opencode2 二进制(`OcRow::source`)。Kilo 没有这条渠道
+    marks_preview: bool,
+}
+
+/// OpenCode 2 next 渠道另起的库名(preview 会话的最强信号,见 `OcRow::source`)
+const NEXT_DB: &str = "opencode-next.db";
+
+const OPENCODE: Flavor = Flavor {
+    agent: AgentId::Opencode,
+    dir: "opencode",
+    db_names: &["opencode.db", NEXT_DB],
+    db_env: "OPENCODE_DB",
+    marks_preview: true,
+};
+
+/// 渠道库(`kilo-<channel>.db`)只有 Kilo 自己的开发构建会写,扩展还强制
+/// `KILO_DISABLE_CHANNEL_DB=true`,所以只认 `kilo.db`
+const KILO: Flavor = Flavor {
+    agent: AgentId::Kilo,
+    dir: "kilo",
+    db_names: &["kilo.db"],
+    db_env: "KILO_DB",
+    marks_preview: false,
+};
 
 struct OcDb {
     path: PathBuf,
@@ -50,6 +92,10 @@ fn has_table(conn: &rusqlite::Connection, name: &str) -> bool {
 /// 根据库内真实表组合生成一次枚举 SQL。新版 next 与 v1 共用 session 表,
 /// 所以必须逐会话看 session_message 是否有正文;仅检查 session_v2 会把真实
 /// next 会话误走 part 路径并以 content_len=0 全部过滤(GitHub #2)。
+///
+/// 两代表都有行时,session_message 里有用户 / 助手消息才算 v2 转录;只有 shell /
+/// compaction 这类旁路记录的(实验开关 `*_EXPERIMENTAL_EVENT_SYSTEM` 下 v1 运行时的
+/// 零星双写,Kilo 实测)读 message + part,否则整段对话会被换成那几条
 fn rows_sql(conn: &rusqlite::Connection) -> Option<String> {
     let has_session = has_table(conn, "session");
     let has_session_v2 = has_table(conn, "session_v2");
@@ -63,7 +109,9 @@ fn rows_sql(conn: &rusqlite::Connection) -> Option<String> {
                     WHERE p.session_id = s.id)";
     let message_len = "(SELECT COALESCE(SUM(LENGTH(m.data)), 0) FROM session_message m \
                        WHERE m.session_id = s.id)";
-    let message_exists = "EXISTS(SELECT 1 FROM session_message m WHERE m.session_id = s.id)";
+    let v2_transcript = "(EXISTS(SELECT 1 FROM session_message m WHERE m.session_id = s.id \
+                         AND m.type IN ('user', 'assistant')) \
+                         OR NOT EXISTS(SELECT 1 FROM message mm WHERE mm.session_id = s.id))";
     let mut selects = Vec::new();
 
     // 早期 preview schema:session_v2 是全集,session 仅作 v1 回捞。
@@ -78,8 +126,8 @@ fn rows_sql(conn: &rusqlite::Connection) -> Option<String> {
     if has_session {
         let (len, v2) = match (has_parts, has_messages_v2) {
             (true, true) => (
-                format!("CASE WHEN {message_exists} THEN {message_len} ELSE {part_len} END"),
-                format!("CASE WHEN {message_exists} THEN 1 ELSE 0 END"),
+                format!("CASE WHEN {v2_transcript} THEN {message_len} ELSE {part_len} END"),
+                v2_transcript.to_string(),
             ),
             (true, false) => (part_len.to_string(), "0".to_string()),
             (false, true) => (message_len.to_string(), "1".to_string()),
@@ -146,27 +194,28 @@ fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
     }
 }
 
-fn known_db_paths(dir: &Path) -> Vec<PathBuf> {
-    vec![dir.join("opencode.db"), dir.join("opencode-next.db")]
+fn known_db_paths(flavor: &Flavor, dir: &Path) -> Vec<PathBuf> {
+    flavor.db_names.iter().map(|name| dir.join(name)).collect()
 }
 
 /// OpenCode 的数据目录服从 XDG;next 渠道另命名数据库而非替换 stable 库。
 /// 两个固定候选都常驻 roster,这样 Wake 启动后才安装任一 CLI,普通刷新也能发现。
 /// OPENCODE_DB 若被 GUI 进程继承则作为额外候选,但绝不压掉两个标准位置。
-fn default_db_paths() -> Vec<PathBuf> {
+/// Kilo 同一套规则(`KILO_DB`,固定候选只有 `kilo.db`)
+fn default_db_paths(flavor: &Flavor) -> Vec<PathBuf> {
     let default_dir = super::home_dir()
         .unwrap_or_default()
         .join(".local")
         .join("share")
-        .join("opencode");
-    let xdg_dir = super::env_dir("XDG_DATA_HOME").map(|x| x.join("opencode"));
+        .join(flavor.dir);
+    let xdg_dir = super::env_dir("XDG_DATA_HOME").map(|x| x.join(flavor.dir));
     let active_dir = xdg_dir
         .as_ref()
-        .filter(|dir| known_db_paths(dir).iter().any(|p| p.is_file()))
+        .filter(|dir| known_db_paths(flavor, dir).iter().any(|p| p.is_file()))
         .unwrap_or(&default_dir);
 
     let mut paths = Vec::new();
-    if let Some(value) = std::env::var_os("OPENCODE_DB").filter(|v| !v.is_empty()) {
+    if let Some(value) = std::env::var_os(flavor.db_env).filter(|v| !v.is_empty()) {
         let configured = PathBuf::from(value);
         if configured != Path::new(":memory:") {
             let configured = if configured.is_absolute() {
@@ -179,12 +228,12 @@ fn default_db_paths() -> Vec<PathBuf> {
             }
         }
     }
-    for path in known_db_paths(active_dir) {
+    for path in known_db_paths(flavor, active_dir) {
         push_unique(&mut paths, path);
     }
     // XDG 位置被采信时,默认目录里已有的库仍是只读候选,避免稳定版历史消失。
     if active_dir != &default_dir {
-        for path in known_db_paths(&default_dir)
+        for path in known_db_paths(flavor, &default_dir)
             .into_iter()
             .filter(|p| p.is_file())
         {
@@ -194,34 +243,45 @@ fn default_db_paths() -> Vec<PathBuf> {
     paths
 }
 
-fn custom_db_paths(dir: PathBuf) -> Vec<PathBuf> {
+fn custom_db_paths(flavor: &Flavor, dir: PathBuf) -> Vec<PathBuf> {
     if dir.is_file() {
         return vec![dir];
     }
-    let nested = dir.join("opencode");
-    let db_dir = if nested.is_dir() || known_db_paths(&nested).iter().any(|p| p.is_file()) {
+    let nested = dir.join(flavor.dir);
+    let db_dir = if nested.is_dir() || known_db_paths(flavor, &nested).iter().any(|p| p.is_file()) {
         nested
     } else {
         dir
     };
-    known_db_paths(&db_dir)
+    known_db_paths(flavor, &db_dir)
 }
 
 impl OpencodeAdapter {
     pub fn new() -> Self {
+        Self::with_dbs(&OPENCODE, default_db_paths(&OPENCODE))
+    }
+
+    /// Kilo Code 的新版(2026-04 起)数据源:`~/.local/share/kilo/kilo.db`。旧版扩展的
+    /// 任务目录是同一家的第二个实例(adapters::kilo)
+    pub fn kilo() -> Self {
+        Self::with_dbs(&KILO, default_db_paths(&KILO))
+    }
+
+    fn with_dbs(flavor: &'static Flavor, paths: Vec<PathBuf>) -> Self {
         Self {
-            dbs: default_db_paths().into_iter().map(OcDb::new).collect(),
+            flavor,
+            dbs: paths.into_iter().map(OcDb::new).collect(),
         }
     }
 
-    fn open(db: &Path) -> Option<SqliteRo> {
-        open_sqlite_ro(db, "opencode")
+    fn open(&self, db: &Path) -> Option<SqliteRo> {
+        open_sqlite_ro(db, self.flavor.dir)
     }
 
-    fn rows(db: &OcDb) -> Option<Vec<OcRow>> {
+    fn rows(&self, db: &OcDb) -> Option<Vec<OcRow>> {
         let mtime = super::sqlite_ro::db_cache_stamp(&db.path);
         db.rows_cache.get_or_try_build(mtime, || {
-            let ro = Self::open(&db.path)?;
+            let ro = self.open(&db.path)?;
             query_rows(&ro.conn, None).ok()
         })
     }
@@ -242,18 +302,19 @@ impl OpencodeAdapter {
         let model = serde_json::from_str::<Value>(&row.model_json)
             .ok()
             .and_then(|m| m.get("id").and_then(|v| v.as_str()).map(String::from));
+        let project_path = canonical_project_path(&row.directory);
         SessionMeta {
-            key: format!("opencode:{}", row.id),
+            key: format!("{}:{}", self.flavor.agent.as_str(), row.id),
             host: String::new(),
             id: row.id.clone(),
-            agent: AgentId::Opencode,
+            agent: self.flavor.agent,
             title: if title.is_empty() {
                 UNTITLED.to_string()
             } else {
                 title
             },
-            project_path: row.directory.clone(),
-            project_name: project_name_of(&row.directory),
+            project_name: project_name_of(&project_path),
+            project_path,
             file_path: r.file_path.clone(),
             created_at: if row.created_ms > 0 {
                 row.created_ms
@@ -275,7 +336,7 @@ impl OpencodeAdapter {
                 None
             },
             archived: row.archived,
-            source: row.source(db),
+            source: self.flavor.marks_preview.then(|| row.source(db)).flatten(),
             favorite: false,
             pinned: false,
         }
@@ -292,7 +353,9 @@ impl OpencodeAdapter {
         let db = self
             .db_for_ref(r)
             .ok_or_else(|| anyhow!("opencode database is outside adapter roots"))?;
-        let ro = Self::open(&db.path).ok_or_else(|| anyhow!("cannot open opencode db"))?;
+        let ro = self
+            .open(&db.path)
+            .ok_or_else(|| anyhow!("cannot open {} db", self.flavor.dir))?;
         let row = query_rows(&ro.conn, Some(&r.native_id))?
             .into_iter()
             .next()
@@ -560,7 +623,22 @@ impl BlockAcc {
             Some("reasoning") => self.push_reasoning(p),
             Some("tool") => self.push_tool(p, decode_images),
             Some("image") => self.push_image(p, decode_images),
-            Some("step-start") | Some("step-finish") | Some("snapshot") | Some("patch") => {}
+            // 用户敲的命令要派子代理时,这一条用户消息里只有它(没有 text 块):照用户
+            // 敲的写回 `/命令`,命令名缺席才退到描述与派给子代理的提示词
+            Some("subtask") => {
+                let text = match optional_string(p.get("command")) {
+                    Some(command) => format!("/{command}"),
+                    None => ["description", "prompt"]
+                        .iter()
+                        .find_map(|k| optional_string(p.get(*k)))
+                        .unwrap_or_default(),
+                };
+                self.content.push_text(&text);
+            }
+            // agent = 正文里 @ 了哪个代理(文字本身在 text 块里);retry = 请求重试的记录;
+            // compaction = 触发压缩的标记(摘要本身是后面那条助手消息)
+            Some("step-start") | Some("step-finish") | Some("snapshot") | Some("patch")
+            | Some("agent") | Some("retry") | Some("compaction") => {}
             Some("file") if is_image_part(p) => self.push_image(p, decode_images),
             Some("file") => {}
             _ => return false,
@@ -707,7 +785,7 @@ impl OcRow {
     /// preview 会话在 UI 标 "opencode2",resume 据此换二进制。next 库名本身
     /// 是最强信号;共享库/早期 schema 则回看写入 session.version 的渠道标记。
     fn source(&self, db: &Path) -> Option<String> {
-        let next_db = db.file_name().and_then(|n| n.to_str()) == Some("opencode-next.db");
+        let next_db = db.file_name().and_then(|n| n.to_str()) == Some(NEXT_DB);
         let v2 = next_db
             || self.version.starts_with('2')
             || self.version.contains("beta")
@@ -718,18 +796,18 @@ impl OcRow {
 
 impl AgentAdapter for OpencodeAdapter {
     fn agent(&self) -> AgentId {
-        AgentId::Opencode
+        self.flavor.agent
     }
 
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         let mut out = Vec::new();
         for db in &self.dbs {
-            let Some(rows) = Self::rows(db) else { continue };
+            let Some(rows) = self.rows(db) else { continue };
             out.extend(
                 rows.into_iter()
                     .filter(|row| row.content_len > 0)
                     .map(|row| SessionFileRef {
-                        agent: AgentId::Opencode,
+                        agent: self.flavor.agent,
                         native_id: row.id.clone(),
                         file_path: virtual_path(&db.path, &row.id),
                         mtime_ms: row.updated_ms,
@@ -744,7 +822,7 @@ impl AgentAdapter for OpencodeAdapter {
         let mut out = HashMap::new();
         let mut opened = false;
         for db in &self.dbs {
-            let Some(rows) = Self::rows(db) else { continue };
+            let Some(rows) = self.rows(db) else { continue };
             opened = true;
             let by_id: HashMap<&str, &OcRow> =
                 rows.iter().map(|row| (row.id.as_str(), row)).collect();
@@ -777,10 +855,12 @@ impl AgentAdapter for OpencodeAdapter {
 
     fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
         // 目录 location 同时扫描 stable + next,直接给库文件则只认该文件。
-        // 选中 XDG data 根或 opencode 目录本身都可归一化。
-        Box::new(Self {
-            dbs: custom_db_paths(dir).into_iter().map(OcDb::new).collect(),
-        })
+        // 选中 XDG data 根或 opencode / kilo 目录本身都可归一化(Kilo 旧版扩展的任务
+        // 目录由旧版实例认领,见 adapters::kilo)
+        Box::new(Self::with_dbs(
+            self.flavor,
+            custom_db_paths(self.flavor, dir),
+        ))
     }
 
     fn data_roots(&self) -> Vec<PathBuf> {
@@ -791,14 +871,16 @@ impl AgentAdapter for OpencodeAdapter {
         true
     }
 
+    /// Kilo 一家两源(本实例的 kilo.db 与 adapters::kilo 的旧版任务目录):排除列表按
+    /// agent 收集,里面可能全是另一个源的根——那时原样交回自己,与"与我无关"等价
     fn excluding_data_roots(&self, roots: &[PathBuf]) -> Option<Box<dyn AgentAdapter>> {
-        Some(Box::new(Self {
-            dbs: self
-                .dbs
+        Some(Box::new(Self::with_dbs(
+            self.flavor,
+            self.dbs
                 .iter()
                 .filter(|db| !roots.contains(&db.path))
-                .map(|db| OcDb::new(db.path.clone()))
+                .map(|db| db.path.clone())
                 .collect(),
-        }))
+        )))
     }
 }

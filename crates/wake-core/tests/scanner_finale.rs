@@ -205,6 +205,71 @@ fn finale_fires_when_adapter_fails() {
     assert_terminal_event(&rec.0.lock().unwrap(), "adapter 枚举失败");
 }
 
+/// 一家枚举失败(库在却读不出)只冻结这一家:它在库里的行原样留着,别家照常入库、照常
+/// 删除检测,整轮跑完;失败记进进度的 error,界面照常提示
+#[test]
+fn one_failing_adapter_freezes_only_its_own_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    let adapters: Vec<Box<dyn AgentAdapter>> = vec![
+        Box::new(seed(
+            AgentId::Grok,
+            "/tmp/freeze-a",
+            "/tmp/freeze-a/a.jsonl",
+            "a",
+            10,
+        )),
+        Box::new(seed(
+            AgentId::Devin,
+            "/tmp/freeze-b",
+            "/tmp/freeze-b/b.jsonl",
+            "b",
+            10,
+        )),
+    ];
+    run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+    assert!(store.get_session("devin:b").unwrap().is_some());
+
+    let mut unreadable = seed(
+        AgentId::Devin,
+        "/tmp/freeze-b",
+        "/tmp/freeze-b/b.jsonl",
+        "b",
+        10,
+    );
+    unreadable.fail_list = true;
+    let adapters: Vec<Box<dyn AgentAdapter>> = vec![
+        Box::new(seed(
+            AgentId::Grok,
+            "/tmp/freeze-a",
+            "/tmp/freeze-a/a2.jsonl",
+            "a2",
+            20,
+        )),
+        Box::new(unreadable),
+    ];
+    let rec = Recorder::new();
+    run_scan(&adapters, &store, &rec, false).expect("一家读不出不截断整轮");
+    assert!(
+        store.get_session("devin:b").unwrap().is_some(),
+        "读不出的那家行原样留着"
+    );
+    assert!(
+        store.get_session("grok:a2").unwrap().is_some(),
+        "别家照常入库"
+    );
+    assert!(
+        store.get_session("grok:a").unwrap().is_none(),
+        "别家的删除检测照常"
+    );
+    let events = rec.0.lock().unwrap();
+    assert_terminal_event(&events, "一家枚举失败");
+    assert!(events
+        .last()
+        .and_then(|p| p.error.as_deref())
+        .is_some_and(|e| e.contains("simulated unreadable index")));
+}
+
 #[test]
 fn parent_links_from_multiple_locations_are_merged_by_winning_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -584,6 +649,8 @@ struct SeedAdapter {
     meta: SessionMeta,
     /// 模拟截断/损坏副本:解析一律报错(副本回退测试用)
     fail_parse: bool,
+    /// 模拟库在却读不出:枚举报错
+    fail_list: bool,
     /// 模拟 codex 的 state 改名:quick 给出的 key 与文件 native key 不同,
     /// merge 时 quick key 压过 parsed(codex 同款优先级)
     quick_key: Option<String>,
@@ -602,6 +669,9 @@ impl AgentAdapter for SeedAdapter {
         self.rank
     }
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
+        if self.fail_list {
+            bail!("simulated unreadable index")
+        }
         Ok(vec![self.r.clone()])
     }
     fn file_ref(&self, path: &Path) -> Option<SessionFileRef> {
@@ -655,6 +725,7 @@ impl AgentAdapter for SeedAdapter {
             r: self.r.clone(),
             meta: self.meta.clone(),
             fail_parse: self.fail_parse,
+            fail_list: self.fail_list,
             quick_key: self.quick_key.clone(),
             manages_links: self.manages_links,
             parent_links: self.parent_links.clone(),
@@ -1060,6 +1131,7 @@ fn seed(agent: AgentId, root: &str, path: &str, native_id: &str, mtime: i64) -> 
             pinned: false,
         },
         fail_parse: false,
+        fail_list: false,
         quick_key: None,
         manages_links: false,
         parent_links: Vec::new(),
@@ -1108,6 +1180,7 @@ fn tombstoned_session_does_not_resurrect_on_rescan() {
         r,
         meta: meta.clone(),
         fail_parse: false,
+        fail_list: false,
         quick_key: None,
         manages_links: false,
         parent_links: Vec::new(),
@@ -1282,6 +1355,78 @@ fn dsh_newer_generation_takes_over_an_indexed_older_one() {
     );
 }
 
+/// Antigravity:索引里先只有卡片,明文转录后来才写出来——同一个 key 由转录接替
+/// (`dedup_rank`,转录的 mtime 与卡片的时间毫不相干),增量与全量两条写路径都是;
+/// 转录目录没了、索引还在,卡片回来。库里始终只有一行
+#[test]
+fn antigravity_transcript_takes_over_its_index_card() {
+    use wake_core::adapters::antigravity::AntigravityAdapter;
+    const KEY: &str = "antigravity:ag-1";
+    let home = tempfile::tempdir().unwrap();
+    let gemini = home.path().join(".gemini");
+    common::build_antigravity_index(
+        &gemini,
+        &[common::AgIndexRow {
+            id: "ag-1",
+            preview: "Dashboard buttons",
+            workspace: "/Users/tester/Github/dashboard",
+            app: "antigravity-ide",
+            ..Default::default()
+        }],
+    );
+    let adapters: Vec<Box<dyn AgentAdapter>> =
+        vec![AntigravityAdapter::new().with_custom_root(gemini.clone())];
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    let rows = || {
+        store
+            .list_sessions(&SessionFilter {
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap()
+            .1
+    };
+    run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+    let s = store.get_session(KEY).unwrap().expect("卡片入库");
+    assert!(s.file_path.ends_with("#ag-1"));
+    assert_eq!(s.title, "Dashboard buttons");
+
+    let brain = gemini.join("antigravity-ide").join("brain");
+    let transcript = common::stage_antigravity_transcript(&brain, "ag-1", &[]);
+    // 转录写坏了(一条消息都读不出):卡片接着顶着,不被空会话顶掉
+    let good = std::fs::read(&transcript).unwrap();
+    std::fs::write(&transcript, "{\"type\":\"USER_INPUT\",\"content\":\"trunc").unwrap();
+    run_scan(&adapters, &store, &Recorder::new(), false).unwrap();
+    let s = store.get_session(KEY).unwrap().expect("会话仍在库");
+    assert!(s.file_path.ends_with("#ag-1"), "坏转录退回卡片");
+    assert_eq!(rows(), 1);
+
+    std::fs::write(&transcript, good).unwrap();
+    let incoming = adapters[0].file_ref(&transcript).expect("转录是这个会话的");
+    scan_files(&adapters, &store, &Recorder::new(), vec![incoming]);
+    let s = store.get_session(KEY).unwrap().expect("会话仍在库");
+    assert_eq!(
+        s.file_path,
+        transcript.to_string_lossy(),
+        "增量写入由转录接替"
+    );
+    assert_eq!(s.title, "Fix the button layout on the dashboard");
+    assert_eq!(s.source.as_deref(), Some("IDE"));
+    assert_eq!(rows(), 1);
+
+    run_scan(&adapters, &store, &Recorder::new(), false).unwrap();
+    let s = store.get_session(KEY).unwrap().unwrap();
+    assert_eq!(s.file_path, transcript.to_string_lossy());
+    assert_eq!(rows(), 1);
+
+    std::fs::remove_dir_all(brain.join("ag-1")).unwrap();
+    run_scan(&adapters, &store, &Recorder::new(), false).unwrap();
+    let s = store.get_session(KEY).unwrap().expect("索引还在,卡片回来");
+    assert!(s.file_path.ends_with("#ag-1"));
+    assert_eq!(rows(), 1);
+}
+
 /// Cursor 两源端到端:转录带正文的会话固定由 CLI 源胜出(它有 slug 可反推
 /// 项目),哪怕 IDE 库里那份 lastUpdatedAt 更新、roster 里 IDE 实例排在前面;
 /// 转录只剩 turn_ended 空壳的会话由 IDE 库副本胜出。按 mtime 裁决的话胜负随
@@ -1383,6 +1528,82 @@ fn cursor_transcript_outranks_ide_copy() {
         "已入库的转录损坏后由 IDE 副本接管"
     );
     assert_eq!(taken_over.title, "CLI twin");
+}
+
+/// Kilo Code 新版扩展把旧任务导进 kilo.db 时,会话 id 是 sha1(任务 id) 派生的
+/// `ses_migrated_…`;旧任务在 Wake 里用的就是这个 id,两份同 key,kilo.db 那份胜出
+/// (不看 mtime 与 roster 顺序),旧任务文件留作回退:kilo.db 里那份没了,它顶上来,
+/// key 不变。没导过的旧任务照常列出,子任务挂回父任务
+#[test]
+fn kilo_migrated_task_prefers_the_database_copy() {
+    use wake_core::adapters::kilo::{legacy_task_key, migrated_session_id, KiloLegacyAdapter};
+    use wake_core::adapters::opencode::OpencodeAdapter;
+
+    let dir = tempfile::tempdir().unwrap();
+    let ext = dir.path().join("globalStorage").join("kilocode.kilo-code");
+    let tasks = ext.join("tasks");
+    common::copy_tree(&common::fixture("kilo-legacy/Code/tasks"), &tasks);
+    let db = dir.path().join("kilo").join("kilo.db");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    common::build_kilo_db(&db);
+    let migrated_id = migrated_session_id("migrated-task-0004");
+    let migrated = legacy_task_key("migrated-task-0004");
+    let legacy_copy = tasks
+        .join("migrated-task-0004")
+        .join("api_conversation_history.json");
+
+    for legacy_first in [true, false] {
+        let from_db: Box<dyn AgentAdapter> = OpencodeAdapter::kilo().with_custom_root(db.clone());
+        let from_tasks: Box<dyn AgentAdapter> =
+            KiloLegacyAdapter::new().with_custom_root(tasks.clone());
+        let adapters: Vec<Box<dyn AgentAdapter>> = if legacy_first {
+            vec![from_tasks, from_db]
+        } else {
+            vec![from_db, from_tasks]
+        };
+        let store = temp_store(&dir.path().join(format!("store-{legacy_first}")));
+        run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+        let row = store
+            .get_session(&migrated)
+            .unwrap()
+            .expect("导入过的旧任务在库");
+        assert!(
+            row.file_path.contains("kilo.db#"),
+            "legacy_first={legacy_first}:kilo.db 里那份胜出,得到 {}",
+            row.file_path
+        );
+        let legacy_only = store
+            .get_session(&legacy_task_key("1736400000000"))
+            .unwrap()
+            .expect("没导过的旧任务照常列出");
+        assert_eq!(legacy_only.title, "修复二维码扫描的内存泄漏");
+        let child = store
+            .get_session(&legacy_task_key("01944f78-bba0-7abc-8def-0123456789ac"))
+            .unwrap()
+            .expect("子任务在库");
+        assert_eq!(
+            store.parent_key_of(&child.key).unwrap().as_deref(),
+            Some(legacy_task_key("01944f77-3500-7abc-8def-0123456789ab").as_str()),
+            "legacy_first={legacy_first}:子任务挂回父任务"
+        );
+    }
+
+    // kilo.db 里那份没了(用户在 Kilo 里删了它):旧任务文件顶上来,key 不变
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("DELETE FROM session WHERE id = ?1", [&migrated_id])
+        .unwrap();
+    drop(conn);
+    let adapters: Vec<Box<dyn AgentAdapter>> = vec![
+        OpencodeAdapter::kilo().with_custom_root(db.clone()),
+        KiloLegacyAdapter::new().with_custom_root(tasks.clone()),
+    ];
+    let store = temp_store(&dir.path().join("store-false"));
+    run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+    let row = store
+        .get_session(&migrated)
+        .unwrap()
+        .expect("库里那份没了,旧任务还在");
+    assert_eq!(Path::new(&row.file_path), legacy_copy.as_path());
 }
 
 /// 跨 agent 重叠根:文件只归**最长根**的实例(与 watcher 分派同一语义)。

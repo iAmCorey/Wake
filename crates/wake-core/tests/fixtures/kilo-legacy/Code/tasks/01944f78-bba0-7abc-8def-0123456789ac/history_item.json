@@ -1,0 +1,12 @@
+{
+ "id": "01944f78-bba0-7abc-8def-0123456789ac",
+ "number": 3,
+ "ts": 1736500103000,
+ "task": "写 vitest 配置",
+ "tokensIn": 10,
+ "tokensOut": 5,
+ "workspace": "/Users/tester/Github/wakefx",
+ "mode": "code",
+ "parentTaskId": "01944f77-3500-7abc-8def-0123456789ab",
+ "rootTaskId": "01944f77-3500-7abc-8def-0123456789ab"
+}

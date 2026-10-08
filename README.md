@@ -44,7 +44,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and a dozen othe
 | Oh My Pi | `~/.omp/agent/sessions/**/*.jsonl` | ✅ | — |
 | Grok Build | `~/.grok/sessions/**/updates.jsonl` | ✅ | — |
 | Kimi Code | `~/.kimi-code/sessions/**/wire.jsonl` | — | — |
-| Antigravity CLI | `~/.gemini/antigravity-cli/conversation_summaries.db` (metadata only — transcripts are encrypted) | — | — |
+| Antigravity | `~/.gemini/antigravity/brain` and `~/.gemini/antigravity-ide/brain` (the plain-text transcripts recent versions of the desktop app and the IDE write, pasted images included) + `~/.gemini/antigravity-cli/conversation_summaries.db` (the conversation index shared by the CLI, desktop app and IDE; a conversation with no transcript on disk is listed from it as a summary card, since its body is stored encrypted) | ✅ | ✅ |
 | DeepSeek Harness (`dsh`) | `~/.dsh/sessions/**/session[.vN].jsonl[.zstd]` (the newest log format generation is read; zstd-compressed logs are decoded transparently) | ✅ | — |
 | Hermes Agent | `~/.hermes/state.db` + `profiles/*/state.db` (`HERMES_HOME` is respected) | ✅ | ✅ |
 | OpenClaw | `~/.openclaw/agents/*/agent/openclaw-agent.sqlite` + legacy `agents/*/sessions/*.jsonl` (`OPENCLAW_STATE_DIR` is respected) | ✅ | ✅ |
@@ -53,14 +53,17 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and a dozen othe
 | ZCode | `~/.zcode/cli/db/db.sqlite` + `v2/tasks-index.sqlite` (read-only; `ZCODE_STORAGE_DIR` is respected; desktop app, so no resume) | ✅ | — |
 | Craft Agents | `~/.craft-agent/workspaces/*/sessions/*/session.jsonl` (workspaces kept elsewhere can be added under Session locations; desktop app, so no resume) | ✅ | ✅ |
 | Devin | `~/.local/share/devin/cli/sessions.db` (read-only; `XDG_DATA_HOME` is respected) | ✅ | — |
+| Kilo Code | `~/.local/share/kilo/kilo.db` (VS Code extension, CLI and JetBrains plugin share it; read-only; `XDG_DATA_HOME` and `KILO_DB` are respected) + the legacy extension's `globalStorage/kilocode.kilo-code/tasks` in VS Code and other VS Code-based editors | ✅ | ✅ |
 
-**Model** = whether Wake shows which LLM a session used (the model the session last used). **Via** = whether Wake shows where the session was started from (CLI, IDE extension, desktop app) — Codex records this in its local data; Hermes and OpenClaw record the channel a session came in through (Telegram, Discord, …); Craft Agents marks sessions its automations started. A "—" means the agent's local data simply doesn't record that field, not a missing feature.
+**Model** = whether Wake shows which LLM a session used (the model the session last used). **Via** = whether Wake shows where the session was started from (CLI, IDE extension, desktop app) — Codex records this in its local data; Hermes and OpenClaw record the channel a session came in through (Telegram, Discord, …); Antigravity marks conversations from its IDE; Craft Agents marks sessions its automations started; Kilo Code's legacy tasks show which editor they ran in. A "—" means the agent's local data simply doesn't record that field, not a missing feature.
 
 Craft Agents runs other agents' engines rather than its own: a Claude connection drives the Claude Agent SDK, which also saves every conversation into Claude Code's history. Wake lists the Craft session and hides that engine copy for as long as the Craft session exists — delete the session in Craft and the copy shows up again as a Claude Code session. Craft's short title-generation calls on a Claude connection are saved by the SDK too, and appear as one-message Claude Code sessions under *Unknown project*.
 
 Codex writes its background threads — the guardian auto-review, `/review`, compaction and memory consolidation — into the same `sessions` directory as your conversations. Wake recognises them from the metadata on their first line and skips them; sub-agents you start with `spawn_agent` are kept and listed under the session that spawned them; a file it cannot identify stays visible rather than risk hiding a real conversation.
 
 Cursor keeps two stores. A chat that has a full transcript under `~/.cursor/projects` is read from there; local workspace metadata and filesystem matching restore its project path, including spaces. Project metadata is refreshed on each scan even if the transcript is unchanged. Chats that only live in Cursor's own database — older ones, or Cursor versions that leave nothing but a `turn_ended` marker in the transcript — are read from `state.vscdb`. Older IDE chats that Cursor stored without a workspace show up under *Unknown project*.
+
+Kilo Code rebuilt its extension on the OpenCode engine in April 2026; the VS Code extension, the `kilo` CLI and the JetBrains plugin now share one database, and Open In continues a session with `kilo --session`. Tasks from the earlier extension (4.x/5.x) stay in each editor's `globalStorage`; Wake lists them too, without Open In since the new CLI can't continue them. A legacy task the new extension has imported is listed once, from the database. On remote hosts Wake mirrors only the legacy tasks (from `~/.vscode-server`): the new `kilo.db` also stores Kilo's API keys and login tokens, so it isn't copied.
 
 Token statistics depend on the usage recorded by each agent. Qoder CLI transcripts that contain only zero token counts leave token usage unknown in Wake, even when they include Credits or a context usage ratio. Those values measure different things and are not converted into tokens; the sessions remain visible in the Sessions and Prompts views of Insights.
 
@@ -133,6 +136,12 @@ It prints what the MCP tools return, asserted byte for byte in the test suite ap
 
 To make an agent reach for it without being told, install the bundled skill with `npx skills add iAmCorey/Wake` (or copy `skills/wake/` into `~/.claude/skills/wake/`). Claude Code can go one step further and receive the project's recent sessions the moment a session starts, through a `SessionStart` hook that runs `wake-cli` — the recipe is in [docs/cli.md](docs/cli.md#teaching-an-agent-to-use-it).
 
+## Zoom
+
+Everything in Wake — text, controls, the sidebar and the transcript — can be
+enlarged to 110%, 125% or 150% with ⌘+ / ⌘− / ⌘0 (Ctrl on Linux and Windows),
+the **View** menu on macOS, or **Settings → Appearance**. The level is remembered.
+
 ## Language
 
 Wake's interface follows your system language on first launch and falls back to
@@ -150,7 +159,7 @@ welcome. See [crates/wake/locales/README.md](crates/wake/locales/README.md).
 - Credential files (`auth.json` and friends) are never read
 - Remote hosts are mirrored read-only with `rsync` over your existing SSH setup: only session data and its sidecar files come across (never credentials), nothing on the remote machine is ever written, and the mirror lives inside Wake's own data directory (`remotes/<host>/`), so removing the host removes it
 - No background network requests — the only network actions are a user-initiated update check against Wake's public GitHub Release metadata and, if you configure remote hosts, SSH/rsync to those hosts on launch, refresh, and Sync now; session data is never sent anywhere else
-- Wake's own index lives at `~/Library/Application Support/wake/wake.db` (Linux: `~/.local/share/wake`, Windows: `%LOCALAPPDATA%\wake`) and can be rebuilt from scratch at any time (stars/pins live in a separate table and survive rebuilds). Three small preference files (`appearance`, `language`, `window.json`) sit beside it on macOS, under `~/.config/wake` on Linux and `%APPDATA%\wake` on Windows; Open In and export-folder choices live in the index database's `prefs` table
+- Wake's own index lives at `~/Library/Application Support/wake/wake.db` (Linux: `~/.local/share/wake`, Windows: `%LOCALAPPDATA%\wake`) and can be rebuilt from scratch at any time (stars/pins live in a separate table and survive rebuilds). Four small preference files (`appearance`, `language`, `zoom`, `window.json`) sit beside it on macOS, under `~/.config/wake` on Linux and `%APPDATA%\wake` on Windows; Open In and export-folder choices live in the index database's `prefs` table
 
 ## Performance
 

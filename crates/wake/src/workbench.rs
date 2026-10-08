@@ -63,6 +63,7 @@ use crate::format::{
 };
 use crate::settings::{SettingsPage, SettingsView};
 use crate::ui::*;
+use crate::ui_zoom;
 use crate::update::{self, UpdateStatus};
 
 actions!(
@@ -82,21 +83,49 @@ pub const KEY_CONTEXT: &str = "Workbench";
 /// ⌘K 面板容器的 key context(main.rs 的 ↑↓ 绑定与 dialog 元素共用)
 pub const PALETTE_CONTEXT: &str = "WakePalette";
 /// ⌘K 面板内容总高(输入行 + 结果列表 + footer);列表 flex_1 吃剩余空间
-const PALETTE_HEIGHT: Pixels = px(492.);
+const PALETTE_HEIGHT: Zpx = Zpx(492.);
+/// ⌘K 面板顶距(放大后面板高度夹进窗口时同读这个数)
+const PALETTE_TOP: Zpx = Zpx(72.);
 /// location 表单标签列宽(Agent/Folder 两行共用)
-const FORM_LABEL_W: Pixels = px(52.);
+const FORM_LABEL_W: Zpx = Zpx(52.);
 /// 左栏顶部由 44px 窗口控制区 + 44px 品牌行组成；中栏标题区共享总高度。
-const LIBRARY_IDENTITY_HEIGHT: Pixels = px(88.);
+const LIBRARY_IDENTITY_HEIGHT: Zpx = Zpx(88.);
 /// 侧栏底部常态工具栏内容高；加上父容器 1px 顶部分隔线，总高 44px。
-const SIDEBAR_FOOTER_ROW_HEIGHT: Pixels = px(43.);
-/// 三栏固定结构宽度；工具摘要需要从窗口宽度反算真实可用空间。
-const SIDEBAR_WIDTH: Pixels = px(224.);
-const SESSION_STREAM_WIDTH: Pixels = px(336.);
-const READER_MAX_WIDTH: Pixels = px(720.);
+const SIDEBAR_FOOTER_ROW_HEIGHT: Zpx = Zpx(43.);
+/// 三栏固定结构宽度(100% 档);实际宽度走 `Workbench::columns`。工具摘要需要从窗口宽度
+/// 反算真实可用空间。
+const SIDEBAR_WIDTH: Zpx = Zpx(224.);
+const SESSION_STREAM_WIDTH: Zpx = Zpx(336.);
+const READER_MAX_WIDTH: Zpx = Zpx(720.);
 /// FONT_MSG_THINKING 使用等宽字体时，一个 ASCII 显示格的实测近似宽度。
-const TOOL_MONO_CELL_WIDTH: f32 = 6.9;
+const TOOL_MONO_CELL_WIDTH: Zpx = Zpx(6.9);
+
+#[cfg(test)]
+mod week_grid_tests {
+    use super::{sidebar_footer_width, WeekGrid, SIDEBAR_WIDTH};
+    use gpui::px;
+
+    #[test]
+    fn the_footer_fits_the_sidebar_at_100_percent() {
+        // 下限只在放大档位下起作用;100% 档侧栏仍是 224
+        assert!(sidebar_footer_width() < SIDEBAR_WIDTH.get());
+    }
+
+    #[test]
+    fn week_grid_keeps_its_size_in_the_narrowest_window_at_100_percent() {
+        // 940 − 224 侧栏 − 两侧 24 = 668,100% 档恰好放得下 53 周
+        let grid = WeekGrid::fit(px(668.));
+        assert_eq!(
+            (grid.cell, grid.gap, grid.step(), grid.dow),
+            (px(9.), px(3.), px(12.), px(26.))
+        );
+        // 更窄时只收窄周列,标签列不动
+        let narrow = WeekGrid::fit(px(26. + 318.));
+        assert_eq!((narrow.step(), narrow.dow), (px(6.), px(26.)));
+    }
+}
 /// Insights 主区块间距，明确落在 4px 网格上。
-const INSIGHTS_SECTION_GAP: Pixels = px(32.);
+const INSIGHTS_SECTION_GAP: Zpx = Zpx(32.);
 
 type SharedAdapters = Arc<Vec<Box<dyn AgentAdapter>>>;
 type SharedLocations = Arc<Vec<AdapterLocation>>;
@@ -111,10 +140,11 @@ fn library_header(
     id: &'static str,
     title: impl Into<SharedString>,
     subtitle: impl Into<SharedString>,
-    inset: Pixels,
+    inset: impl Into<Pixels>,
     actions: Option<AnyElement>,
     cx: &App,
 ) -> impl IntoElement {
+    let inset: Pixels = inset.into();
     let title: SharedString = title.into();
     let subtitle: SharedString = subtitle.into();
     v_flex()
@@ -135,7 +165,7 @@ fn library_header(
                     v_flex()
                         .flex_1()
                         .min_w_0()
-                        .gap(px(2.))
+                        .gap(zpx(2.))
                         .child(
                             div()
                                 .truncate()
@@ -152,7 +182,7 @@ fn library_header(
                         ),
                 )
                 .when_some(actions, |row, actions| {
-                    row.child(div().flex_shrink_0().pt(px(2.)).child(actions))
+                    row.child(div().flex_shrink_0().pt(zpx(2.)).child(actions))
                 }),
         )
 }
@@ -658,7 +688,7 @@ impl ListDelegate for SessionsDelegate {
         let depth = row.depth;
         let child_line_color = theme.muted_foreground.opacity(0.38);
         // 2px 线的中心与父行 15px Grok 图标的 11.5px 中轴一致。
-        let child_line_left = SPACE_XS + px(6.5);
+        let child_line_left = SPACE_XS + zpx(6.5);
 
         Some(
             // 稳定元素身份必须是 session key：展开插入孩子后，IndexPath 会整体
@@ -675,13 +705,13 @@ impl ListDelegate for SessionsDelegate {
                         .py(SPACE_SM)
                         .gap(SPACE_XS)
                         .when(depth > 0, |this| {
-                            this.pl(px(20.)).child(
+                            this.pl(zpx(20.)).child(
                                 div()
                                     .absolute()
                                     .left(child_line_left)
                                     .top(SPACE_SM)
                                     .bottom(SPACE_SM)
-                                    .w(px(2.))
+                                    .w(zpx(2.))
                                     .rounded_full()
                                     .bg(child_line_color),
                             )
@@ -720,19 +750,19 @@ impl ListDelegate for SessionsDelegate {
                         )
                         .child(
                             h_flex()
-                                .gap(px(6.))
+                                .gap(zpx(6.))
                                 .when(show_chevron, |this| {
                                     this.child(
                                         div()
                                             .id(SharedString::from(format!(
                                                 "session-expand:{toggle_key}"
                                             )))
-                                            .size(px(16.))
+                                            .size(zpx(16.))
                                             .flex_shrink_0()
                                             .flex()
                                             .items_center()
                                             .justify_center()
-                                            .rounded(px(4.))
+                                            .rounded(zpx(4.))
                                             .cursor_pointer()
                                             .hover(|style| style.bg(theme.muted))
                                             .on_mouse_down(
@@ -775,7 +805,7 @@ impl ListDelegate for SessionsDelegate {
                                             )
                                             .child(
                                                 icon("icons/chevron-right.svg")
-                                                    .with_size(px(13.))
+                                                    .with_size(zpx(13.))
                                                     .text_color(theme.muted_foreground)
                                                     .when(expanded, |icon| {
                                                         icon.rotate(Radians(
@@ -806,14 +836,14 @@ impl ListDelegate for SessionsDelegate {
                                 .when(s.pinned, |this| {
                                     this.child(
                                         icon("icons/pin-filled.svg")
-                                            .with_size(px(11.))
+                                            .with_size(zpx(11.))
                                             .text_color(theme.primary),
                                     )
                                 })
                                 .when(s.favorite, |this| {
                                     this.child(
                                         icon("icons/star-filled.svg")
-                                            .with_size(px(11.))
+                                            .with_size(zpx(11.))
                                             .text_color(rgb(crate::theme::STAR_YELLOW)),
                                     )
                                 }),
@@ -825,7 +855,7 @@ impl ListDelegate for SessionsDelegate {
                                 .text_color(theme.muted_foreground)
                                 .child(
                                     img(s.agent.brand_icon(theme.mode.is_dark()))
-                                        .size(px(15.))
+                                        .size(zpx(15.))
                                         .flex_shrink_0(),
                                 )
                                 .child(badge(
@@ -1398,14 +1428,14 @@ impl ListDelegate for SearchDelegate {
                     .w_full()
                     .px(SPACE_SM)
                     .py(SPACE_SM)
-                    .gap(px(6.))
+                    .gap(zpx(6.))
                     .child(
                         h_flex()
                             .gap(ICON_TEXT_GAP)
                             .text_size(FONT_CAPTION)
                             .child(
                                 img(h.session.agent.brand_icon(theme.mode.is_dark()))
-                                    .size(px(15.))
+                                    .size(zpx(15.))
                                     .flex_shrink_0(),
                             )
                             .child(
@@ -1494,26 +1524,26 @@ impl ListDelegate for SearchDelegate {
         let theme = cx.theme();
         if self.last_query.trim().is_empty() {
             return v_flex()
-                .h(px(250.))
+                .h(zpx(250.))
                 .w_full()
                 .justify_center()
                 .child(empty_state(
                     "icons/search.svg",
-                    px(48.),
-                    px(22.),
+                    zpx(48.),
+                    zpx(22.),
                     t("Search full conversation text"),
                     t("Matches natural language and code, like \"useEffect(\"."),
                     cx,
                 ));
         }
         v_flex()
-            .h(px(250.))
+            .h(zpx(250.))
             .w_full()
             .items_center()
             .justify_center()
             .gap(SPACE_MD)
             .text_color(theme.muted_foreground)
-            .child(icon("icons/inbox.svg").with_size(px(24.)))
+            .child(icon("icons/inbox.svg").with_size(zpx(24.)))
             .child(
                 div()
                     .text_size(FONT_BODY)
@@ -1643,7 +1673,7 @@ impl DetailState {
             loading: true,
             error: None,
             // Bottom 对齐 = 聊天语义:打开落在最新消息,向上翻历史
-            msg_list: gpui::ListState::new(0, gpui::ListAlignment::Bottom, px(512.)),
+            msg_list: gpui::ListState::new(0, gpui::ListAlignment::Bottom, zpx(512.)),
             expanded_tools: HashSet::new(),
             expanded_thinking: HashSet::new(),
             jump_seq,
@@ -1883,7 +1913,7 @@ mod detail_selection_tests {
         // 真实表单里有个会拿焦点的输入框,照样放一个
         let input = cx.update(|window, cx| cx.new(|cx| InputState::new(window, cx)));
         cx.update(|window, cx| {
-            open_closable_dialog(window, cx, move |dialog, _, _| {
+            open_closable_dialog(window, cx, 448., move |dialog, _, _| {
                 dialog
                     .title("Probe")
                     .w(px(400.))
@@ -1904,7 +1934,7 @@ mod detail_selection_tests {
         );
 
         cx.update(|window, cx| {
-            open_closable_dialog(window, cx, |dialog, _, _| {
+            open_closable_dialog(window, cx, 448., |dialog, _, _| {
                 dialog
                     .title("Probe")
                     .w(px(400.))
@@ -2151,6 +2181,10 @@ pub struct Workbench {
     palette_input: Entity<InputState>,
     /// 上次刷新界面缓存译文时的语言代次(见 `sync_language`)
     lang_generation: u64,
+    /// 上次按缩放档位重量变高列表、挪 traffic light 时的档位(见 `sync_zoom`)
+    zoom: u16,
+    /// 本帧窗口宽度,render 开头取一次;栏宽(`columns`)与阅读宽(`reader_width`)由它派生
+    viewport_width: Pixels,
     /// 进行中的搜索任务;新输入覆盖旧值即取消过期搜索
     _palette_search_task: Option<Task<()>>,
     /// 搜索命中不在首批会话时，按页补齐到命中项；新搜索覆盖旧任务。
@@ -2344,7 +2378,7 @@ impl UsageBoard {
         }
     }
 
-    /// Agents 全量列出(总共二十一家);项目/模型长尾长,取前 6
+    /// Agents 全量列出(总共二十二家);项目/模型长尾长,取前 6
     fn limit(self) -> usize {
         match self {
             Self::Agents => usize::MAX,
@@ -2354,8 +2388,8 @@ impl UsageBoard {
 
     fn name_w(self) -> Pixels {
         match self {
-            Self::Models => px(176.),
-            _ => px(128.),
+            Self::Models => zpx(176.),
+            _ => zpx(128.),
         }
     }
 }
@@ -2604,6 +2638,8 @@ impl Workbench {
             palette_list,
             palette_input,
             lang_generation: crate::i18n::generation(),
+            zoom: ui_zoom::percent(),
+            viewport_width: window.viewport_size().width,
             _palette_search_task: None,
             _list_seek_task: None,
             pending_list_selection: None,
@@ -2758,6 +2794,42 @@ impl Workbench {
         self.palette_input.update(cx, |state, cx| {
             state.set_placeholder(t("Search everything — prose or code"), window, cx);
         });
+    }
+
+    /// 侧栏与会话流(Memory 页的列表栏同宽)的实际宽度:随界面缩放放大,窗口不够宽时
+    /// 让位给阅读区(`ui::rails_factor`)。侧栏不窄于底部工具条——它的按钮不收缩,放大档位
+    /// 下按比例收窄的侧栏装不下,Settings 会挤进会话流;差额由会话流让出(它的标题与行
+    /// 都会截断),两栏合计不变。100% 档下恒为 224 / 336
+    fn columns(&self) -> (Pixels, Pixels) {
+        let rails = SIDEBAR_WIDTH.0 + SESSION_STREAM_WIDTH.0;
+        let scale = rails_factor(
+            rails,
+            self.viewport_width,
+            crate::main_window::MAIN_MIN_SIZE.width,
+        );
+        let sidebar = px(SIDEBAR_WIDTH.0 * scale).max(sidebar_footer_width());
+        (sidebar, px(rails * scale) - sidebar)
+    }
+
+    /// 阅读栏宽度:窗口减去它左边的栏(`beside`)与两侧留白,封顶阅读宽
+    fn reader_width(&self, beside: Pixels) -> Pixels {
+        READER_MAX_WIDTH
+            .get()
+            .min(self.viewport_width - beside - SPACE_XXL * 2.)
+    }
+
+    /// 换过缩放档位:变高列表(对话流、Memory 列表)缓存着按旧倍数量出的行高,按比例
+    /// 重量、阅读位置不跳;traffic light 挪到新的中轴上。会话列表与 ⌘K 是等高列表,
+    /// 每帧都重量首行,不用管。每帧一次整数比较
+    fn sync_zoom(&mut self, window: &mut Window) {
+        if !ui_zoom::changed(&mut self.zoom) {
+            return;
+        }
+        ui_zoom::move_traffic_lights(ui_zoom::MAIN_LIGHTS_TOP, window);
+        if let Some(detail) = &self.detail {
+            detail.msg_list.remeasure();
+        }
+        self.memory.remeasure();
     }
 
     fn refresh_session_group_date(&mut self, cx: &mut Context<Self>) {
@@ -3031,12 +3103,14 @@ impl Workbench {
             workbench.update(cx, |this, _| this.settings_window = None);
         }
         let (bounds, display_id) =
-            crate::main_window::centered_over_main(size(px(820.), px(600.)), cx);
+            crate::main_window::centered_over_main(size(zpx(820.), zpx(600.)), cx);
         let titlebar = if cfg!(target_os = "macos") {
             TitlebarOptions {
                 title: None,
                 appears_transparent: true,
-                traffic_light_position: Some(point(px(20.), px(11.))),
+                traffic_light_position: Some(crate::ui_zoom::traffic_lights(
+                    crate::ui_zoom::SETTINGS_LIGHTS_TOP,
+                )),
             }
         } else {
             TitlebarOptions {
@@ -3050,7 +3124,7 @@ impl Workbench {
             WindowOptions {
                 titlebar: Some(titlebar),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(720.), px(520.))),
+                window_min_size: Some(crate::main_window::SETTINGS_MIN_SIZE),
                 display_id,
                 app_id: Some("wake-settings".into()),
                 window_decorations: Some(WindowDecorations::Client),
@@ -3135,7 +3209,7 @@ impl Workbench {
         })
         .detach();
         let entity = cx.entity();
-        open_closable_dialog(window, cx, move |dialog, _window, cx| {
+        open_closable_dialog(window, cx, 500., move |dialog, _, cx| {
             let theme = cx.theme();
             let field_inset = BUTTON_SM_PX;
             // 有输入才亮出 Cancel/Add(与 location 表单同规则);Rope 直接扫描,
@@ -3155,7 +3229,6 @@ impl Workbench {
                         .font_semibold()
                         .child(t("Add remote host")),
                 )
-                .w(px(500.))
                 .button_props(
                     gpui_component::dialog::DialogButtonProps::default().ok_text(t("Add")),
                 )
@@ -3381,7 +3454,7 @@ impl Workbench {
         let entity = cx.entity();
         let title: SharedString = title.into();
         let ok_label: SharedString = ok_label.into();
-        open_closable_dialog(window, cx, move |dialog, _window, cx| {
+        open_closable_dialog(window, cx, 500., move |dialog, _, cx| {
             let theme = cx.theme();
             let dark = theme.mode.is_dark();
             // 内容轴缩进 = small 按钮的水平内边距:字段行/标题/footer 以它为轴,
@@ -3414,7 +3487,6 @@ impl Workbench {
                         .font_semibold()
                         .child(title.clone()),
                 )
-                .w(px(500.))
                 .button_props(
                     gpui_component::dialog::DialogButtonProps::default().ok_text(ok_label.clone()),
                 )
@@ -3447,7 +3519,7 @@ impl Workbench {
                                                 .items_center()
                                                 .child(
                                                     img(sel.brand_icon(dark))
-                                                        .size(px(14.))
+                                                        .size(zpx(14.))
                                                         .flex_shrink_0(),
                                                 )
                                                 .child(
@@ -3457,12 +3529,12 @@ impl Workbench {
                                                 )
                                                 .child(
                                                     icon("icons/chevron-down.svg")
-                                                        .with_size(px(12.))
+                                                        .with_size(zpx(12.))
                                                         .text_color(theme.muted_foreground),
                                                 ),
                                         )
                                         .dropdown_menu(move |menu, _, _| {
-                                            let mut menu = menu.min_w(px(200.));
+                                            let mut menu = menu.min_w(zpx(200.));
                                             for a in AgentId::ALL {
                                                 let cell = sel_cell.clone();
                                                 // element 变体:菜单项带品牌 PNG
@@ -3474,7 +3546,7 @@ impl Workbench {
                                                             .items_center()
                                                             .child(
                                                                 img(a.brand_icon(dark))
-                                                                    .size(px(14.))
+                                                                    .size(zpx(14.))
                                                                     .flex_shrink_0(),
                                                             )
                                                             .child(a.display_name())
@@ -3508,7 +3580,7 @@ impl Workbench {
                                     Button::new("loc-browse")
                                         .outline()
                                         .rounded(RADIUS_BUTTON)
-                                        .icon(icon("icons/folder.svg").with_size(px(13.)))
+                                        .icon(icon("icons/folder.svg").with_size(zpx(13.)))
                                         .tooltip(if pick_files {
                                             t("Choose a folder or file")
                                         } else {
@@ -3545,7 +3617,7 @@ impl Workbench {
                                             h_flex()
                                                 .id("loc-remove")
                                                 .h(BUTTON_SM_H)
-                                                .pl(BUTTON_SM_PX - px(1.5))
+                                                .pl(BUTTON_SM_PX - zpx(1.5))
                                                 .pr(BUTTON_SM_PX)
                                                 .rounded(RADIUS_BUTTON)
                                                 .items_center()
@@ -3566,7 +3638,7 @@ impl Workbench {
                                                 })
                                                 .child(
                                                     icon("icons/trash-2.svg")
-                                                        .with_size(px(13.))
+                                                        .with_size(zpx(13.))
                                                         .flex_shrink_0(),
                                                 )
                                                 .child(t("Remove")),
@@ -3591,7 +3663,7 @@ impl Workbench {
                                                 })
                                                 .child(
                                                     icon("icons/folder.svg")
-                                                        .with_size(px(13.))
+                                                        .with_size(zpx(13.))
                                                         .flex_shrink_0()
                                                         .text_color(theme.muted_foreground),
                                                 )
@@ -4267,7 +4339,7 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         let entity = cx.entity();
-        window.open_alert_dialog(cx, move |dialog, _window, cx| {
+        open_alert(window, cx, 440., move |dialog, _, cx| {
             let name = name.clone();
             let entity = entity.clone();
             let theme = cx.theme();
@@ -4278,7 +4350,6 @@ impl Workbench {
                         .font_semibold()
                         .child(crate::tf!("Remove {}?", name)),
                 )
-                .width(px(440.))
                 .confirm()
                 .button_props(
                     gpui_component::dialog::DialogButtonProps::default()
@@ -4515,14 +4586,13 @@ impl Workbench {
         let list = self.palette_list.clone();
         let input = self.palette_input.clone();
         let this = cx.entity();
-        open_closable_dialog(window, cx, move |dialog, window, cx| {
+        open_closable_dialog(window, cx, 680., move |dialog, window, cx| {
             let theme = cx.theme();
             let has_query = input.read(cx).text().len() > 0;
             // 输入框尺寸;清除钮的 suffix 补偿 margin 从它派生,改档自动跟随
             let input_size = gpui_component::Size::Large;
             dialog
-                .w(px(680.))
-                .margin_top(px(72.))
+                .margin_top(PALETTE_TOP)
                 // Dialog 默认内容 padding 24px 四边;水平 20,用户定稿(2026-08-18)
                 .px(SPACE_XL)
                 .close_button(false)
@@ -4546,7 +4616,10 @@ impl Workbench {
                         ))
                         // 定高 + 列表 flex_1:输入行/footer 尺寸变化时列表自适应,
                         // 不用手工重算列表高度
-                        .h(PALETTE_HEIGHT)
+                        // 放大后不超出窗口:顶距与上下留白之外的高度都给它,列表跟着缩
+                        .h(PALETTE_HEIGHT
+                            .get()
+                            .min(window.viewport_size().height - PALETTE_TOP - SPACE_XXL * 2.))
                         .gap(SPACE_MD)
                         .child(
                             div()
@@ -4559,7 +4632,7 @@ impl Workbench {
                                         .with_size(input_size)
                                         .prefix(
                                             icon("icons/search.svg")
-                                                .with_size(px(16.))
+                                                .with_size(zpx(16.))
                                                 .text_color(theme.muted_foreground),
                                         )
                                         // 清除钮自绘,不用内置 cleanable:内置钮固定
@@ -4568,7 +4641,7 @@ impl Workbench {
                                             i.suffix(
                                                 div()
                                                     .id("palette-clear")
-                                                    .size(px(24.))
+                                                    .size(zpx(24.))
                                                     // 抵消组件对 suffix 区强加的
                                                     // pr(input_px(size)),它在 p_0
                                                     // 之后应用盖不掉;不抵消则清除钮
@@ -4597,7 +4670,7 @@ impl Workbench {
                                                     })
                                                     .child(
                                                         icon("icons/circle-x.svg")
-                                                            .with_size(px(16.)),
+                                                            .with_size(zpx(16.)),
                                                     ),
                                             )
                                         })
@@ -4836,7 +4909,7 @@ impl Workbench {
                             detail.msg_list = gpui::ListState::new(
                                 messages.len(),
                                 gpui::ListAlignment::Bottom,
-                                px(512.),
+                                zpx(512.),
                             );
                             // 搜索跳转:seq → 可见消息下标,滚到视口顶。
                             // FTS 命中的行可能被详情过滤(如空文本),用 >= 落到
@@ -4862,7 +4935,7 @@ impl Workbench {
                             detail.images.clear();
                             detail.zoom = None;
                             detail.msg_list =
-                                gpui::ListState::new(0, gpui::ListAlignment::Bottom, px(512.));
+                                gpui::ListState::new(0, gpui::ListAlignment::Bottom, zpx(512.));
                             detail.error = Some(error.into());
                         }
                     }
@@ -5341,7 +5414,7 @@ impl Workbench {
             }
         }
         let entity = cx.entity();
-        window.open_alert_dialog(cx, move |dialog, _window, cx| {
+        open_alert(window, cx, 440., move |dialog, _, cx| {
             let meta = meta.clone();
             let keys = keys.clone();
             let targets = targets.clone();
@@ -5358,7 +5431,6 @@ impl Workbench {
                             t("Delete this session?")
                         }),
                 )
-                .width(px(440.))
                 // 破坏性确认:主按钮点名动作并用 danger 形态,不留裸 "OK"。
                 // .confirm() 必须显式调用——Dialog 只在设了 footer 时才渲染
                 // 按钮行,只挂 on_ok 的弹窗实际无按钮(仅回车可确认)
@@ -5471,7 +5543,7 @@ impl Workbench {
         // 未知、记忆同步与远程同步报不出进度,走不定值滑动
         let progress = busy.then(|| {
             let bar = Progress::new("refresh-progress")
-                .with_size(px(3.))
+                .with_size(zpx(3.))
                 .color(theme.primary);
             let bar = if self.scan.scanning && self.scan.total > 0 {
                 bar.value(self.scan.done as f32 / self.scan.total as f32 * 100.)
@@ -5486,13 +5558,13 @@ impl Workbench {
                     .flex_shrink_0()
                     .child(
                         Spinner::new()
-                            .with_size(px(12.))
+                            .with_size(zpx(12.))
                             .color(theme.muted_foreground),
                     )
                     .into_any_element()
             } else {
                 icon("icons/refresh-cw.svg")
-                    .with_size(px(12.))
+                    .with_size(zpx(12.))
                     .flex_shrink_0()
                     .into_any_element()
             };
@@ -5513,7 +5585,7 @@ impl Workbench {
                     .text_color(theme.muted_foreground)
                     .child(
                         div()
-                            .size(px(7.))
+                            .size(zpx(7.))
                             .rounded_full()
                             .flex_shrink_0()
                             .bg(theme.warning),
@@ -5535,7 +5607,7 @@ impl Workbench {
         let show_titlebar = cfg!(target_os = "macos")
             || matches!(window.window_decorations(), Decorations::Client { .. });
         v_flex()
-            .w(SIDEBAR_WIDTH)
+            .w(self.columns().0)
             .h_full()
             .flex_shrink_0()
             .bg(theme.sidebar)
@@ -5609,7 +5681,7 @@ impl Workbench {
                             .items_center()
                             .justify_between()
                             .child(self.render_page_switch(cx))
-                            .child(h_flex().gap(px(2.)).child(sidebar_tool_btn(
+                            .child(h_flex().gap(zpx(2.)).child(sidebar_tool_btn(
                                 "settings",
                                 t("Settings"),
                                 false,
@@ -5643,7 +5715,7 @@ impl Workbench {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.toggle_search(&ToggleSearch, window, cx)
                             }))
-                            .child(icon("icons/search.svg").with_size(px(13.)).flex_shrink_0())
+                            .child(icon("icons/search.svg").with_size(zpx(13.)).flex_shrink_0())
                             // flex_1 + min_w_0 + truncate:空间不足时压文案,右侧的 ⌘K
                             // 提示不被挤出侧栏
                             .child(
@@ -5820,7 +5892,7 @@ impl Workbench {
             )
         };
         h_flex()
-            .gap(px(2.))
+            .gap(zpx(2.))
             .child(button(
                 "page-sessions",
                 t("Sessions"),
@@ -5862,7 +5934,7 @@ impl Workbench {
         Button::new("refresh")
             .ghost()
             .rounded(RADIUS_BUTTON)
-            .icon(icon("icons/refresh-cw.svg").with_size(px(16.)))
+            .icon(icon("icons/refresh-cw.svg").with_size(zpx(16.)))
             .loading(busy)
             .disabled(busy)
             .tooltip(t("Refresh"))
@@ -5906,7 +5978,7 @@ impl Workbench {
         let sort_menu = Button::new("sort-sessions")
             .ghost()
             .rounded(RADIUS_BUTTON)
-            .icon(icon("icons/arrow-up-down.svg").with_size(px(16.)))
+            .icon(icon("icons/arrow-up-down.svg").with_size(zpx(16.)))
             .tooltip(sort_tooltip)
             .dropdown_menu(move |menu, _, _| {
                 let mk_key = |label: &'static str, key: SortKey| {
@@ -5941,7 +6013,7 @@ impl Workbench {
                             });
                         })
                 };
-                menu.min_w(px(180.))
+                menu.min_w(zpx(180.))
                     .item(mk_key(t("Date updated"), SortKey::Updated))
                     .item(mk_key(t("Date created"), SortKey::Created))
                     .item(mk_key(t("Message count"), SortKey::Messages))
@@ -5951,7 +6023,7 @@ impl Workbench {
             })
             .anchor(Anchor::TopRight);
         v_flex()
-            .w(SESSION_STREAM_WIDTH)
+            .w(self.columns().1)
             .h_full()
             .flex_shrink_0()
             .bg(theme.colors.list)
@@ -6001,8 +6073,8 @@ impl Workbench {
                         .gap(SPACE_LG)
                         .child(empty_state(
                             "icons/layers.svg",
-                            px(48.),
-                            px(22.),
+                            zpx(48.),
+                            zpx(22.),
                             t("Your library is empty"),
                             t("Add a local session location to get started."),
                             cx,
@@ -6026,8 +6098,8 @@ impl Workbench {
                         .justify_center()
                         .child(empty_state(
                             "icons/inbox.svg",
-                            px(48.),
-                            px(22.),
+                            zpx(48.),
+                            zpx(22.),
                             t("No matching sessions"),
                             t("Try a different agent, project, or filter."),
                             cx,
@@ -6185,31 +6257,31 @@ impl Workbench {
                     .items_center()
                     .justify_center()
                     .gap(SPACE_XL)
-                    .px(px(56.))
-                    .py(px(52.))
+                    .px(zpx(56.))
+                    .py(zpx(52.))
                     .child(
                         gpui::img(image)
                             .id("image-zoom-figure")
                             .w(shown.width)
                             .h(shown.height)
                             .rounded(SPACE_SM)
-                            .shadow(vec![zoom_shadow(px(18.), px(48.), 0.45)])
+                            .shadow(vec![zoom_shadow(zpx(18.), zpx(48.), 0.45)])
                             .on_click(|_, _, cx| cx.stop_propagation()),
                     )
                     .child(
                         h_flex()
                             .id("image-zoom-actions")
                             .flex_shrink_0()
-                            .h(px(40.))
+                            .h(zpx(40.))
                             .items_center()
                             .gap(SPACE_SM)
                             .pl(SPACE_LG)
                             .pr(SPACE_SM)
-                            .rounded(px(20.))
+                            .rounded(zpx(20.))
                             .bg(gpui::black().opacity(0.78))
                             .border_1()
                             .border_color(gpui::white().opacity(0.13))
-                            .shadow(vec![zoom_shadow(px(8.), px(26.), 0.35)])
+                            .shadow(vec![zoom_shadow(zpx(8.), zpx(26.), 0.35)])
                             .on_click(|_, _, cx| cx.stop_propagation())
                             .child(
                                 div()
@@ -6217,11 +6289,11 @@ impl Workbench {
                                     .text_color(gpui::white().opacity(0.64))
                                     .child(metadata),
                             )
-                            .child(div().w(px(1.)).h(px(16.)).bg(gpui::white().opacity(0.16)))
+                            .child(div().w(px(1.)).h(zpx(16.)).bg(gpui::white().opacity(0.16)))
                             .child(
                                 h_flex()
                                     .id("image-copy")
-                                    .size(px(30.))
+                                    .size(zpx(30.))
                                     .items_center()
                                     .justify_center()
                                     .rounded(RADIUS_BUTTON)
@@ -6249,7 +6321,7 @@ impl Workbench {
                                         } else {
                                             "icons/copy.svg"
                                         })
-                                        .with_size(px(15.))
+                                        .with_size(zpx(15.))
                                         .text_color(
                                             if copy_succeeded {
                                                 success
@@ -6262,7 +6334,7 @@ impl Workbench {
                             .child(
                                 h_flex()
                                     .id("image-save")
-                                    .size(px(30.))
+                                    .size(zpx(30.))
                                     .items_center()
                                     .justify_center()
                                     .rounded(RADIUS_BUTTON)
@@ -6290,7 +6362,7 @@ impl Workbench {
                                         } else {
                                             "icons/download.svg"
                                         })
-                                        .with_size(px(15.))
+                                        .with_size(zpx(15.))
                                         .text_color(
                                             if save_succeeded {
                                                 success
@@ -6308,10 +6380,10 @@ impl Workbench {
                     .absolute()
                     .top(SPACE_LG)
                     .right(SPACE_LG)
-                    .size(px(32.))
+                    .size(zpx(32.))
                     .items_center()
                     .justify_center()
-                    .rounded(px(9.))
+                    .rounded(zpx(9.))
                     .bg(gpui::white().opacity(0.11))
                     .hover(|style| style.bg(gpui::white().opacity(0.2)))
                     .cursor_pointer()
@@ -6321,7 +6393,7 @@ impl Workbench {
                     .on_click(close_button)
                     .child(
                         icon("icons/close.svg")
-                            .with_size(px(15.))
+                            .with_size(zpx(15.))
                             .text_color(gpui::white().opacity(0.86)),
                     ),
             )
@@ -6332,20 +6404,13 @@ impl Workbench {
 
     /// gpui::list 的行渲染。在布局阶段经 entity.update 调用(render 已返回,
     /// lease 已释放,无 double-lease 风险——与 dialog builder 的时机不同)。
-    fn render_msg_row(
-        &mut self,
-        ix: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_msg_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         // 详情宽度随窗口变化；工具头要用当前可用像素反算显示格数，再交给
         // unicode-width 截断，避免窄窗口溢出、宽窗口仍停在固定长度。
-        let reader_width =
-            (window.viewport_size().width - SIDEBAR_WIDTH - SESSION_STREAM_WIDTH - SPACE_XXL * 2.)
-                .clamp(px(220.), READER_MAX_WIDTH);
-        let tool_summary_width = (reader_width - px(156.)).max(px(80.));
-        let tool_arg_cells =
-            ((f32::from(tool_summary_width) / TOOL_MONO_CELL_WIDTH) as usize).max(8);
+        let (sidebar, stream) = self.columns();
+        let reader_width = self.reader_width(sidebar + stream).max(zpx(220.));
+        let tool_summary_width = (reader_width - zpx(156.)).max(zpx(80.));
+        let tool_arg_cells = ((tool_summary_width / TOOL_MONO_CELL_WIDTH.get()) as usize).max(8);
         let theme = cx.theme();
         let dark = theme.mode.is_dark();
         // 尾部要用的 Copy 值提前取出,theme 借用不跨越 inner 构建期的 &mut cx
@@ -6387,7 +6452,7 @@ impl Workbench {
                 MessageRole::User => {
                     let has_text = !m.text.trim().is_empty();
                     let mut bubble = v_flex()
-                        .max_w(px(540.))
+                        .max_w(zpx(540.))
                         .min_w_0()
                         .gap(SPACE_SM)
                         .rounded(theme.radius_lg)
@@ -6395,9 +6460,9 @@ impl Workbench {
                         .text_size(FONT_MSG_USER)
                         .line_height(relative(1.85));
                     bubble = if !shots.is_empty() && !has_text {
-                        bubble.p(px(7.))
+                        bubble.p(zpx(7.))
                     } else {
-                        bubble.px(px(14.)).py(SPACE_SM)
+                        bubble.px(zpx(14.)).py(SPACE_SM)
                     };
                     // 气泡靠内容撑宽,各段直接挂在气泡上、中间不加任何包装层
                     //(原因见 message_content 的文档注释)
@@ -6549,8 +6614,8 @@ impl Workbench {
                 .justify_center()
                 .child(empty_state_card(
                     "icons/chart-column.svg",
-                    px(58.),
-                    px(24.),
+                    zpx(58.),
+                    zpx(24.),
                     t("No activity yet"),
                     t("Refresh sessions to see your activity here."),
                     cx,
@@ -6577,14 +6642,18 @@ impl Workbench {
 
     fn render_insights_content(&self, d: &InsightsData, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
+        let grid = WeekGrid::fit(self.reader_width(self.columns().0));
 
         // ---- 概览大数字行 ----
         // 序:Sessions / Tokens / Prompts / Agents / Projects / Active days
         // (用户钉的)
         let stat =
             |value: String, label: &'static str| stat_cell(value, label, FONT_TITLE, None, cx);
+        // 放不下就换行(放大档位 + 窄窗口);100% 档的宽度下仍是一行
         let overview = h_flex()
-            .gap(px(40.))
+            .flex_wrap()
+            .gap_x(zpx(40.))
+            .gap_y(SPACE_LG)
             .child(stat(thousands(d.sessions), t("Sessions")))
             .when(d.tokens > 0, |row| {
                 row.child(stat(fmt_tokens(Some(d.tokens)), t("Tokens")))
@@ -6602,7 +6671,7 @@ impl Workbench {
             (
                 Some(
                     icon("icons/folder.svg")
-                        .with_size(px(14.))
+                        .with_size(zpx(14.))
                         .text_color(muted)
                         .into_any_element(),
                 ),
@@ -6622,7 +6691,7 @@ impl Workbench {
                         .w_full()
                         .max_w(READER_MAX_WIDTH)
                         .pt(SPACE_SM)
-                        .pb(px(40.))
+                        .pb(zpx(40.))
                         .gap(INSIGHTS_SECTION_GAP)
                         .child(overview)
                         .child(render_week_section(d, cx))
@@ -6635,9 +6704,10 @@ impl Workbench {
                                     None,
                                     cx,
                                 ))
-                                .child(render_heatmap(d, cx)),
+                                .child(render_heatmap(d, grid, cx)),
                         )
-                        .child(self.render_trend_section(d, cx))
+                        // 与热力图同一个 grid:两图周列上下对齐靠的是同一个值
+                        .child(self.render_trend_section(d, grid, cx))
                         .child(self.render_distribution_section(d, cx))
                         .child(self.render_usage_section(
                             UsageBoard::Agents,
@@ -6712,7 +6782,12 @@ impl Workbench {
 
     /// 趋势区块:近 53 周每周 prompts 按 agent 堆叠。不按模型出图——
     /// messages 表没有逐条 model,会话级 model 是末态,切周即改写历史
-    fn render_trend_section(&self, d: &InsightsData, cx: &Context<Self>) -> AnyElement {
+    fn render_trend_section(
+        &self,
+        d: &InsightsData,
+        grid: WeekGrid,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let layers = trend_layers(&d.trend_agents, cx);
         v_flex()
             .gap(SPACE_MD)
@@ -6722,7 +6797,7 @@ impl Workbench {
                 None,
                 cx,
             ))
-            .child(render_trend(d.trend_start(), layers, cx))
+            .child(render_trend(d.trend_start(), layers, grid, cx))
             .into_any_element()
     }
 
@@ -6907,14 +6982,15 @@ impl Workbench {
         let Some(detail) = &self.detail else {
             return v_flex()
                 .flex_1()
+                .min_w_0()
                 .h_full()
                 .items_center()
                 .justify_center()
                 .bg(theme.background)
                 .child(empty_state_card(
                     "icons/message-square.svg",
-                    px(58.),
-                    px(26.),
+                    zpx(58.),
+                    zpx(26.),
                     t("No session selected"),
                     crate::tf!(
                         "Pick one from the list, or press {} to search.",
@@ -6947,7 +7023,7 @@ impl Workbench {
                 } else {
                     "icons/copy.svg"
                 })
-                .with_size(px(16.)),
+                .with_size(zpx(16.)),
             )
             .tooltip(if path_copied {
                 t("Copied")
@@ -6968,15 +7044,15 @@ impl Workbench {
         let more_menu = Button::new("more-actions")
             .ghost()
             .rounded(RADIUS_BUTTON)
-            .icon(icon("icons/more-horizontal.svg").with_size(px(16.)))
+            .icon(icon("icons/more-horizontal.svg").with_size(zpx(16.)))
             .dropdown_menu(move |menu, _, cx| {
                 let export_entity = export_entity.clone();
                 let reveal_entity = reveal_entity.clone();
                 let delete_entity = delete_entity.clone();
-                menu.min_w(px(210.))
+                menu.min_w(zpx(210.))
                     .item(
                         PopupMenuItem::new(t(" Export as Markdown"))
-                            .icon(icon("icons/download.svg").with_size(px(15.)))
+                            .icon(icon("icons/download.svg").with_size(zpx(15.)))
                             .on_click(move |_, window, cx| {
                                 export_entity.update(cx, |this, cx| {
                                     this.do_export(window, cx);
@@ -6985,7 +7061,7 @@ impl Workbench {
                     )
                     .item(
                         PopupMenuItem::new(format!(" {}", reveal_in_fm()))
-                            .icon(icon("icons/folder.svg").with_size(px(15.)))
+                            .icon(icon("icons/folder.svg").with_size(zpx(15.)))
                             .on_click(move |_, _, cx| {
                                 reveal_entity.update(cx, |this, _| {
                                     if let Some(detail) = &this.detail {
@@ -6996,7 +7072,7 @@ impl Workbench {
                     )
                     .item(
                         PopupMenuItem::new(t(" Copy Session ID"))
-                            .icon(icon("icons/copy.svg").with_size(px(15.)))
+                            .icon(icon("icons/copy.svg").with_size(zpx(15.)))
                             .on_click({
                                 let id = session_id.clone();
                                 move |_, _, cx| {
@@ -7010,7 +7086,7 @@ impl Workbench {
                     // 一样不弹通知
                     .item(
                         PopupMenuItem::new(t(" Copy Handoff"))
-                            .icon(icon("icons/copy.svg").with_size(px(15.)))
+                            .icon(icon("icons/copy.svg").with_size(zpx(15.)))
                             .on_click({
                                 let key = session_key.clone();
                                 let title = session_title.clone();
@@ -7029,7 +7105,7 @@ impl Workbench {
                             })
                             .icon(
                                 icon("icons/trash-2.svg")
-                                    .with_size(px(15.))
+                                    .with_size(zpx(15.))
                                     .text_color(cx.theme().danger),
                             )
                             .on_click(move |_, window, cx| {
@@ -7086,11 +7162,11 @@ impl Workbench {
             lead.push(
                 Button::new("cleanup-back")
                     .ghost()
-                    .h(px(28.))
+                    .h(zpx(28.))
                     .px(SPACE_SM)
                     .text_size(FONT_CAPTION)
                     .rounded(RADIUS_BUTTON)
-                    .icon(icon("icons/chevron-left.svg").with_size(px(15.)))
+                    .icon(icon("icons/chevron-left.svg").with_size(zpx(15.)))
                     .label(t("Back"))
                     .tooltip(t("Back to cleanup list"))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -7101,7 +7177,7 @@ impl Workbench {
         }
         lead.push(
             img(meta.agent.brand_icon(theme.mode.is_dark()))
-                .size(px(15.))
+                .size(zpx(15.))
                 .flex_shrink_0()
                 .into_any_element(),
         );
@@ -7119,7 +7195,7 @@ impl Workbench {
                     .gap(ICON_TEXT_GAP)
                     .child(
                         icon("icons/git-branch.svg")
-                            .with_size(px(11.))
+                            .with_size(zpx(11.))
                             .flex_shrink_0(),
                     )
                     .child(div().min_w_0().truncate().child(branch))
@@ -7138,8 +7214,8 @@ impl Workbench {
             // 要双段共壳)。本地会话即便只剩一个终端也走 split
             // 按钮,品牌图标与 per-agent 记忆不丢
             crate::settings::settings_button(Button::new("open-in-single"), cx)
-                .h(px(28.))
-                .icon(icon("icons/terminal.svg").with_size(px(13.)))
+                .h(zpx(28.))
+                .icon(icon("icons/terminal.svg").with_size(zpx(13.)))
                 .label(t("Copy SSH command"))
                 .tooltip(t(
                     "Copy the SSH command that resumes this session on its host",
@@ -7170,7 +7246,7 @@ impl Workbench {
             // 无常显分隔线,hover 分段高亮暗示两段(Codex 同款);
             // 右段 Button 用 custom variant 与左段 hover 完全一致
             h_flex()
-                .h(px(28.))
+                .h(zpx(28.))
                 .rounded(RADIUS_BUTTON)
                 .border_1()
                 .border_color(theme.border)
@@ -7180,7 +7256,7 @@ impl Workbench {
                     div()
                         .id("open-in-main")
                         .h_full()
-                        .px(px(7.))
+                        .px(zpx(7.))
                         .flex()
                         .items_center()
                         .cursor_pointer()
@@ -7190,7 +7266,7 @@ impl Workbench {
                             current,
                             current_icon.as_ref(),
                             icon("icons/terminal.svg")
-                                .with_size(px(13.))
+                                .with_size(zpx(13.))
                                 .text_color(theme.secondary_foreground),
                         ))
                         .tooltip({
@@ -7236,12 +7312,12 @@ impl Workbench {
                                 .active(theme.secondary_active),
                         )
                         .rounded(px(0.))
-                        .h(px(26.))
-                        .w(px(22.))
-                        .icon(icon("icons/chevron-down.svg").with_size(px(12.)))
+                        .h(zpx(26.))
+                        .w(zpx(22.))
+                        .icon(icon("icons/chevron-down.svg").with_size(zpx(12.)))
                         .tooltip(t("Open this session in…"))
                         .dropdown_menu(move |menu, _, _| {
-                            let mut menu = menu.min_w(px(170.));
+                            let mut menu = menu.min_w(zpx(170.));
                             for (term, icon_path) in term_items.clone() {
                                 let entity = menu_entity.clone();
                                 menu = menu.item(
@@ -7252,7 +7328,7 @@ impl Workbench {
                                             .child(open_in_icon(
                                                 Some(term),
                                                 icon_path.as_ref(),
-                                                icon("icons/terminal.svg").with_size(px(15.)),
+                                                icon("icons/terminal.svg").with_size(zpx(15.)),
                                             ))
                                             .child(term.display_name())
                                     })
@@ -7340,7 +7416,7 @@ impl Workbench {
             h_flex()
                 .min_w_0()
                 .gap(ICON_TEXT_GAP)
-                .child(icon("icons/folder.svg").with_size(px(12.)).flex_shrink_0())
+                .child(icon("icons/folder.svg").with_size(zpx(12.)).flex_shrink_0())
                 .child(div().min_w_0().truncate().child(detail_path))
                 .into_any_element(),
         ];
@@ -7356,7 +7432,7 @@ impl Workbench {
                     .items_center()
                     .child(
                         icon("icons/calendar.svg")
-                            .with_size(px(12.))
+                            .with_size(zpx(12.))
                             .flex_shrink_0(),
                     )
                     .child(
@@ -7431,12 +7507,12 @@ impl Workbench {
                     .child(
                         v_flex()
                             .w_full()
-                            .max_w(px(520.))
+                            .max_w(zpx(520.))
                             .items_center()
                             .gap(SPACE_MD)
                             .child(
                                 icon("icons/circle-x.svg")
-                                    .with_size(px(24.))
+                                    .with_size(zpx(24.))
                                     .text_color(theme.danger),
                             )
                             .child(
@@ -7460,7 +7536,7 @@ impl Workbench {
                                     .outline()
                                     .small()
                                     .rounded(RADIUS_BUTTON)
-                                    .icon(icon("icons/folder.svg").with_size(px(13.)))
+                                    .icon(icon("icons/folder.svg").with_size(zpx(13.)))
                                     .label(reveal_in_fm())
                                     .on_click(move |_, _, _| {
                                         terminal::reveal_in_file_manager(&reveal_path)
@@ -7476,12 +7552,10 @@ impl Workbench {
                     .bg(theme.popover)
                     .relative()
                     .child(
-                        gpui::list(detail.msg_list.clone(), move |ix, window, cx| {
+                        gpui::list(detail.msg_list.clone(), move |ix, _, cx| {
                             entity
                                 .upgrade()
-                                .map(|e| {
-                                    e.update(cx, |this, cx| this.render_msg_row(ix, window, cx))
-                                })
+                                .map(|e| e.update(cx, |this, cx| this.render_msg_row(ix, cx)))
                                 .unwrap_or_else(|| div().into_any_element())
                         })
                         .size_full(),
@@ -7574,14 +7648,14 @@ fn insight_arrows(
             Button::new((id, 0usize))
                 .ghost()
                 .rounded(RADIUS_BUTTON)
-                .icon(icon("icons/chevron-left.svg").with_size(px(14.)))
+                .icon(icon("icons/chevron-left.svg").with_size(zpx(14.)))
                 .tooltip(t("Previous view"))
                 .on_click(on_prev),
         )
         .when_some(label, |row, label| {
             row.child(
                 div()
-                    .w(px(64.))
+                    .w(zpx(64.))
                     .flex()
                     .justify_center()
                     .whitespace_nowrap()
@@ -7594,7 +7668,7 @@ fn insight_arrows(
             Button::new((id, 1usize))
                 .ghost()
                 .rounded(RADIUS_BUTTON)
-                .icon(icon("icons/chevron-right.svg").with_size(px(14.)))
+                .icon(icon("icons/chevron-right.svg").with_size(zpx(14.)))
                 .tooltip(t("Next view"))
                 .on_click(on_next),
         )
@@ -7621,7 +7695,7 @@ fn switch_section_head(
         })
         .child(
             v_flex()
-                .gap(px(2.))
+                .gap(zpx(2.))
                 .child(
                     div()
                         .text_size(FONT_BODY)
@@ -7661,7 +7735,7 @@ fn usage_bar_row(
         .when_some(lead, |row, lead| {
             row.child(
                 div()
-                    .w(px(15.))
+                    .w(zpx(15.))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
@@ -7682,7 +7756,7 @@ fn usage_bar_row(
         .child(
             div()
                 .flex_1()
-                .h(px(6.))
+                .h(zpx(6.))
                 .rounded_full()
                 .bg(theme.muted)
                 .child(
@@ -7695,7 +7769,7 @@ fn usage_bar_row(
         )
         .child(
             div()
-                .w(px(56.))
+                .w(zpx(56.))
                 .flex_shrink_0()
                 .flex()
                 .justify_end()
@@ -7787,9 +7861,9 @@ fn render_distribution(range: InsightsRange, values: &[i64], peak: usize, cx: &A
     let theme = cx.theme();
     let max = values.iter().copied().max().unwrap_or(0).max(1);
     let gap = match range {
-        InsightsRange::Hour => px(4.),
-        InsightsRange::Weekday => px(8.),
-        InsightsRange::Month => px(6.),
+        InsightsRange::Hour => zpx(4.),
+        InsightsRange::Weekday => zpx(8.),
+        InsightsRange::Month => zpx(6.),
     };
     const CHART_H: f32 = 72.;
     // 两张名表在逐柱闭包**之外**取一次:闭包体每根柱跑一遍,放进去就是
@@ -7805,20 +7879,20 @@ fn render_distribution(range: InsightsRange, values: &[i64], peak: usize, cx: &A
         InsightsRange::Month => month_short().into(),
     };
     v_flex()
-        .gap(px(6.))
+        .gap(zpx(6.))
         .child(
             h_flex()
                 .items_end()
                 .gap(gap)
-                .h(px(CHART_H))
+                .h(zpx(CHART_H))
                 .children((0..values.len()).map(|i| {
                     let n = values[i];
                     let (height, bg) = if n == 0 {
-                        (px(2.), theme.muted)
+                        (zpx(2.), theme.muted)
                     } else {
                         let frac = (n as f32 / max as f32).max(0.05);
                         (
-                            px((frac * CHART_H).max(3.)),
+                            zpx((frac * CHART_H).max(3.)),
                             if i == peak {
                                 theme.primary
                             } else {
@@ -7875,15 +7949,45 @@ const WEEK_STEP: f32 = WEEK_CELL + WEEK_GAP;
 /// 热力图左侧星期标签列宽;趋势图同样留出这一列,周列才对齐
 const DOW_W: f32 = 26.;
 
+/// 两张周图的实际几何。100% 档的格子乘界面缩放倍数;阅读栏放不下 TREND_WEEKS 列时
+/// (放大档位 + 窄窗口)只把周列等比收窄,星期标签列保持字号所需的宽度。100% 档下
+/// 最小窗口的内容宽 668 恰好放得下(见 render_heatmap 的注释),所以不变
+#[derive(Clone, Copy)]
+struct WeekGrid {
+    cell: Pixels,
+    gap: Pixels,
+    dow: Pixels,
+}
+
+impl WeekGrid {
+    /// 相邻两列(两行)的间距
+    fn step(&self) -> Pixels {
+        self.cell + self.gap
+    }
+
+    fn fit(content_width: Pixels) -> Self {
+        let zoom = ui_zoom::factor();
+        let dow = DOW_W * zoom;
+        // 标签列之后:一个间距 + 53 格 + 52 个间距 = 53 个步距
+        let weeks = TREND_WEEKS as f32 * WEEK_STEP;
+        let scale = ((f32::from(content_width) - dow) / weeks).clamp(0., zoom);
+        Self {
+            cell: px(WEEK_CELL * scale),
+            gap: px(WEEK_GAP * scale),
+            dow: px(dow),
+        }
+    }
+}
+
 /// 月份刻度行:该列周一进入新月份时标注(与前一周比,首列同规则,相邻标签
 /// 由此天然隔开 ≥4 列不会叠)。热力图与趋势图共用同一行
-fn month_ticks(start: chrono::NaiveDate, cx: &App) -> Div {
+fn month_ticks(start: chrono::NaiveDate, grid: WeekGrid, cx: &App) -> Div {
     use chrono::Datelike as _;
     let theme = cx.theme();
     let mut months = div()
         .relative()
         .w_full()
-        .h(px(14.))
+        .h(zpx(14.))
         .text_size(FONT_LABEL)
         .text_color(theme.muted_foreground);
     let names = month_short();
@@ -7894,7 +7998,7 @@ fn month_ticks(start: chrono::NaiveDate, cx: &App) -> Div {
                 div()
                     .absolute()
                     .top_0()
-                    .left(px(DOW_W + WEEK_GAP + c as f32 * WEEK_STEP))
+                    .left(grid.dow + grid.gap + grid.step() * c as f32)
                     .child(names[monday.month0() as usize].clone()),
             );
         }
@@ -7907,16 +8011,16 @@ fn month_ticks(start: chrono::NaiveDate, cx: &App) -> Div {
 fn stat_cell(
     value: String,
     label: &'static str,
-    size: Pixels,
+    size: impl Into<Pixels>,
     note: Option<(SharedString, Hsla)>,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
     v_flex()
-        .gap(px(2.))
+        .gap(zpx(2.))
         .child(
             div()
-                .text_size(size)
+                .text_size(size.into())
                 .font_semibold()
                 .text_color(theme.foreground)
                 .child(value),
@@ -7943,7 +8047,7 @@ fn agent_label(raw: &str) -> SharedString {
 /// Wake 共用,"一行 agent 长什么样"只此一处
 fn agent_row_head(name: &str, dark: bool) -> (Option<AnyElement>, SharedString) {
     (
-        AgentId::from_str(name).map(|a| img(a.brand_icon(dark)).size(px(15.)).into_any_element()),
+        AgentId::from_str(name).map(|a| img(a.brand_icon(dark)).size(zpx(15.)).into_any_element()),
         agent_label(name),
     )
 }
@@ -8053,7 +8157,7 @@ fn render_week_section(d: &InsightsData, cx: &App) -> AnyElement {
         ))
         .child(
             h_flex()
-                .gap(px(40.))
+                .gap(zpx(40.))
                 .items_start()
                 .child(stat(t("Sessions"), cur.sessions, prev.sessions, &thousands))
                 .child(stat(t("Prompts"), cur.prompts, prev.prompts, &thousands))
@@ -8070,7 +8174,12 @@ fn render_week_section(d: &InsightsData, cx: &App) -> AnyElement {
 /// 堆叠周柱图:TREND_WEEKS 列与热力图同宽同步距(左侧留出热力图的星期标签
 /// 列,两图的周列上下对齐),每列 = 各层该周 prompts 自下而上堆叠,按窗口内
 /// 峰值周归一;零周留 2px muted 基线。图例列出各层
-fn render_trend(start: chrono::NaiveDate, layers: Rc<Vec<TrendLayer>>, cx: &App) -> AnyElement {
+fn render_trend(
+    start: chrono::NaiveDate,
+    layers: Rc<Vec<TrendLayer>>,
+    grid: WeekGrid,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     const CHART_H: f32 = 72.;
     let totals: Vec<i64> = (0..TREND_WEEKS)
@@ -8080,29 +8189,29 @@ fn render_trend(start: chrono::NaiveDate, layers: Rc<Vec<TrendLayer>>, cx: &App)
 
     let mut columns = h_flex()
         .items_end()
-        .gap(px(WEEK_GAP))
-        .h(px(CHART_H))
-        .child(div().w(px(DOW_W)).flex_shrink_0());
+        .gap(grid.gap)
+        .h(zpx(CHART_H))
+        .child(div().w(grid.dow).flex_shrink_0());
     for w in 0..TREND_WEEKS {
         let total = totals[w];
         let column = if total == 0 {
             div()
-                .w(px(WEEK_CELL))
-                .h(px(2.))
+                .w(grid.cell)
+                .h(zpx(2.))
                 .rounded(RADIUS_CELL)
                 .bg(theme.muted)
         } else {
             let col_h = ((total as f32 / max as f32) * CHART_H).max(3.);
             // DOM 自上而下 = 视觉自上而下:Other/末层在顶,首层在底
             let mut col = v_flex()
-                .w(px(WEEK_CELL))
-                .h(px(col_h))
+                .w(grid.cell)
+                .h(zpx(col_h))
                 .justify_end()
                 .rounded(RADIUS_CELL)
                 .overflow_hidden();
             for l in layers.iter().rev().filter(|l| l.weekly[w] > 0) {
                 let h = (l.weekly[w] as f32 / total as f32) * col_h;
-                col = col.child(div().w_full().h(px(h)).bg(l.color));
+                col = col.child(div().w_full().h(zpx(h)).bg(l.color));
             }
             col
         };
@@ -8135,21 +8244,21 @@ fn render_trend(start: chrono::NaiveDate, layers: Rc<Vec<TrendLayer>>, cx: &App)
         .flex_wrap()
         .gap_x(SPACE_MD)
         .gap_y(SPACE_XS)
-        .pl(px(DOW_W + WEEK_GAP))
+        .pl(grid.dow + grid.gap)
         .text_size(FONT_LABEL)
         .text_color(theme.muted_foreground)
         .children(layers.iter().map(|l| {
             h_flex()
-                .gap(px(5.))
+                .gap(zpx(5.))
                 .items_center()
-                .child(div().size(px(WEEK_CELL)).rounded(RADIUS_CELL).bg(l.color))
+                .child(div().size(zpx(WEEK_CELL)).rounded(RADIUS_CELL).bg(l.color))
                 .child(l.name.clone())
         }));
 
     v_flex()
-        .gap(px(6.))
+        .gap(zpx(6.))
         .child(columns)
-        .child(month_ticks(start, cx))
+        .child(month_ticks(start, grid, cx))
         .child(legend)
         .into_any_element()
 }
@@ -8164,7 +8273,7 @@ const HEAT: [f32; 4] = [0.25, 0.5, 0.75, 1.];
 /// 两侧 24 padding)——10px 格的 715 会在最小窗口被裁掉右缘
 /// (2026-08-27 Codex review)。daily 升序,二分出窗口后填定长数组——
 /// 渲染路径零哈希零日期运算;tooltip 文案 hover 才格式化
-fn render_heatmap(d: &InsightsData, cx: &App) -> AnyElement {
+fn render_heatmap(d: &InsightsData, grid: WeekGrid, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let today = d.as_of;
     let start = d.trend_start();
@@ -8188,18 +8297,17 @@ fn render_heatmap(d: &InsightsData, cx: &App) -> AnyElement {
         let quartile = ((n as f32 / heat_max as f32) * 4.).ceil().clamp(1., 4.) as usize;
         theme.primary.opacity(HEAT[quartile - 1])
     };
-    const CELL: f32 = WEEK_CELL;
-    const GAP: f32 = WEEK_GAP;
-    const STEP: f32 = WEEK_STEP;
+    let WeekGrid { cell, gap, dow } = grid;
+    let step = grid.step();
 
-    let months = month_ticks(start, cx);
+    let months = month_ticks(start, grid, cx);
 
     // 星期标签列:行 r 的格子 y = r×STEP,文字行高 ≈13px,
     // (CELL−13)/2 = −2 光学对行
     let dow_col = div()
         .relative()
-        .w(px(DOW_W))
-        .h(px(7. * STEP - GAP))
+        .w(dow)
+        .h(step * 7. - gap)
         .flex_shrink_0()
         .text_size(FONT_LABEL)
         .text_color(theme.muted_foreground)
@@ -8208,26 +8316,26 @@ fn render_heatmap(d: &InsightsData, cx: &App) -> AnyElement {
             [0usize, 2, 4].map(|r| {
                 div()
                     .absolute()
-                    .top(px(r as f32 * STEP - 2.))
+                    .top(step * r as f32 - zpx(2.))
                     .left_0()
                     .child(names[r])
             })
         });
 
-    let mut grid = h_flex().gap(px(GAP)).items_start().child(dow_col);
+    let mut columns = h_flex().gap(gap).items_start().child(dow_col);
     for c in 0..TREND_WEEKS {
-        let mut col = v_flex().gap(px(GAP));
+        let mut col = v_flex().gap(gap);
         for r in 0..7usize {
             let ix = c * 7 + r;
             if ix as i64 > today_ix {
-                col = col.child(div().size(px(CELL)));
+                col = col.child(div().size(cell));
                 continue;
             }
             let n = window[ix];
             col = col.child(
                 div()
                     .id(("hm", ix))
-                    .size(px(CELL))
+                    .size(cell)
                     .rounded(RADIUS_CELL)
                     .bg(heat_color(n))
                     // 只捕获 Copy 的 (start, ix, n),hover 到的那格才格式化
@@ -8240,7 +8348,7 @@ fn render_heatmap(d: &InsightsData, cx: &App) -> AnyElement {
                     }),
             );
         }
-        grid = grid.child(col);
+        columns = columns.child(col);
     }
 
     // 底注:streak/最忙一天(左) + Less…More 图例(右)
@@ -8266,12 +8374,12 @@ fn render_heatmap(d: &InsightsData, cx: &App) -> AnyElement {
         .child(div().min_w_0().truncate().child(notes.join(" · ")))
         .child(
             h_flex()
-                .gap(px(GAP))
+                .gap(gap)
                 .items_center()
                 .flex_shrink_0()
                 .child(t("Less"))
                 .children(std::iter::once(0.).chain(HEAT).map(|a: f32| {
-                    div().size(px(CELL)).rounded(RADIUS_CELL).bg(if a == 0. {
+                    div().size(cell).rounded(RADIUS_CELL).bg(if a == 0. {
                         theme.muted
                     } else {
                         theme.primary.opacity(a)
@@ -8281,9 +8389,9 @@ fn render_heatmap(d: &InsightsData, cx: &App) -> AnyElement {
         );
 
     v_flex()
-        .gap(px(6.))
+        .gap(zpx(6.))
         .child(months)
-        .child(grid)
+        .child(columns)
         .child(div().pt(SPACE_XS).child(legend))
         .into_any_element()
 }
@@ -8299,8 +8407,10 @@ fn empty_state_card(
     cx: &App,
 ) -> Div {
     let theme = cx.theme();
+    // 宽 360,但栏比它窄时跟着收(放大档位下阅读区可能只剩 380)
     div()
-        .w(px(360.))
+        .w_full()
+        .max_w(zpx(360.))
         .px(SPACE_XXL)
         .py(SPACE_XXL)
         .rounded(theme.radius_lg)
@@ -8346,7 +8456,14 @@ fn empty_state(
                 .text_color(theme.foreground)
                 .child(title.into()),
         )
-        .child(div().text_size(FONT_CAPTION).child(caption.into()))
+        // 占满卡片宽、居中换行:放大档位下卡片比一行说明窄时折行,而不是撑出栏外
+        .child(
+            div()
+                .w_full()
+                .text_center()
+                .text_size(FONT_CAPTION)
+                .child(caption.into()),
+        )
 }
 
 fn image_format_of(media_type: &str) -> Option<gpui::ImageFormat> {
@@ -8516,19 +8633,22 @@ fn export_dir(store: &Store) -> PathBuf {
 }
 
 fn zoom_fit(dims: Option<(u32, u32)>, viewport: Size<Pixels>) -> Size<Pixels> {
-    let available_width = (f32::from(viewport.width) - 112.0).max(120.0);
-    let available_height = (f32::from(viewport.height) - 164.0).max(120.0);
+    // 在 100% 档的坐标里算(边距与上限都是设计稿值),最后只乘一次缩放倍数——
+    // 拿实际窗口像素算完再过 zpx 会乘两次,放大档位下大图撑出窗口
+    let factor = ui_zoom::factor();
+    let available_width = (f32::from(viewport.width) / factor - 112.0).max(120.0);
+    let available_height = (f32::from(viewport.height) / factor - 164.0).max(120.0);
     let Some((width, height)) = dims.filter(|(width, height)| *width > 0 && *height > 0) else {
         return gpui::size(
-            px(available_width.min(720.0)),
-            px(available_height.min(480.0)),
+            zpx(available_width.min(720.0)),
+            zpx(available_height.min(480.0)),
         );
     };
     let (width, height) = (width as f32, height as f32);
     let scale = (available_width / width)
         .min(available_height / height)
         .min(1.0);
-    gpui::size(px(width * scale), px(height * scale))
+    gpui::size(zpx(width * scale), zpx(height * scale))
 }
 
 fn zoom_shadow(y: Pixels, blur: Pixels, alpha: f32) -> gpui::BoxShadow {
@@ -8559,7 +8679,7 @@ fn message_content(
     text: &str,
     session: &SessionMeta,
     slots: &[ImageSlot],
-    base: Pixels,
+    base: impl Into<Pixels>,
     paragraph_gap: gpui::Rems,
     dark: bool,
     border: Hsla,
@@ -8568,6 +8688,7 @@ fn message_content(
     workbench: Entity<Workbench>,
     cx: &mut App,
 ) -> Vec<AnyElement> {
+    let base: Pixels = base.into();
     let mut content = Vec::new();
     let mut cursor = 0usize;
     let mut image_index = 0usize;
@@ -8719,7 +8840,7 @@ fn image_strip(
                     })
                     .child(t("Preview unavailable"))
                     .child(div().max_w_full().truncate().child(media_type.clone()))
-                    .child(icon("icons/download.svg").with_size(px(14.)))
+                    .child(icon("icons/download.svg").with_size(zpx(14.)))
                     .into_any_element()
             }
             ImageSlot::Omitted { .. } => v_flex()
@@ -8750,13 +8871,13 @@ fn centered_pill(text: impl Into<SharedString>, cx: &App) -> Div {
     let theme = cx.theme();
     div().w_full().flex().justify_center().child(
         div()
-            .px(px(10.))
-            .py(px(3.))
+            .px(zpx(10.))
+            .py(zpx(3.))
             .rounded_full()
             .bg(theme.muted)
             .text_size(FONT_LABEL)
             .text_color(theme.muted_foreground)
-            .max_w(px(520.))
+            .max_w(zpx(520.))
             .truncate()
             .child(text.into()),
     )
@@ -8771,7 +8892,7 @@ fn markdown_body(
     text: impl Into<SharedString>,
     host: &str,
     project_path: &str,
-    base: Pixels,
+    base: impl Into<Pixels>,
     paragraph_gap: gpui::Rems,
     dark: bool,
     cx: &mut App,
@@ -8787,7 +8908,7 @@ fn markdown_body(
     let view = TextView::markdown(themed_id, text)
         .style(
             TextViewStyle {
-                heading_base_font_size: base,
+                heading_base_font_size: base.into(),
                 paragraph_gap,
                 is_dark: dark,
                 highlight_theme: if dark {
@@ -8820,14 +8941,14 @@ fn markdown_body(
             h_flex()
                 .items_center()
                 .gap(SPACE_SM)
-                .px(px(6.))
+                .px(zpx(6.))
                 .text_size(FONT_LABEL)
                 .text_color(theme.muted_foreground)
                 .when_some(block.lang(), |actions, lang| actions.child(lang))
                 .child(
                     div()
                         .id("code-copy")
-                        .size(px(20.))
+                        .size(zpx(20.))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -8840,7 +8961,7 @@ fn markdown_body(
                         .on_click(move |_, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()));
                         })
-                        .child(icon("icons/copy.svg").with_size(px(12.))),
+                        .child(icon("icons/copy.svg").with_size(zpx(12.))),
                 )
         })
         .selectable(true);
@@ -8879,7 +9000,7 @@ fn thinking_panel(
                 .hover(|style| style.text_colored(theme.foreground, FONT_MSG_THINKING))
                 .child(
                     icon("icons/chevron-right.svg")
-                        .with_size(px(11.))
+                        .with_size(zpx(11.))
                         .flex_shrink_0()
                         .when(expanded, |icon| {
                             icon.rotate(gpui::Radians(std::f32::consts::FRAC_PI_2))
@@ -8904,7 +9025,7 @@ fn thinking_panel(
             div()
                 .w_full()
                 .min_w_0()
-                .pl(px(30.))
+                .pl(zpx(30.))
                 .pr(SPACE_MD)
                 .pb(SPACE_MD)
                 .whitespace_normal()
@@ -8994,7 +9115,7 @@ fn tool_cluster(
                 .hover(|style| style.text_colored(theme.foreground, FONT_MSG_THINKING))
                 .child(
                     icon("icons/chevron-right.svg")
-                        .with_size(px(11.))
+                        .with_size(zpx(11.))
                         .flex_shrink_0()
                         .when(expanded, |icon| {
                             icon.rotate(gpui::Radians(std::f32::consts::FRAC_PI_2))
@@ -9022,7 +9143,7 @@ fn tool_cluster(
                     header.child(
                         div()
                             .flex_shrink_0()
-                            .px(px(7.))
+                            .px(zpx(7.))
                             .rounded(RADIUS_BADGE)
                             .text_size(FONT_LABEL)
                             .text_color(theme.danger)
@@ -9044,8 +9165,8 @@ fn tool_cluster(
                 .w_full()
                 .min_w_0()
                 .px(SPACE_MD)
-                .py(px(10.))
-                .gap(px(6.))
+                .py(zpx(10.))
+                .gap(zpx(6.))
                 .when(call_ix > 0, |item| {
                     item.border_t_1().border_color(panel_border)
                 });
@@ -9055,7 +9176,7 @@ fn tool_cluster(
                     h_flex()
                         .w_full()
                         .min_w_0()
-                        .gap(px(7.))
+                        .gap(zpx(7.))
                         .child(
                             div()
                                 .flex_shrink_0()
@@ -9165,7 +9286,7 @@ fn tool_section(
                 .child(
                     div()
                         .id(copy_id)
-                        .size(px(20.))
+                        .size(zpx(20.))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -9180,15 +9301,15 @@ fn tool_section(
                         .on_click(move |_, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(full.clone()));
                         })
-                        .child(icon("icons/copy.svg").with_size(px(12.))),
+                        .child(icon("icons/copy.svg").with_size(zpx(12.))),
                 ),
         )
         .child(
             div()
                 .w_full()
                 .min_w_0()
-                .px(px(10.))
-                .py(px(7.))
+                .px(zpx(10.))
+                .py(zpx(7.))
                 .rounded(RADIUS_KBD)
                 .bg(if is_error {
                     theme.danger.opacity(0.08)
@@ -9248,7 +9369,7 @@ fn host_badge(host: &str, theme: &gpui_component::Theme) -> impl IntoElement {
 fn badge(name: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> impl IntoElement {
     div()
         .min_w_0()
-        .px(px(6.))
+        .px(zpx(6.))
         .py(px(1.))
         .rounded(RADIUS_BADGE)
         .bg(bg)
@@ -9261,7 +9382,7 @@ fn badge(name: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> impl IntoElement 
 fn outline_badge(name: impl Into<SharedString>, color: Hsla) -> impl IntoElement {
     div()
         .min_w_0()
-        .px(px(6.))
+        .px(zpx(6.))
         .py(px(1.))
         .rounded(RADIUS_BADGE)
         .border_1()
@@ -9275,7 +9396,7 @@ fn outline_badge(name: impl Into<SharedString>, color: Hsla) -> impl IntoElement
 /// muted 的标签 + 右侧低对比度 hairline,32px 高、px 12
 fn section_header_row(label: impl Into<SharedString>, theme: &gpui_component::Theme) -> Div {
     h_flex()
-        .h(px(32.))
+        .h(zpx(32.))
         .w_full()
         .items_center()
         .gap(SPACE_SM)
@@ -9297,12 +9418,14 @@ fn project_badge(
     theme: &gpui_component::Theme,
 ) -> AnyElement {
     let badge = badge(label, theme.muted, theme.muted_foreground);
+    // 包装层也要能收缩,徽章自己的省略号才轮得到出场(头部右侧按钮多、栏窄时)
     if path.is_empty() {
-        return div().child(badge).into_any_element();
+        return div().min_w_0().child(badge).into_any_element();
     }
     let path = path.to_string();
     div()
         .id(id)
+        .min_w_0()
         .cursor_pointer()
         .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new(show_in_fm()).build(window, cx))
         .on_click(move |_, _, _| terminal::open_in_file_manager(&path))
@@ -9341,6 +9464,8 @@ fn detail_header_frame(
                     h_flex()
                         .flex_1()
                         .min_w_0()
+                        // 放不下时裁掉,别画到右侧按钮底下(放大档位下窄栏常见)
+                        .overflow_hidden()
                         .gap(ICON_TEXT_GAP)
                         .items_center()
                         .text_size(FONT_LABEL)
@@ -9386,10 +9511,17 @@ fn detail_header_frame(
 }
 
 /// 底部工具条按钮的边长:比导航行(32)小一档
-const FOOTER_BTN: Pixels = px(28.);
+const FOOTER_BTN: Zpx = Zpx(28.);
+
+/// 底部工具条的最小宽度:左内边距 + 四颗(三页 + 清理)+ Settings + 按钮间距 + 两组之间
+/// 至少一个 SPACE_SM + 右内边距。100% 档约 177,侧栏 224 绰绰有余;放大后侧栏收窄时
+/// 以它为下限(`Workbench::columns`)
+fn sidebar_footer_width() -> Pixels {
+    FOOTER_LEAD_INSET + FOOTER_BTN * 5. + zpx(2.) * 3. + SPACE_SM + SIDEBAR_EDGE
+}
 /// 工具条左内边距 = 26.75(侧栏中轴,红绿灯红灯中心)− 14(按钮半宽):最左那颗
 /// 图标的中心压在与导航行行首同一条轴上(用户 2026-09-21)
-const FOOTER_LEAD_INSET: Pixels = px(12.75);
+const FOOTER_LEAD_INSET: Zpx = Zpx(LEAD_AXIS.0 - FOOTER_BTN.0 / 2.);
 
 /// 底部工具条的图标按钮(Zed 状态栏 / Xcode 导航条同款图标条,不带盒子):透明底、
 /// hover 才出色;`active`(当前页 / 清理模式)用侧栏行的选中色做圆角底 + 选中前景,
@@ -9423,7 +9555,7 @@ fn sidebar_tool_btn(
         })
         .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tooltip).build(window, cx))
         .on_click(on_click)
-        .child(icon(glyph).with_size(px(14.)))
+        .child(icon(glyph).with_size(zpx(14.)))
 }
 
 /// Things 风源列表行:图标 + 文字 + 计数,6px 圆角选中胶囊
@@ -9449,7 +9581,7 @@ fn sidebar_row(
         .pl(if sub {
             LEAD_INSET + SUB_INDENT
         } else {
-            LEAD_INSET
+            LEAD_INSET.get()
         })
         .pr(SIDEBAR_EDGE)
         .rounded(theme.radius)
@@ -9482,7 +9614,7 @@ fn sidebar_row(
                         .child(match lead {
                             // 线条图标比实心品牌图视觉轻,给它小一档才平衡
                             RowLead::Icon(ic) => ic
-                                .with_size(if sub { px(14.) } else { NAV_ICON })
+                                .with_size(if sub { zpx(14.) } else { NAV_ICON.get() })
                                 .text_color(if active {
                                     theme.sidebar_accent_foreground
                                 } else {
@@ -9541,8 +9673,8 @@ fn open_in_icon(
     fallback: Icon,
 ) -> AnyElement {
     match (term.and_then(|t| t.brand_icon()), icon_path) {
-        (Some(b), _) => img(b).size(px(16.)).into_any_element(),
-        (None, Some(p)) => img(p.clone()).size(px(16.)).into_any_element(),
+        (Some(b), _) => img(b).size(zpx(16.)).into_any_element(),
+        (None, Some(p)) => img(p.clone()).size(zpx(16.)).into_any_element(),
         (None, None) => fallback.into_any_element(),
     }
 }
@@ -9560,10 +9692,10 @@ fn tool_btn(
 ) -> Button {
     let ic = if highlighted {
         icon(filled_icon_path)
-            .with_size(px(16.))
+            .with_size(zpx(16.))
             .text_color(active_color)
     } else {
-        icon(icon_path).with_size(px(16.))
+        icon(icon_path).with_size(zpx(16.))
     };
     Button::new(id)
         .ghost()
@@ -9582,6 +9714,8 @@ impl Focusable for Workbench {
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_language(window, cx);
+        self.sync_zoom(window);
+        self.viewport_width = window.viewport_size().width;
         self.refresh_session_group_date(cx);
         self.restore_pending_list_selection(window, cx);
         let theme = cx.theme();
