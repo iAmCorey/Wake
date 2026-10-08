@@ -210,8 +210,10 @@ CREATE TABLE IF NOT EXISTS claimed_sessions (
 ///       tokenCount;转录胜出的会话向同一个 composer 借),老行靠这轮重解析回填;
 /// "9" = OpenCode 系(OpenCode / ZCode / 新增的 Kilo Code)认得 subtask / agent / retry /
 ///       compaction 四种 part(subtask 写回用户敲的 `/命令`,其余不再计未知行),Windows 上
-///       OpenCode 存的 `C:/…` 目录换回反斜杠,老行靠这轮重解析回填。
-pub const FTS_FORMAT: &str = "9";
+///       OpenCode 存的 `C:/…` 目录换回反斜杠,老行靠这轮重解析回填;
+/// "10" = Kimi Code 桌面端(0.4x)的助手回复与思考(agent.message.appended)、每条记录的时间、
+///       Windows 上 `C:/…` 形态的工作目录换成反斜杠(PR #61),老行靠这轮重解析回填。
+pub const FTS_FORMAT: &str = "10";
 
 fn open_conn(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent() {

@@ -6,6 +6,7 @@
 - Fix: OpenCode sessions show the slash command that started a sub-agent instead of an empty message, and on Windows they are grouped under the same project as other agents' sessions
 - New: Enlarge the whole interface to 110%, 125% or 150% with ⌘+ / ⌘− / ⌘0 (Ctrl on Linux and Windows), the new View menu, or the new Settings → Appearance page, which also takes over the light / dark choice from General; the level is remembered (#51, thanks @kyomind)
 - New: Antigravity conversations are read in full from the plain-text transcripts recent versions of the desktop app and the IDE save — messages, thinking, tool calls with their output, the model and pasted images — and conversations from the IDE carry an IDE badge. Conversations without a transcript are still listed from Antigravity's index, as before. The agent is now called Antigravity instead of Antigravity CLI (#52, thanks @iroha3)
+- Fix: Kimi Code sessions are listed on Windows, and sessions from the Kimi Code desktop app show the assistant's replies and thinking instead of only your prompts (#61, thanks @noohpyt)
 
 ## [0.8.6] — 2026-10-01
 

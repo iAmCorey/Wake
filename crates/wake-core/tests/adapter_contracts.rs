@@ -1947,6 +1947,74 @@ fn kimi_parse_contract() {
     assert_eq!(s2.meta.title, "占位标题会话应回退到这句");
 }
 
+/// Kimi Code 桌面端(0.4x)的 wire(PR #61):助手回复在 agent.message.appended,包装层
+/// `{message, meta}`;一次模型调用一条事件、多半只有 think,同一轮连续的助手事件并成
+/// 一条回复(turn.step.* 不分割),think 进 thinking;新的一轮另起一条,哪怕那一轮的输入
+/// 渲染不出来(只带视频)、没有用户消息隔开。user / tool 角色跳过,不认识的角色与缺包装层
+/// 都计未知行;每行带事件时间。列表走 list_session_files——主代理的 wire.jsonl 按路径分段
+/// 认,原先按字符串比 `/agents/main/wire.jsonl`,Windows 的反斜杠路径一条都列不出来;
+/// Kimi 在 Windows 上记的 `c:/…` 工作目录换成别家同款写法
+#[test]
+fn kimi_desktop_wire_contract() {
+    setup();
+    let session_id = "session_77777777-aaaa-bbbb-cccc-000000000007";
+    let adapter = KimiAdapter::new().with_custom_root(fixture("kimi-desktop"));
+    let refs = adapter.list_session_files().expect("kimi list");
+    assert_eq!(
+        refs.iter()
+            .map(|r| r.native_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![session_id]
+    );
+    let r = &refs[0];
+    // 子代理的 wire.jsonl(文件确实在)按路径分段拒掉
+    let agents = Path::new(&r.file_path).parent().unwrap().parent().unwrap();
+    let sub = agents.join("sub-1").join("wire.jsonl");
+    assert!(sub.is_file());
+    assert!(adapter.file_ref(&sub).is_none());
+
+    let t = adapter
+        .parse_transcript(r)
+        .expect("kimi desktop transcript");
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+        ]
+    );
+    let reply = &t.mainline[1];
+    assert_eq!(reply.text, "QrScanner 的 useEffect 少了清理回调,已补上。");
+    assert_eq!(
+        reply.thinking.as_deref(),
+        Some("先看 QrScanner 的 useEffect\n\n找到了:没有返回清理函数")
+    );
+    assert_eq!(t.mainline[0].timestamp, Some(ms("2026-10-08T00:00:01Z")));
+    assert_eq!(reply.timestamp, Some(ms("2026-10-08T00:00:02Z")));
+    assert_eq!(t.mainline[2].text, "谢谢");
+    assert_eq!(t.mainline[3].text, "不客气。");
+    // 只带视频的那一轮:回复另起一条,不并进上一轮的「不客气。」;同一轮的两步并成一条
+    assert_eq!(t.mainline[4].text, "视频里的按钮错位了。\n\n已经对齐。");
+    assert_eq!(t.mainline[4].timestamp, Some(ms("2026-10-08T00:00:21Z")));
+    // 缺包装层的一行 + 不认识的角色一行
+    assert_eq!(t.unknown_line_count, 2);
+
+    let s = adapter.parse_session(r).expect("kimi desktop session");
+    assert_eq!(s.meta.title, "Kimi 修一下 QrScanner 的 useEffect 内存泄漏");
+    let project = if cfg!(windows) {
+        r"C:\Users\tester\Github\wakefx"
+    } else {
+        "C:/Users/tester/Github/wakefx"
+    };
+    assert_eq!(s.meta.project_path, project);
+    assert_eq!(s.meta.project_name, "wakefx");
+    assert_eq!(s.meta.message_count, 5);
+    assert_seq_contract(adapter.as_ref(), r);
+}
+
 #[test]
 fn antigravity_parse_contract() {
     let env = setup();
