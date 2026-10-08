@@ -1947,6 +1947,80 @@ fn kimi_parse_contract() {
     assert_eq!(s2.meta.title, "占位标题会话应回退到这句");
 }
 
+/// Kimi Code 桌面端(0.4x)的 wire(PR #61):助手回复在 agent.message.appended,包装层
+/// `{message, meta}`;一次模型调用一条事件、多半只有 think,同一轮连续的助手事件并成
+/// 一条回复,think 进 thinking。user 角色与 turn.prompt 重复、tool 角色不展开,都跳过;
+/// 每行带事件时间。列表走 list_session_files——主代理的 wire.jsonl 按路径分段认,原先
+/// 按字符串比 `/agents/main/wire.jsonl`,Windows 的反斜杠路径一条都列不出来
+#[test]
+fn kimi_desktop_wire_contract() {
+    setup();
+    let home = tempfile::tempdir().unwrap();
+    let session_id = "session_77777777-aaaa-bbbb-cccc-000000000007";
+    let main = home
+        .path()
+        .join("sessions")
+        .join("wd_wakefx_desktop1")
+        .join(session_id)
+        .join("agents")
+        .join("main");
+    fs::create_dir_all(&main).unwrap();
+    fs::copy(fixture("kimi-desktop/wire.jsonl"), main.join("wire.jsonl")).unwrap();
+    // 子代理的 wire.jsonl 不列
+    let sub = main.parent().unwrap().join("sub-1");
+    fs::create_dir_all(&sub).unwrap();
+    fs::copy(fixture("kimi-desktop/wire.jsonl"), sub.join("wire.jsonl")).unwrap();
+    fs::write(
+        home.path().join("session_index.jsonl"),
+        format!(
+            r#"{{"sessionId":"{session_id}","sessionDir":"/x","workDir":"/Users/tester/Github/wakefx"}}"#
+        ) + "\n",
+    )
+    .unwrap();
+
+    let adapter = KimiAdapter::new().with_custom_root(home.path().to_path_buf());
+    let refs = adapter.list_session_files().expect("kimi list");
+    assert_eq!(
+        refs.iter()
+            .map(|r| r.native_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![session_id]
+    );
+    let r = &refs[0];
+    assert!(adapter.file_ref(&sub.join("wire.jsonl")).is_none());
+
+    let t = adapter
+        .parse_transcript(r)
+        .expect("kimi desktop transcript");
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+        ]
+    );
+    let reply = &t.mainline[1];
+    assert_eq!(reply.text, "QrScanner 的 useEffect 少了清理回调,已补上。");
+    assert_eq!(
+        reply.thinking.as_deref(),
+        Some("先看 QrScanner 的 useEffect\n\n找到了:没有返回清理函数")
+    );
+    assert_eq!(t.mainline[0].timestamp, Some(ms("2026-10-08T00:00:01Z")));
+    assert_eq!(reply.timestamp, Some(ms("2026-10-08T00:00:02Z")));
+    assert_eq!(t.mainline[2].text, "谢谢");
+    assert_eq!(t.mainline[3].text, "不客气。");
+    // 包装层缺了一层的那行计 unknown
+    assert_eq!(t.unknown_line_count, 1);
+
+    let s = adapter.parse_session(r).expect("kimi desktop session");
+    assert_eq!(s.meta.title, "Kimi 修一下 QrScanner 的 useEffect 内存泄漏");
+    assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx");
+    assert_eq!(s.meta.message_count, 4);
+    assert_seq_contract(adapter.as_ref(), r);
+}
+
 #[test]
 fn antigravity_parse_contract() {
     let env = setup();

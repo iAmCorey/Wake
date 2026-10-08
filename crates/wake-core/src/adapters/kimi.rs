@@ -143,11 +143,13 @@ fn parse_kimi_wire(path: &Path, decode_images: bool) -> Result<(Vec<TranscriptMe
             unknown += 1;
             continue;
         };
+        // 事件时间(桌面端每行都有;旧 CLI 没有,给 0 即不标)
+        let ts = row.get("time").map(to_epoch_ms).unwrap_or(0);
         match row.get("type").and_then(|v| v.as_str()) {
             Some("turn.prompt") | Some("turn.steer") => {
                 let parsed = content_parts(row.get("input").unwrap_or(&Value::Null), decode_images);
                 if !parsed.text.is_empty() || !parsed.images.is_empty() {
-                    let mut message = text_msg(Role::User, &parsed.text, 0);
+                    let mut message = text_msg(Role::User, &parsed.text, ts);
                     message.images = parsed.images;
                     messages.push(message);
                 }
@@ -165,7 +167,7 @@ fn parse_kimi_wire(path: &Path, decode_images: bool) -> Result<(Vec<TranscriptMe
                 let parsed =
                     content_parts(msg.get("content").unwrap_or(&Value::Null), decode_images);
                 if !parsed.text.is_empty() || !parsed.images.is_empty() {
-                    let mut message = text_msg(role, &parsed.text, 0);
+                    let mut message = text_msg(role, &parsed.text, ts);
                     message.images = parsed.images;
                     messages.push(message);
                 }
@@ -185,7 +187,6 @@ fn parse_kimi_wire(path: &Path, decode_images: bool) -> Result<(Vec<TranscriptMe
                 if msg.get("role").and_then(|v| v.as_str()) != Some("assistant") {
                     continue;
                 }
-                let ts = row.get("time").map(to_epoch_ms).unwrap_or(0);
                 let content = msg.get("content").unwrap_or(&Value::Null);
                 let parsed = content_parts(content, decode_images);
                 let thinking = think_texts(content);
