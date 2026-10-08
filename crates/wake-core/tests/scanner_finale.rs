@@ -1355,6 +1355,54 @@ fn dsh_newer_generation_takes_over_an_indexed_older_one() {
     );
 }
 
+/// Kimi 分叉:关系写在子会话自己的 state.json(`forkedFrom`),全量扫描后子会话挂在父会话
+/// 下面;state.json 的 archived 照搬进索引
+#[test]
+fn kimi_forks_nest_under_their_parent() {
+    use wake_core::adapters::kimi::KimiAdapter;
+    let adapters: Vec<Box<dyn AgentAdapter>> =
+        vec![KimiAdapter::new().with_custom_root(common::fixture("kimi-cli"))];
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+    let parent = "kimi:session_c1111111-aaaa-bbbb-cccc-000000000001";
+    let child = "kimi:session_c2222222-aaaa-bbbb-cccc-000000000002";
+    assert_eq!(store.parent_key_of(child).unwrap().as_deref(), Some(parent));
+    assert!(store.get_session(child).unwrap().unwrap().archived);
+    assert!(!store.get_session(parent).unwrap().unwrap().archived);
+}
+
+/// Kimi 的归档、改名只写 state.json:增量扫描按引用判脏,state.json 的 mtime / size 并在
+/// 引用里,才会重新解析(转录没变、旧引用照旧的话,归档标记永远停在上次)
+#[test]
+fn kimi_state_only_changes_reach_the_index() {
+    use wake_core::adapters::kimi::KimiAdapter;
+    let home = tempfile::tempdir().unwrap();
+    common::copy_tree(&common::fixture("kimi-cli"), home.path());
+    let adapters: Vec<Box<dyn AgentAdapter>> =
+        vec![KimiAdapter::new().with_custom_root(home.path().to_path_buf())];
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+    let key = "kimi:session_c1111111-aaaa-bbbb-cccc-000000000001";
+    assert!(!store.get_session(key).unwrap().unwrap().archived);
+
+    let mut state = home.path().to_path_buf();
+    state.extend([
+        "sessions",
+        "wd_wakefx_cli1",
+        "session_c1111111-aaaa-bbbb-cccc-000000000001",
+        "state.json",
+    ]);
+    std::fs::write(
+        &state,
+        r#"{"title":"修 QrScanner 泄漏","archived":true,"createdAt":"2026-10-08T00:00:00.000Z"}"#,
+    )
+    .unwrap();
+    run_scan(&adapters, &store, &Recorder::new(), false).unwrap();
+    assert!(store.get_session(key).unwrap().unwrap().archived);
+}
+
 /// Antigravity:索引里先只有卡片,明文转录后来才写出来——同一个 key 由转录接替
 /// (`dedup_rank`,转录的 mtime 与卡片的时间毫不相干),增量与全量两条写路径都是;
 /// 转录目录没了、索引还在,卡片回来。库里始终只有一行

@@ -243,6 +243,8 @@ pub struct CompactPage {
     pub rendered: usize,
     /// 本页范围内被跳过的注入上下文(Meta)条数
     pub skipped_meta: usize,
+    /// 本页里只有 thinking、又没要 thinking 的回复数(块里只写 "(thinking only)")
+    pub thinking_only: usize,
     /// 本页首/末条消息的 seq(rendered = 0 时 None)
     pub seq_range: Option<(i64, i64)>,
 }
@@ -262,6 +264,7 @@ pub fn render_compact(messages: &[TranscriptMessage], o: &CompactOptions) -> Com
     let mut text = String::new();
     let mut rendered = 0usize;
     let mut skipped_meta = 0usize;
+    let mut thinking_only = 0usize;
     let mut chars = 0usize;
     let mut next_seq = None;
     let mut first_seq = None;
@@ -280,6 +283,7 @@ pub fn render_compact(messages: &[TranscriptMessage], o: &CompactOptions) -> Com
         text.push_str(&block);
         chars += block_chars;
         rendered += 1;
+        thinking_only += usize::from(is_thinking_only(m, o));
         first_seq.get_or_insert(m.seq);
         last_seq = Some(m.seq);
     }
@@ -288,8 +292,18 @@ pub fn render_compact(messages: &[TranscriptMessage], o: &CompactOptions) -> Com
         next_seq,
         rendered,
         skipped_meta,
+        thinking_only,
         seq_range: first_seq.zip(last_seq),
     }
+}
+
+/// 只想了没说(一轮停在思考上)、又没要 thinking 的回复:不是空的,怎么看由调用方写在页脚
+fn is_thinking_only(m: &TranscriptMessage, o: &CompactOptions) -> bool {
+    !o.include_thinking
+        && m.text.trim().is_empty()
+        && m.tool_calls.is_empty()
+        && m.images.is_empty()
+        && m.thinking.as_deref().is_some_and(|t| !t.trim().is_empty())
 }
 
 fn compact_block(m: &TranscriptMessage, o: &CompactOptions) -> String {
@@ -316,7 +330,7 @@ fn compact_block(m: &TranscriptMessage, o: &CompactOptions) -> String {
     } else {
         None
     };
-    if let Some(th) = thinking {
+    if let Some(th) = &thinking {
         out.push_str("> [thinking] ");
         out.push_str(&th.replace('\n', "\n> "));
         out.push_str("\n\n");
@@ -324,8 +338,12 @@ fn compact_block(m: &TranscriptMessage, o: &CompactOptions) -> String {
     if !body.is_empty() {
         out.push_str(&body);
         out.push_str("\n\n");
-    } else if m.tool_calls.is_empty() {
-        out.push_str("(empty)\n\n");
+    } else if m.tool_calls.is_empty() && m.images.is_empty() && thinking.is_none() {
+        out.push_str(if is_thinking_only(m, o) {
+            "(thinking only)\n\n"
+        } else {
+            "(empty)\n\n"
+        });
     }
     if !m.images.is_empty() {
         out.push_str(&format!(
@@ -477,6 +495,28 @@ mod compact_tests {
         assert!(page
             .text
             .contains("> [compacted summary] Conversation compacted"));
+    }
+
+    #[test]
+    fn thinking_only_replies_are_not_reported_empty() {
+        let mut reply = msg(0, Role::Assistant, MessageKind::Text, "");
+        reply.thinking = Some("先想一想".into());
+        let messages = vec![reply, msg(1, Role::Assistant, MessageKind::Text, "")];
+        let hidden = render_compact(&messages, &CompactOptions::default());
+        assert!(hidden.text.contains("(thinking only)"));
+        assert_eq!(hidden.thinking_only, 1);
+        let shown = render_compact(
+            &messages,
+            &CompactOptions {
+                include_thinking: true,
+                ..Default::default()
+            },
+        );
+        assert!(shown.text.contains("> [thinking] 先想一想"));
+        assert!(!shown.text.contains("thinking only"));
+        assert_eq!(shown.thinking_only, 0);
+        // 真的什么都没有的那条才是 (empty)
+        assert_eq!(shown.text.matches("(empty)").count(), 1);
     }
 
     #[test]

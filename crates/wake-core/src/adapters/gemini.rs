@@ -5,7 +5,7 @@ use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 /// Gemini CLI:`~/.gemini/tmp/<slug>/chats/session-*.jsonl`。
@@ -84,15 +84,8 @@ fn parse_gemini_jsonl(path: &Path, decode_images: bool) -> Result<GeminiParse> {
     let mut unknown = 0u32;
     let mut last_set: Option<Value> = None;
 
-    for line in reader.lines() {
-        let Ok(line) = line else {
-            unknown += 1;
-            continue;
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(row) = serde_json::from_str::<Value>(&line) else {
+    for row in jsonl_values(reader) {
+        let Some(row) = row? else {
             unknown += 1;
             continue;
         };
@@ -249,9 +242,10 @@ impl AgentAdapter for GeminiAdapter {
     }
 
     fn file_ref(&self, path: &Path) -> Option<SessionFileRef> {
-        // 只认 chats/session-*.jsonl(tmp 下其他 jsonl 不是会话)
+        // 只认 chats/session-*.jsonl(tmp 下其他 jsonl 不是会话);所在目录按路径分段判,
+        // Windows 的反斜杠路径一样认
         let name = path.file_name()?.to_string_lossy().to_string();
-        if !name.starts_with("session-") || !path.to_string_lossy().contains("/chats/") {
+        if !name.starts_with("session-") || path.parent()?.file_name()? != "chats" {
             return None;
         }
         default_file_ref(self.agent(), path)

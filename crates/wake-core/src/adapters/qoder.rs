@@ -5,7 +5,7 @@ use anyhow::Result;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 /// Qoder CLI:`~/.qoder/projects/<project-key>/<session-id>.jsonl`。
@@ -265,23 +265,10 @@ fn parse_qoder_jsonl(path: &Path, decode_images: bool) -> Result<QoderParse> {
     let mut runtime_model: Option<String> = None;
     let mut unknown = 0u32;
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(line) => line,
-            Err(_) => {
-                unknown += 1;
-                continue;
-            }
-        };
-        if line.trim().is_empty() {
+    for row in jsonl_values(reader) {
+        let Some(row) = row? else {
+            unknown += 1;
             continue;
-        }
-        let row: Value = match serde_json::from_str(&line) {
-            Ok(row) => row,
-            Err(_) => {
-                unknown += 1;
-                continue;
-            }
         };
         let typ = row.get("type").and_then(Value::as_str).unwrap_or("");
         match typ {

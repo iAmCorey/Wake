@@ -1,0 +1,5 @@
+{"type":"metadata","protocol_version":"1.0","created_at":1786000000000}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"旧版里问过的问题"}],"toolCalls":[]}}
+{"type":"context.append_message","message":{"role":"assistant","content":[{"type":"text","text":"我来查一下。"}],"toolCalls":[{"type":"function","id":"call_1","name":"Shell","arguments":"{\"command\":\"ls\"}"}]}}
+{"type":"context.append_message","message":{"role":"tool","content":[{"type":"text","text":"README.md"}],"toolCalls":[],"toolCallId":"call_1"}}
+{"type":"context.append_message","message":{"role":"assistant","content":[{"type":"text","text":"目录里只有 README。"}],"toolCalls":[]}}

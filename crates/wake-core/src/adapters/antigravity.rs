@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -410,15 +410,8 @@ fn read_transcript(path: &Path, decode_images: bool) -> Result<Transcript> {
     let mut turn = Turn::default();
     let mut document = None;
 
-    for line in reader.lines() {
-        let Ok(line) = line else {
-            t.unknown_lines += 1;
-            continue;
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(row) = serde_json::from_str::<Value>(&line) else {
+    for row in jsonl_values(reader) {
+        let Some(row) = row? else {
             t.unknown_lines += 1;
             continue;
         };

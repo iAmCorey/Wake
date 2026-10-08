@@ -1950,8 +1950,8 @@ fn kimi_parse_contract() {
 /// Kimi Code 桌面端(0.4x)的 wire(PR #61):助手回复在 agent.message.appended,包装层
 /// `{message, meta}`;一次模型调用一条事件、多半只有 think,同一轮连续的助手事件并成
 /// 一条回复(turn.step.* 不分割),think 进 thinking;新的一轮另起一条,哪怕那一轮的输入
-/// 渲染不出来(只带视频)、没有用户消息隔开。user / tool 角色跳过,不认识的角色与缺包装层
-/// 都计未知行;每行带事件时间。列表走 list_session_files——主代理的 wire.jsonl 按路径分段
+/// 渲染不出来(只带视频)、没有用户消息隔开。user 角色与 turn.prompt 重复、跳过,tool 角色
+/// 回填到调用上,不认识的角色与缺包装层都计未知行;每行带事件时间。列表走 list_session_files——主代理的 wire.jsonl 按路径分段
 /// 认,原先按字符串比 `/agents/main/wire.jsonl`,Windows 的反斜杠路径一条都列不出来;
 /// Kimi 在 Windows 上记的 `c:/…` 工作目录换成别家同款写法
 #[test]
@@ -2013,6 +2013,141 @@ fn kimi_desktop_wire_contract() {
     assert_eq!(s.meta.project_name, "wakefx");
     assert_eq!(s.meta.message_count, 5);
     assert_seq_contract(adapter.as_ref(), r);
+}
+
+/// Kimi Code CLI(agent-core 0.29)的真实记录流(合成 fixture,形状照 Kimi 自己的
+/// `reduceWireRecords`):助手回复按步写在 context.append_loop_event(think / text 块、
+/// tool.call 与 tool.result),同一轮的各步并成一条、工具结果回填;用户输入的
+/// context.append_message 回声跳过,只带视频的输入渲染不出来时由回声顶上;后台任务通知
+/// 这类系统产生的输入记 Meta,注入与目标续跑不显示;压缩摘要单独一条;不认识的 origin 与
+/// 记录类型计未知行。另有分叉会话(forked 之前折成一条、挂回父会话、已归档)与从旧版
+/// kimi-cli 迁移来的 `ses_` 会话(只有 context.append_message、没有时间)
+#[test]
+fn kimi_cli_wire_contract() {
+    setup();
+    let main_id = "session_c1111111-aaaa-bbbb-cccc-000000000001";
+    let fork_id = "session_c2222222-aaaa-bbbb-cccc-000000000002";
+    let migrated_id = "ses_c3333333-aaaa-bbbb-cccc-000000000003";
+    let adapter = KimiAdapter::new().with_custom_root(fixture("kimi-cli"));
+    let refs: std::collections::HashMap<String, SessionFileRef> = adapter
+        .list_session_files()
+        .expect("kimi list")
+        .into_iter()
+        .map(|r| (r.native_id.clone(), r))
+        .collect();
+    let mut ids: Vec<&str> = refs.keys().map(String::as_str).collect();
+    ids.sort();
+    assert_eq!(ids, vec![migrated_id, main_id, fork_id]);
+
+    let r = &refs[main_id];
+    let t = adapter.parse_transcript(r).expect("kimi cli transcript");
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+            (Role::User, MessageKind::Meta),
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+            (Role::System, MessageKind::CompactSummary),
+            (Role::User, MessageKind::Meta),
+        ]
+    );
+    let m = &t.mainline;
+    assert_eq!(m[0].text, "QrScanner 的 useEffect 有内存泄漏,修一下");
+    assert_eq!(m[0].timestamp, Some(ms("2026-10-08T00:00:01Z")));
+    // 两步并成一条:think 进 thinking,工具结果回填到调用上
+    assert_eq!(m[1].text, "我先看看 QrScanner。\n\n缺了清理回调,已补上。");
+    assert_eq!(m[1].thinking.as_deref(), Some("先读 QrScanner"));
+    let calls: Vec<(&str, &str, bool)> = m[1]
+        .tool_calls
+        .iter()
+        .map(|c| {
+            (
+                c.name.as_str(),
+                c.output.as_deref().unwrap_or(""),
+                c.is_error,
+            )
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        vec![(
+            "ReadFile",
+            "useEffect(() => { scanner.start() }, [])",
+            false
+        )]
+    );
+    assert!(m[2].text.starts_with("<notification"));
+    // 只带视频的输入渲染不出来:由进上下文的那份回声顶上
+    assert_eq!(m[3].text, "<video path=\"/tmp/demo.mp4\"></video>");
+    assert_eq!(m[4].text, "视频里按钮错位了。");
+    assert_eq!(m[4].tool_calls[0].output.as_deref(), Some("1 failing"));
+    assert!(m[4].tool_calls[0].is_error);
+    assert!(m[5].text.contains("QrScanner 的内存泄漏"));
+    assert_eq!(m[6].text, "来源不认识的输入");
+    // 不认识的 origin 一次 + 不认识的记录类型一次;用量、请求快照、权限等都认得
+    assert_eq!(t.unknown_line_count, 2);
+    let s = adapter.parse_session(r).expect("kimi cli session");
+    assert_eq!(s.meta.title, "修 QrScanner 泄漏");
+    assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx");
+    assert_eq!(s.meta.message_count, 4);
+    assert!(!s.meta.archived);
+    assert_seq_contract(adapter.as_ref(), r);
+
+    // 分叉:forked 之前从父会话复制来的那段折成一条;state.json 的 archived 照搬
+    let fork = adapter
+        .parse_transcript(&refs[fork_id])
+        .expect("kimi fork transcript");
+    assert_eq!(
+        roles_kinds(&fork.mainline),
+        vec![
+            (Role::System, MessageKind::Meta),
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+        ]
+    );
+    assert!(fork.mainline[0]
+        .text
+        .contains("2 messages inherited from the parent session"));
+    assert_eq!(fork.mainline[2].text, "已抽成 useQrScanner。");
+    assert!(fork.meta.archived);
+    assert_eq!(
+        adapter.parent_links(),
+        Some(vec![(format!("kimi:{fork_id}"), format!("kimi:{main_id}"))])
+    );
+
+    // 迁移来的会话:没有 turn 记录,用户消息来自 context.append_message
+    let migrated = adapter
+        .parse_transcript(&refs[migrated_id])
+        .expect("kimi migrated transcript");
+    assert_eq!(
+        roles_kinds(&migrated.mainline),
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+        ]
+    );
+    assert_eq!(
+        migrated.mainline[1].text,
+        "我来查一下。\n\n目录里只有 README。"
+    );
+    assert_eq!(
+        migrated.mainline[1].tool_calls[0].output.as_deref(),
+        Some("README.md")
+    );
+    assert_eq!(migrated.unknown_line_count, 0);
+
+    // 自定义 location 只选到某个 wd_* 工作目录桶:会话照样列得出,工作目录照样查得到
+    let bucket = KimiAdapter::new()
+        .with_custom_root(fixture("kimi-cli").join("sessions").join("wd_wakefx_cli1"));
+    let listed = bucket.list_session_files().expect("kimi bucket list");
+    assert_eq!(listed.len(), 3);
+    let one = listed.iter().find(|r| r.native_id == main_id).unwrap();
+    assert_eq!(
+        bucket.parse_session(one).unwrap().meta.project_path,
+        "/Users/tester/Github/wakefx"
+    );
 }
 
 #[test]
@@ -2349,6 +2484,48 @@ fn overlapping_watch_roots_dispatch_to_deepest() {
         None,
         "同名前缀兄弟目录不该匹配"
     );
+}
+
+/// 列会话与 file_ref(watcher 的入口)必须是同一个判据。假 HOME 是 copy_tree 拷出来的,路径
+/// 用本平台的分隔符,所以 Windows CI 上这里跑的就是反斜杠路径——拿写死 `/` 的字符串比路径的
+/// file_ref 在那里一条都对不上:会话只在全量扫描时出现,实时更新全丢(Kimi 在 PR #61 之前
+/// 在 Windows 上连列都列不出来,Cursor / Gemini 的实时更新、Claude 的子代理过滤同病)。
+/// 只看真实文件:SQLite 型的 `<db>#<id>` 虚拟路径不走 watcher
+#[test]
+fn listed_sessions_round_trip_through_file_ref() {
+    setup();
+    for adapter in wake_core::adapters::create_adapters() {
+        let tag = adapter.agent().as_str();
+        for r in adapter.list_session_files().unwrap_or_default() {
+            let path = Path::new(&r.file_path);
+            if !path.is_file() {
+                continue;
+            }
+            let back = adapter
+                .file_ref(path)
+                .unwrap_or_else(|| panic!("[{tag}] file_ref 不认列表里的 {}", r.file_path));
+            assert_eq!(back.native_id, r.native_id, "[{tag}] {}", r.file_path);
+            // 戳也得一样:边车并进引用的家,两条路算出来的不一样,增量与全量就互相判脏
+            assert_eq!(
+                (back.mtime_ms, back.size),
+                (r.mtime_ms, r.size),
+                "[{tag}] {}",
+                r.file_path
+            );
+        }
+    }
+    // 反过来:子代理转录(文件确实在)不是会话,按所在目录拒掉。逐段 join,Windows 上同样是
+    // 反斜杠路径
+    let mut sub = fixture("claude");
+    sub.extend([
+        "projects",
+        "-Users-tester-Github-wakefx",
+        "11111111-aaaa-bbbb-cccc-000000000001",
+        "subagents",
+        "agent-fixture01.jsonl",
+    ]);
+    assert!(sub.is_file());
+    assert!(ClaudeAdapter::new().file_ref(&sub).is_none());
 }
 
 #[test]

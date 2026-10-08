@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -375,17 +375,10 @@ fn read_jsonl_entries(path: &Path) -> Result<(Vec<Value>, u32)> {
     let reader = BufReader::with_capacity(1 << 20, file);
     let mut out = Vec::new();
     let mut bad = 0u32;
-    for line in reader.lines() {
-        let Ok(line) = line else {
-            bad += 1;
-            continue;
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<Value>(&line) {
-            Ok(v) => out.push(v),
-            Err(_) => bad += 1,
+    for row in jsonl_values(reader) {
+        match row? {
+            Some(v) => out.push(v),
+            None => bad += 1,
         }
     }
     Ok((out, bad))

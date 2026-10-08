@@ -484,20 +484,10 @@ fn parse_rollout(path: &Path, decode_images: bool) -> Result<CodexParse> {
     // 子线程里"父线程历史到此为止"的下标(messages / event_fallback 各一)
     let mut inherited: Option<(usize, usize)> = None;
 
-    for line in reader.lines() {
-        let Ok(line) = line else {
+    for row in jsonl_values(reader) {
+        let Some(row) = row? else {
             unknown_lines += 1;
             continue;
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let row: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => {
-                unknown_lines += 1;
-                continue;
-            }
         };
         let ts = row.get("timestamp").map(to_epoch_ms).unwrap_or(0);
         if ts > 0 {

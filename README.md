@@ -43,7 +43,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and a dozen othe
 | Pi | `~/.pi/agent/sessions/**/*.jsonl` | ✅ | — |
 | Oh My Pi | `~/.omp/agent/sessions/**/*.jsonl` | ✅ | — |
 | Grok Build | `~/.grok/sessions/**/updates.jsonl` | ✅ | — |
-| Kimi Code | `~/.kimi-code/sessions/**/wire.jsonl` | — | — |
+| Kimi Code | `~/.kimi-code/sessions/**/wire.jsonl` (CLI and desktop app; `KIMI_CODE_HOME` is respected) | — | — |
 | Antigravity | `~/.gemini/antigravity/brain` and `~/.gemini/antigravity-ide/brain` (the plain-text transcripts recent versions of the desktop app and the IDE write, pasted images included) + `~/.gemini/antigravity-cli/conversation_summaries.db` (the conversation index shared by the CLI, desktop app and IDE; a conversation with no transcript on disk is listed from it as a summary card, since its body is stored encrypted) | ✅ | ✅ |
 | DeepSeek Harness (`dsh`) | `~/.dsh/sessions/**/session[.vN].jsonl[.zstd]` (the newest log format generation is read; zstd-compressed logs are decoded transparently) | ✅ | — |
 | Hermes Agent | `~/.hermes/state.db` + `profiles/*/state.db` (`HERMES_HOME` is respected) | ✅ | ✅ |

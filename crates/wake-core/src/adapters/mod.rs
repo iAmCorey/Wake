@@ -56,8 +56,10 @@ pub trait AgentAdapter: Send + Sync {
     /// 根不在就是确定没有,降级为 Ok(空);Err 只表示"这一刻读不出"(库在却打不开)——
     /// scanner 冻结这一家这一轮(库里归它的行原样留着),别家照常。
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>>;
-    /// watcher 事件路径 → 本 adapter 的会话文件引用;None = 非会话文件
-    /// (边车、子代理转录等)。默认:非空 .jsonl,stem 即 native_id。
+    /// watcher 事件路径 → 本 adapter 的会话文件引用;None = 与会话无关(子代理转录等)。
+    /// 解析时还要读的边车可以换成它所属会话的引用(Kimi 的 state.json):引用的 mtime / size
+    /// 要盖住解析读到的每个文件,只改了边车,全量扫描才判得出脏(Kilo legacy、Antigravity
+    /// 把索引那一行算进来是同一个道理)。默认:非空 .jsonl,stem 即 native_id。
     /// 各家的路径布局知识收敛在此,watcher 不再硬编码任何 agent 特例。
     fn file_ref(&self, path: &Path) -> Option<SessionFileRef> {
         parse_utils::default_file_ref(self.agent(), path)

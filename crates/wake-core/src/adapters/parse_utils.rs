@@ -55,6 +55,53 @@ fn consume_image_decode_budget(bytes: usize) -> bool {
     })
 }
 
+/// JSONL 逐行解成 JSON:空行跳过,读不出(坏 UTF-8)或不是 JSON 的行交成 `Ok(None)`,调用方计
+/// 未知行。读错误交一次 `Err` 就结束,调用方 `?` 出去让这次解析失败:`BufRead::lines` 遇到读
+/// 错误会一直交回同一个错误(EIO、断开的网络盘、Windows 上被别的进程锁住的文件),`continue`
+/// 接着读就是死循环——扫描线程卡在 SCAN_GATE 里,刷新弹窗永远关不掉;当成读完了,半截转录就
+/// 带着整个文件的 mtime / size 入库,文件不再变就永远停在半截。解析失败则库里的旧行原样留着、
+/// 下一轮再试
+pub fn jsonl_values<R: std::io::BufRead>(
+    reader: R,
+) -> impl Iterator<Item = std::io::Result<Option<Value>>> {
+    jsonl_lines(reader).filter_map(|line| match line {
+        Ok(Some(line)) if line.trim().is_empty() => None,
+        Ok(line) => Some(Ok(line.and_then(|line| serde_json::from_str(&line).ok()))),
+        Err(e) => Some(Err(e)),
+    })
+}
+
+/// `BufRead::lines` 加上上面那条读错误规则:坏 UTF-8 的行字节已经读过,交成 `Ok(None)` 接着读
+fn jsonl_lines<R: std::io::BufRead>(reader: R) -> JsonlLines<R> {
+    JsonlLines {
+        lines: reader.lines(),
+        done: false,
+    }
+}
+
+struct JsonlLines<R> {
+    lines: std::io::Lines<R>,
+    done: bool,
+}
+
+impl<R: std::io::BufRead> Iterator for JsonlLines<R> {
+    type Item = std::io::Result<Option<String>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        match self.lines.next()? {
+            Ok(line) => Some(Ok(Some(line))),
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Some(Ok(None)),
+            Err(e) => {
+                self.done = true;
+                Some(Err(e))
+            }
+        }
+    }
+}
+
 /// 文件 mtime → epoch ms(各家 adapter 与 watcher 共用)
 pub fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
     meta.modified()
@@ -392,16 +439,12 @@ impl ParsedContent {
 }
 
 /// 把新内容并入已存在的消息，并同步平移图片的正文偏移。
-pub fn append_content_to_message(
-    message: &mut TranscriptMessage,
-    content: ParsedContent,
-    separator: &str,
-) {
+fn append_content_to_message(message: &mut TranscriptMessage, content: ParsedContent) {
     let mut combined = ParsedContent {
         text: std::mem::take(&mut message.text),
         images: std::mem::take(&mut message.images),
     };
-    combined.append_with_separator(content, separator);
+    combined.append_with_separator(content, "\n\n");
     message.text = combined.text;
     message.images = combined.images;
 }
@@ -428,13 +471,13 @@ pub fn merge_into_last_assistant(
     }
     if !content.text.is_empty() || !content.images.is_empty() {
         if last.text.len() <= MAX_MSG_TEXT {
-            append_content_to_message(last, content, "\n\n");
+            append_content_to_message(last, content);
+            if last.text.len() > MAX_MSG_TEXT {
+                last.text = clip(&last.text, MAX_MSG_TEXT).0;
+                last.truncated = true;
+            }
         } else {
             append_images_to_message_end(last, content.images);
-        }
-        if last.text.len() > MAX_MSG_TEXT {
-            last.text = clip(&last.text, MAX_MSG_TEXT).0;
-            last.truncated = true;
         }
     }
     let thinking = thinking.trim();
@@ -895,6 +938,15 @@ impl<T: Clone> MtimeCache<T> {
 }
 
 /// tool_use 块 → ToolCallView(preview + pretty-print input 三件套统一)
+/// 工具调用的参数:模型常把它写成 JSON 字符串,解得开就用解开的,解不开(命令行、自由文本)
+/// 原样留着
+pub fn decoded_arguments(args: &Value) -> std::borrow::Cow<'_, Value> {
+    match args.as_str().and_then(|s| serde_json::from_str(s).ok()) {
+        Some(parsed) => std::borrow::Cow::Owned(parsed),
+        None => std::borrow::Cow::Borrowed(args),
+    }
+}
+
 pub fn tool_call_view(
     id: String,
     name: &str,
@@ -1158,6 +1210,43 @@ pub fn make_preview(input: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jsonl_lines_stop_on_a_persistent_read_error() {
+        // 一直读不出来(EIO、断开的网络盘):交一次 Err 就结束,不打转
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("disk gone"))
+            }
+        }
+        let mut lines = jsonl_lines(std::io::BufReader::new(Broken));
+        assert!(matches!(lines.next(), Some(Err(_))));
+        assert!(lines.next().is_none());
+        // 坏 UTF-8 的行跳过,接着读
+        let data: &[u8] = b"{\"a\":1}\n\xff\xfe\n{\"b\":2}\n";
+        let lines: Vec<_> = jsonl_lines(data).map(Result::unwrap).collect();
+        assert_eq!(
+            lines,
+            vec![
+                Some("{\"a\":1}".to_string()),
+                None,
+                Some("{\"b\":2}".to_string())
+            ]
+        );
+        // 解成 JSON:空行跳过,坏行与不是 JSON 的行都交 None
+        let data: &[u8] = b"{\"a\":1}\n\n  \nnot json\n\xff\n{\"b\":2}";
+        let values: Vec<_> = jsonl_values(data).map(Result::unwrap).collect();
+        assert_eq!(
+            values,
+            vec![
+                Some(serde_json::json!({"a": 1})),
+                None,
+                None,
+                Some(serde_json::json!({"b": 2}))
+            ]
+        );
+    }
 
     #[test]
     fn merging_into_the_last_assistant_caps_text_and_thinking() {

@@ -6,7 +6,7 @@ use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -257,15 +257,8 @@ fn parse_grok_updates(path: &Path, decode_images: bool) -> Result<(Vec<Transcrip
     let mut rp = Replay::new();
     let mut unknown = 0u32;
 
-    for line in reader.lines() {
-        let Ok(line) = line else {
-            unknown += 1;
-            continue;
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(row) = serde_json::from_str::<Value>(&line) else {
+    for row in jsonl_values(reader) {
+        let Some(row) = row? else {
             unknown += 1;
             continue;
         };

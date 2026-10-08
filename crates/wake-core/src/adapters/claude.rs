@@ -5,7 +5,7 @@ use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 /// Claude JSONL 已知的非消息行类型,静默跳过(不计 unknown)
@@ -209,23 +209,10 @@ fn parse_claude_jsonl(
     let mut unknown_lines: u32 = 0;
     let mut pending: Option<PendingAssistant> = None;
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => {
-                unknown_lines += 1;
-                continue;
-            }
-        };
-        if line.trim().is_empty() {
+    for row in jsonl_values(reader) {
+        let Some(row) = row? else {
+            unknown_lines += 1;
             continue;
-        }
-        let row: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => {
-                unknown_lines += 1;
-                continue;
-            }
         };
         let typ = row.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -697,9 +684,11 @@ impl AgentAdapter for ClaudeAdapter {
     }
 
     fn file_ref(&self, path: &Path) -> Option<SessionFileRef> {
-        let p = path.to_string_lossy();
-        // subagents 转录与 memory 边车不是主会话
-        if p.contains("/subagents/") || p.contains("/memory/") {
+        // subagents 转录与 memory 边车不是主会话。按所在目录的名字判:按路径分段,Windows 的
+        // 反斜杠路径一样认(原先拿带 `/` 的字符串去比,watcher 报来的路径一条都对不上);只看
+        // 直接所在的目录,数据根上层恰好有叫 memory / subagents 的目录也不误伤
+        let parent = path.parent()?.file_name()?;
+        if parent == "subagents" || parent == "memory" {
             return None;
         }
         default_file_ref(self.agent(), path)

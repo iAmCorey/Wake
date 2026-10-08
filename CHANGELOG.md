@@ -7,6 +7,10 @@
 - New: Enlarge the whole interface to 110%, 125% or 150% with ⌘+ / ⌘− / ⌘0 (Ctrl on Linux and Windows), the new View menu, or the new Settings → Appearance page, which also takes over the light / dark choice from General; the level is remembered (#51, thanks @kyomind)
 - New: Antigravity conversations are read in full from the plain-text transcripts recent versions of the desktop app and the IDE save — messages, thinking, tool calls with their output, the model and pasted images — and conversations from the IDE carry an IDE badge. Conversations without a transcript are still listed from Antigravity's index, as before. The agent is now called Antigravity instead of Antigravity CLI (#52, thanks @iroha3)
 - Fix: Kimi Code sessions are listed on Windows, and sessions from the Kimi Code desktop app show the assistant's replies and thinking instead of only your prompts (#61, thanks @noohpyt)
+- Fix: Kimi Code CLI sessions show the assistant's replies, thinking and tool calls too, and background-task notifications and other system messages no longer appear as things you typed
+- Fix: Forked Kimi Code sessions are listed under the session they came from without repeating its history, archived Kimi sessions are marked archived, renaming or archiving a session in Kimi shows up in Wake right away, sessions imported from the old kimi-cli are listed, and `KIMI_CODE_HOME` is respected
+- Fix: On Windows, Cursor and Gemini CLI sessions update live again, and Claude Code sub-agent transcripts no longer flash up as empty sessions
+- Fix: A session file that can't be read (on a disconnected drive, for example) no longer stalls a refresh; Wake keeps what it already had and tries again next time. One agent whose data can't be read also no longer stops the others from refreshing
 
 ## [0.8.6] — 2026-10-01
 

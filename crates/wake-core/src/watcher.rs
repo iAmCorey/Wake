@@ -179,10 +179,13 @@ pub(crate) fn process_batch(
     }
 
     // 路径是否本 agent 的会话文件、native_id 怎么取,统一问**拥有
-    // 该根的实例**(下标即 roots 表登记的归属)
+    // 该根的实例**(下标即 roots 表登记的归属)。file_ref 可以把边车换成它所属的会话
+    // 文件(见 trait 文档),边车与正文同批变了只解析一次
+    let mut seen = HashSet::new();
     let refs: Vec<SessionFileRef> = present
         .into_iter()
         .filter_map(|(path, ix)| adapters.get(ix).and_then(|a| a.file_ref(&path)))
+        .filter(|r| seen.insert(r.file_path.clone()))
         .collect();
     let scanned_agents: HashSet<AgentId> = refs.iter().map(|reference| reference.agent).collect();
     if !refs.is_empty() {

@@ -219,38 +219,17 @@ impl HermesAdapter {
                 "assistant" => {
                     let text = content_text(m.content.as_deref());
                     let calls = tool_calls_of(m.tool_calls.as_deref(), m.id);
-                    let thinking = m
-                        .reasoning
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(String::from);
-                    if text.is_empty() && calls.is_empty() && thinking.is_none() {
+                    let thinking = m.reasoning.as_deref().unwrap_or_default();
+                    if text.is_empty() && calls.is_empty() && thinking.trim().is_empty() {
                         continue;
                     }
                     // 连续 assistant 行(中间只隔 tool 行)合并成一条,与 pi 同款
-                    if !matches!(messages.last(), Some(l) if l.role == Role::Assistant) {
-                        messages.push(text_msg(Role::Assistant, "", m.ts_ms));
-                    }
-                    let base = messages.len() - 1;
+                    let part = ParsedContent {
+                        text,
+                        ..Default::default()
+                    };
+                    let base = merge_into_last_assistant(&mut messages, m.ts_ms, part, thinking);
                     let last = &mut messages[base];
-                    if !text.is_empty() {
-                        let mut part = ParsedContent::default();
-                        part.push_text(&text);
-                        append_content_to_message(last, part, "\n\n");
-                        if last.text.len() > MAX_MSG_TEXT {
-                            let (t, _) = clip(&last.text, MAX_MSG_TEXT);
-                            last.text = t;
-                            last.truncated = true;
-                        }
-                    }
-                    if let Some(t) = thinking {
-                        let merged = match last.thinking.take() {
-                            Some(existing) => format!("{existing}\n\n{t}"),
-                            None => t,
-                        };
-                        last.thinking = Some(clip(&merged, MAX_TOOL_IO).0);
-                    }
                     for (has_id, tc) in calls {
                         let slot = (base, last.tool_calls.len());
                         if has_id {
@@ -416,11 +395,7 @@ fn tool_calls_of(raw: Option<&str>, msg_id: i64) -> Vec<(bool, ToolCallView)> {
         .map(|(i, item)| {
             let func = item.get("function").unwrap_or(item);
             let name = func.get("name").and_then(Value::as_str).unwrap_or_default();
-            let args = func.get("arguments").cloned().unwrap_or(Value::Null);
-            let input = args
-                .as_str()
-                .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                .unwrap_or(args);
+            let input = decoded_arguments(func.get("arguments").unwrap_or(&Value::Null));
             let (has_id, id) = match item
                 .get("id")
                 .and_then(Value::as_str)

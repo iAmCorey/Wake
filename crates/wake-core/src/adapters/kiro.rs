@@ -4,7 +4,7 @@ use crate::models::*;
 use anyhow::Result;
 use serde_json::Value;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 /// Kiro CLI:`~/.kiro/sessions/cli/<uuid>.{jsonl,json,history}` 三件套。
@@ -78,15 +78,8 @@ fn parse_kiro_jsonl(path: &Path, decode_images: bool) -> Result<(Vec<TranscriptM
     let mut messages: Vec<TranscriptMessage> = Vec::new();
     let mut unknown = 0u32;
 
-    for line in reader.lines() {
-        let Ok(line) = line else {
-            unknown += 1;
-            continue;
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(row) = serde_json::from_str::<Value>(&line) else {
+    for row in jsonl_values(reader) {
+        let Some(row) = row? else {
             unknown += 1;
             continue;
         };

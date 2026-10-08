@@ -4,7 +4,7 @@ use super::AgentAdapter;
 use crate::models::*;
 use anyhow::Result;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 /// Pi / Oh My Pi(omp 是 pi 的 fork,会话格式同构,只有数据根不同):
@@ -78,15 +78,8 @@ fn parse_pi_jsonl(path: &Path, decode_images: bool) -> Result<PiParse> {
     // 消息渲染核心与 OpenClaw 共用(pi_format);Pi 是它的基础配置
     let mut render = PiRender::new(PiRenderOptions::default(), decode_images);
 
-    for line in reader.lines() {
-        let Ok(line) = line else {
-            p.unknown_lines += 1;
-            continue;
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(row) = serde_json::from_str::<serde_json::Value>(&line) else {
+    for row in jsonl_values(reader) {
+        let Some(row) = row? else {
             p.unknown_lines += 1;
             continue;
         };

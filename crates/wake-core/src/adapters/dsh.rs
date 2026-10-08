@@ -340,12 +340,9 @@ fn parse_dsh_log(path: &Path, decode_images: bool) -> Result<DshParse> {
                             let id = b.get("id").and_then(|v| v.as_str()).unwrap_or_default();
                             let name = b.get("name").and_then(|v| v.as_str()).unwrap_or_default();
                             // arguments 是模型原样输出的 JSON 字符串,解析失败保留原文
-                            let raw = b
-                                .get("arguments")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default();
-                            let input = serde_json::from_str::<serde_json::Value>(raw)
-                                .unwrap_or(serde_json::Value::String(raw.to_string()));
+                            let input = decoded_arguments(
+                                b.get("arguments").unwrap_or(&serde_json::Value::Null),
+                            );
                             tools.push(tool_call_view(id.to_string(), name, &input, None, false));
                         }
                         _ if is_image_part(b) => {
@@ -392,40 +389,13 @@ fn parse_dsh_log(path: &Path, decode_images: bool) -> Result<DshParse> {
                 }
                 // 一个 turn 多个 step,每 step 一条 assistant/message;连续 assistant
                 // 行(中间只隔 tool/result)合并成一条,详情页每回合一条助手消息
-                // (合并 + 整体 clip 机制与 pi.rs 同构,改动需两侧同步)
-                if !matches!(p.messages.last(), Some(m) if m.role == Role::Assistant) {
-                    p.messages.push(text_msg(Role::Assistant, "", ts));
-                }
-                let base = p.messages.len() - 1;
+                let base = merge_into_last_assistant(
+                    &mut p.messages,
+                    ts,
+                    parsed_message,
+                    &thinking_parts.join("\n\n"),
+                );
                 let last = &mut p.messages[base];
-                if !parsed_message.text.is_empty() || !parsed_message.images.is_empty() {
-                    if last.text.len() < MAX_MSG_TEXT {
-                        append_content_to_message(last, parsed_message, "\n\n");
-                    } else {
-                        append_images_to_message_end(last, parsed_message.images);
-                    }
-                    if last.text.len() > MAX_MSG_TEXT {
-                        let (t, _) = clip(&last.text, MAX_MSG_TEXT);
-                        last.text = t;
-                        last.truncated = true;
-                    }
-                }
-                // thinking 与全库其他家同压 MAX_TOOL_IO;已到上限就不再拼接
-                if !thinking_parts.is_empty()
-                    && last.thinking.as_deref().map_or(0, str::len) < MAX_TOOL_IO
-                {
-                    let joined = thinking_parts.join("\n\n");
-                    match &mut last.thinking {
-                        Some(t) => {
-                            t.push_str("\n\n");
-                            t.push_str(&joined);
-                            if t.len() > MAX_TOOL_IO {
-                                *t = clip(t, MAX_TOOL_IO).0;
-                            }
-                        }
-                        slot => *slot = Some(clip(&joined, MAX_TOOL_IO).0),
-                    }
-                }
                 if model.is_some() {
                     last.model = model;
                 }

@@ -212,8 +212,11 @@ CREATE TABLE IF NOT EXISTS claimed_sessions (
 ///       compaction 四种 part(subtask 写回用户敲的 `/命令`,其余不再计未知行),Windows 上
 ///       OpenCode 存的 `C:/…` 目录换回反斜杠,老行靠这轮重解析回填;
 /// "10" = Kimi Code 桌面端(0.4x)的助手回复与思考(agent.message.appended)、每条记录的时间、
-///       Windows 上 `C:/…` 形态的工作目录换成反斜杠(PR #61),老行靠这轮重解析回填。
-pub const FTS_FORMAT: &str = "10";
+///       Windows 上 `C:/…` 形态的工作目录换成反斜杠(PR #61),老行靠这轮重解析回填;
+/// "11" = Kimi Code CLI 的助手回复(context.append_loop_event 的 text / think / 工具调用与结果)、
+///       系统产生的输入记 Meta、分叉复制来的历史折成一条、迁移来的 `ses_` 会话;pi / dsh / Hermes
+///       的回复合并改走同一个封顶合并(恰好停在上限上的回复也补截断标记),老行靠这轮重解析回填。
+pub const FTS_FORMAT: &str = "11";
 
 fn open_conn(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent() {

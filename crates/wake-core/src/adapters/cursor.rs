@@ -4,7 +4,7 @@ use crate::models::*;
 use anyhow::Result;
 use serde_json::Value;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 /// Cursor CLI:`~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl` 明文。
@@ -231,22 +231,11 @@ fn parse_cursor_jsonl(path: &Path, decode_images: bool) -> Result<CursorParse> {
     // 读不出/不是 JSON 的行(截断、损坏),与"认得出 JSON 但类型未知"分开计
     let mut malformed_lines = 0u32;
 
-    for line in reader.lines() {
-        let Ok(line) = line else {
+    for row in jsonl_values(reader) {
+        let Some(row) = row? else {
             unknown_lines += 1;
             malformed_lines += 1;
             continue;
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let row: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => {
-                unknown_lines += 1;
-                malformed_lines += 1;
-                continue;
-            }
         };
         let Some(role) = row.get("role").and_then(|v| v.as_str()) else {
             match row.get("type").and_then(|v| v.as_str()) {
@@ -491,9 +480,9 @@ impl AgentAdapter for CursorAdapter {
     }
 
     fn file_ref(&self, path: &Path) -> Option<SessionFileRef> {
-        // 只认 transcript 主文件;subagents 转录不是独立会话
-        let p = path.to_string_lossy();
-        if !p.contains("/agent-transcripts/") || p.contains("/subagents/") {
+        // 只认 transcript 主文件 `agent-transcripts/<会话>/<会话>.jsonl`(subagents 转录多一层,
+        // 不是独立会话)。按路径分段判:Windows 的反斜杠路径一样认
+        if path.parent()?.parent()?.file_name()? != "agent-transcripts" {
             return None;
         }
         let r = default_file_ref(self.agent(), path)?;

@@ -5,7 +5,7 @@ use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 /// CodeBuddy Code(腾讯 CodeBuddy 的 CLI,issue #27):`~/.codebuddy/projects/
@@ -212,15 +212,8 @@ fn parse_codebuddy_jsonl(path: &Path, decode_images: bool) -> Result<ParseResult
     let mut tool_index: HashMap<String, (usize, usize)> = HashMap::new();
     let mut pending: Option<PendingAssistant> = None;
 
-    for line in reader.lines() {
-        let Ok(line) = line else {
-            out.unknown_lines += 1;
-            continue;
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(row) = serde_json::from_str::<Value>(&line) else {
+    for row in jsonl_values(reader) {
+        let Some(row) = row? else {
             out.unknown_lines += 1;
             continue;
         };
@@ -317,19 +310,10 @@ fn parse_codebuddy_jsonl(path: &Path, decode_images: bool) -> Result<ParseResult
                     .to_string();
                 let name = row.get("name").and_then(Value::as_str).unwrap_or("");
                 // arguments 是 JSON 字符串;解不开就原样当字符串给预览
-                let parsed_args;
-                let arguments: &Value = match row.get("arguments") {
-                    Some(Value::String(s)) => {
-                        parsed_args = serde_json::from_str::<Value>(s)
-                            .unwrap_or_else(|_| Value::String(s.clone()));
-                        &parsed_args
-                    }
-                    Some(v) => v,
-                    None => &Value::Null,
-                };
+                let arguments = decoded_arguments(row.get("arguments").unwrap_or(&Value::Null));
                 let p = assistant_slot(&mut out, &mut pending, &mut tool_index, ts, &row);
                 p.tool_calls
-                    .push(tool_call_view(call_id, name, arguments, None, false));
+                    .push(tool_call_view(call_id, name, &arguments, None, false));
             }
             "function_call_result" => {
                 let call_id = row.get("callId").and_then(Value::as_str).unwrap_or("");

@@ -1091,6 +1091,7 @@ pub fn clear_agent_env_overrides() {
         "CODEBUDDY_CONFIG_DIR",
         "WORKBUDDY_CONFIG_DIR",
         "ZCODE_STORAGE_DIR",
+        "KIMI_CODE_HOME",
         // 库路径的覆盖:指向现存文件时会被加进数据根,读到合成 HOME 之外的真实库
         "OPENCODE_DB",
         "KILO_DB",

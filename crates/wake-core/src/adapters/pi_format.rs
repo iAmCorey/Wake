@@ -1,8 +1,8 @@
 //! pi-ai 消息形状的共用渲染核心:Pi / Oh My Pi 的 `<ts>_<uuid>.jsonl` 与 OpenClaw
 //! 的转录条目都是同一族——`{role:user|assistant|toolResult, content:[…]}`,
 //! assistant 块 text|thinking|toolCall,toolResult 独立 role 按 toolCallId 回填,
-//! 连续 assistant(中间只隔 toolResult)合并成一条。合并与截断逻辑只此一份,
-//! 两家的差异全部落在 `PiRenderOptions`。
+//! 连续 assistant(中间只隔 toolResult)合并成一条(合并与截断在
+//! `parse_utils::merge_into_last_assistant`,各家共用)。两家的差异全部落在 `PiRenderOptions`。
 
 use super::parse_utils::*;
 use crate::models::*;
@@ -137,32 +137,8 @@ impl PiRender {
             self.model = model.clone();
         }
         // 连续 assistant(中间只隔 toolResult)合并成一条,详情页每个回合一条助手消息
-        if !matches!(self.messages.last(), Some(m) if m.role == Role::Assistant) {
-            self.messages.push(text_msg(Role::Assistant, "", ts));
-        }
-        let base = self.messages.len() - 1;
+        let base = merge_into_last_assistant(&mut self.messages, ts, parsed, &thinking);
         let last = &mut self.messages[base];
-        // 合并后统一压 MAX_MSG_TEXT 上限(整个 agentic 回合并成一条,不能靠单行的 text_msg clip)
-        if !parsed.text.is_empty() || !parsed.images.is_empty() {
-            if last.text.len() < MAX_MSG_TEXT {
-                append_content_to_message(last, parsed, "\n\n");
-            } else {
-                append_images_to_message_end(last, parsed.images);
-            }
-            if last.text.len() > MAX_MSG_TEXT {
-                let (t, _) = clip(&last.text, MAX_MSG_TEXT);
-                last.text = t;
-                last.truncated = true;
-            }
-        }
-        if !thinking.is_empty() {
-            // 与正文/工具 IO 同一上限:长推理合并后也不能无限增长
-            let merged = match last.thinking.take() {
-                Some(existing) => format!("{existing}\n\n{thinking}"),
-                None => thinking,
-            };
-            last.thinking = Some(clip(&merged, MAX_TOOL_IO).0);
-        }
         if model.is_some() {
             last.model = model;
         }

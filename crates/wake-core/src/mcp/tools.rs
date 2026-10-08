@@ -1316,6 +1316,13 @@ fn get_session(ctx: &ToolContext, args: &Value) -> ToolResult {
             plural(page.skipped_meta as i64)
         ));
     }
+    if page.thinking_only > 0 {
+        summary.push_str(&format!(
+            "; {} thinking-only message{} (pass include_thinking to read the thinking)",
+            page.thinking_only,
+            plural(page.thinking_only as i64)
+        ));
+    }
     out.push_str(&summary);
     out.push_str(".\n");
     // 主线页脚两张清单:挂在这条会话下面的子会话(有自己的 key,按 key 读),
