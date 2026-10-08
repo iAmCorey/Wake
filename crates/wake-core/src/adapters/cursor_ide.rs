@@ -47,22 +47,11 @@ pub struct CursorIdeAdapter {
     links_cache: MtimeCache<Vec<(String, String)>>,
 }
 
-/// `globalStorage/state.vscdb` 的默认路径。VS Code 系三平台的用户数据根不同:
-/// macOS 在 `~/Library/Application Support`,Windows 在 `%APPDATA%`,
-/// Linux 在 `$XDG_CONFIG_HOME`(缺省 `~/.config`)。这里只做路径推导、
-/// 不探测存在性——缺根由 list_session_files 降级为空(roster 契约)。
-/// 三平台都从 `home_dir()` 派生而非 `dirs::config_dir()`:后者在 Windows 上
-/// 走 SHGetKnownFolderPath,`WAKE_HOME` 改道对它无效(见 mod.rs 的 home_dir)
+/// `globalStorage/state.vscdb` 的默认路径(用户数据目录三平台各异,见
+/// `vscode_user_data`)。只做路径推导、不探测存在性——缺根由 list_session_files
+/// 降级为空(roster 契约)
 pub(super) fn default_db_path() -> PathBuf {
-    let home = super::home_dir().unwrap_or_default();
-    let base = if cfg!(target_os = "macos") {
-        home.join("Library").join("Application Support")
-    } else if cfg!(target_os = "windows") {
-        home.join("AppData").join("Roaming")
-    } else {
-        super::env_dir("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"))
-    };
-    base.join("Cursor")
+    super::vscode_user_data("Cursor")
         .join("User")
         .join("globalStorage")
         .join(DB_NAME)

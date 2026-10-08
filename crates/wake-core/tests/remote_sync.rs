@@ -55,7 +55,17 @@ fn build_remote_home(home: &Path) {
     fs::remove_dir_all(home.join(".copilot")).unwrap();
     // 凭证在白名单外,必须留在远端
     touch(&home.join(".codex/auth.json"), "NOT-A-REAL-SECRET");
+    // Kilo 旧版扩展跑在 Remote-SSH 的远端:任务目录在 vscode-server 的用户数据里,
+    // 每个任务带一份检查点影子仓库(量大,exclude 挡掉)
+    let kilo_tasks = home.join(KILO_TASKS);
+    common::copy_tree(&common::fixture("kilo-legacy/Code/tasks"), &kilo_tasks);
+    touch(
+        &kilo_tasks.join("migrated-task-0004/checkpoints/.git/HEAD"),
+        "ref: refs/heads/main",
+    );
 }
+
+const KILO_TASKS: &str = ".vscode-server/data/User/globalStorage/kilocode.kilo-code/tasks";
 
 /// 假远端上装着的 agent(Copilot 故意缺席,见 build_remote_home)
 fn remote_agents() -> impl Iterator<Item = AgentId> {
@@ -200,6 +210,20 @@ fn remote_pipeline_end_to_end() {
     );
     assert!(!cache.join(".codex/auth.json").exists(), "凭证进了缓存");
     assert!(!cache.join(".copilot").exists());
+    // Kilo:旧版任务到位、检查点仓库挡在外面;新版的库里有 credential 表,整库不拉
+    let kilo_task = cache.join(KILO_TASKS).join("migrated-task-0004");
+    assert!(
+        kilo_task.join("api_conversation_history.json").is_file(),
+        "Kilo 旧版任务没同步到缓存"
+    );
+    assert!(
+        !kilo_task.join("checkpoints").exists(),
+        "检查点仓库进了缓存"
+    );
+    assert!(
+        !cache.join(".local/share/kilo").exists(),
+        "带凭证的 kilo.db 进了缓存"
+    );
     // Craft Agents:会话与回合锚点(认领要读)到位;源配置(可能带 client secret)、
     // 附件、引擎原料与原子写的中间文件被带层级的 exclude 挡在外面
     let craft_ws = cache.join(".craft-agent/workspaces/wakefx-ws");

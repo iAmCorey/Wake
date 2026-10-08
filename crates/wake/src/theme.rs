@@ -113,6 +113,9 @@ pub fn agent_series_color(agent: wake_core::models::AgentId) -> u32 {
         // 标志是单色的,给一档天蓝(Devin Desktop 的主色系),蓝色家族里离 Gemini、
         // Cursor 都最远的一档
         Devin => 0x3BB3F1,
+        // 品牌柠檬黄 #F7F569 在白底上几乎看不见(对比 1.15),压深一档;离 Hermes 的
+        // 金色 ΔE00 11.9(色板里最近的一对只有 5.4)
+        Kilo => 0xC8C035,
     }
 }
 

@@ -1,0 +1,43 @@
+[
+ {
+  "role": "user",
+  "content": [
+   {
+    "type": "text",
+    "text": "<task>\n写 vitest 配置\n</task>"
+   }
+  ],
+  "ts": 1736500101000
+ },
+ {
+  "role": "assistant",
+  "content": [
+   {
+    "type": "text",
+    "text": "配置写好了。"
+   }
+  ],
+  "ts": 1736500102000
+ },
+ {
+  "role": "assistant",
+  "content": [
+   {
+    "type": "text",
+    "text": "Summary: 写好了 vitest 配置,等待确认。"
+   }
+  ],
+  "isSummary": true,
+  "ts": 1736500102500
+ },
+ {
+  "role": "user",
+  "content": [
+   {
+    "type": "text",
+    "text": "<user_message>\n再跑一遍\n</user_message>"
+   }
+  ],
+  "ts": 1736500103000
+ }
+]

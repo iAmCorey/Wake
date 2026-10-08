@@ -16,7 +16,7 @@
 //! ①openrsync(macOS 15+ 的 /usr/bin/rsync)做发送端时,某个源连父目录
 //! 都不存在会让它中止整份文件列表,排在后面的源全部静默不传,退出码却
 //! 只是 23;②rsync 家族只要发送端遇到任何 I/O 错误(缺源即算)就整体跳过
-//! 删除阶段——没有哪台机器二十一家全装,`--delete` 就永远不会生效。
+//! 删除阶段——没有哪台机器二十二家全装,`--delete` 就永远不会生效。
 //!
 //! 同步跑在**独立于扫描的线程**(Workbench::spawn_remote_sync):本地扫描
 //! 不等网络,不可达 host 只拖慢自己;缓存落盘由 watcher 增量收编,同步
@@ -49,7 +49,7 @@ pub struct RemoteAgentLayout {
     pub exclude: &'static [&'static str],
 }
 
-/// 二十一家的远程布局。远程主机按 Linux/macOS 默认路径假设(两平台一致,
+/// 二十二家的远程布局。远程主机按 Linux/macOS 默认路径假设(两平台一致,
 /// 均为 home 相对;OpenCode 的 XDG 变体、CODEX_HOME 这类 env 覆盖在远端
 /// 探测不到,阶段 1 不支持非默认远程布局)。
 pub const REMOTE_LAYOUTS: &[RemoteAgentLayout] = &[
@@ -254,6 +254,20 @@ pub const REMOTE_LAYOUTS: &[RemoteAgentLayout] = &[
             ".local/share/devin/cli/sessions.db-wal",
         ],
         exclude: &[],
+    },
+    RemoteAgentLayout {
+        agent: AgentId::Kilo,
+        // **只覆盖旧版扩展**:Remote-SSH 下扩展跑在远端,任务目录落在远端的
+        // vscode-server 用户数据里。新版的 `.local/share/kilo/kilo.db` 不拉——Kilo 每次
+        // 启动都把 auth.json 里的 API key / 登录 token 对账进同一个库的 credential 表,
+        // 还有存 access / refresh token 的 account 表;SQLite 是整文件,拉会话就得连凭证
+        // 一起拷到本机(OpenClaw 的库同样因此不拉)。globalStorage 的 state.vscdb
+        // 也不拉(里面有加密的 secret:// 项),缺 history_item.json 的老任务改从正文推
+        // 标题与工作区。挂载点按目录名(扩展 id)定形,不看存在性
+        mount: ".vscode-server/data/User/globalStorage/kilocode.kilo-code",
+        sync_paths: &[".vscode-server/data/User/globalStorage/kilocode.kilo-code/tasks"],
+        // 每个任务目录里的 checkpoints/ 是整份影子 git 仓库,量大且不读
+        exclude: &["kilocode.kilo-code/tasks/*/checkpoints"],
     },
 ];
 

@@ -1385,6 +1385,82 @@ fn cursor_transcript_outranks_ide_copy() {
     assert_eq!(taken_over.title, "CLI twin");
 }
 
+/// Kilo Code 新版扩展把旧任务导进 kilo.db 时,会话 id 是 sha1(任务 id) 派生的
+/// `ses_migrated_…`;旧任务在 Wake 里用的就是这个 id,两份同 key,kilo.db 那份胜出
+/// (不看 mtime 与 roster 顺序),旧任务文件留作回退:kilo.db 里那份没了,它顶上来,
+/// key 不变。没导过的旧任务照常列出,子任务挂回父任务
+#[test]
+fn kilo_migrated_task_prefers_the_database_copy() {
+    use wake_core::adapters::kilo::{legacy_task_key, migrated_session_id, KiloLegacyAdapter};
+    use wake_core::adapters::opencode::OpencodeAdapter;
+
+    let dir = tempfile::tempdir().unwrap();
+    let ext = dir.path().join("globalStorage").join("kilocode.kilo-code");
+    let tasks = ext.join("tasks");
+    common::copy_tree(&common::fixture("kilo-legacy/Code/tasks"), &tasks);
+    let db = dir.path().join("kilo").join("kilo.db");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    common::build_kilo_db(&db);
+    let migrated_id = migrated_session_id("migrated-task-0004");
+    let migrated = legacy_task_key("migrated-task-0004");
+    let legacy_copy = tasks
+        .join("migrated-task-0004")
+        .join("api_conversation_history.json");
+
+    for legacy_first in [true, false] {
+        let from_db: Box<dyn AgentAdapter> = OpencodeAdapter::kilo().with_custom_root(db.clone());
+        let from_tasks: Box<dyn AgentAdapter> =
+            KiloLegacyAdapter::new().with_custom_root(tasks.clone());
+        let adapters: Vec<Box<dyn AgentAdapter>> = if legacy_first {
+            vec![from_tasks, from_db]
+        } else {
+            vec![from_db, from_tasks]
+        };
+        let store = temp_store(&dir.path().join(format!("store-{legacy_first}")));
+        run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+        let row = store
+            .get_session(&migrated)
+            .unwrap()
+            .expect("导入过的旧任务在库");
+        assert!(
+            row.file_path.contains("kilo.db#"),
+            "legacy_first={legacy_first}:kilo.db 里那份胜出,得到 {}",
+            row.file_path
+        );
+        let legacy_only = store
+            .get_session(&legacy_task_key("1736400000000"))
+            .unwrap()
+            .expect("没导过的旧任务照常列出");
+        assert_eq!(legacy_only.title, "修复二维码扫描的内存泄漏");
+        let child = store
+            .get_session(&legacy_task_key("01944f78-bba0-7abc-8def-0123456789ac"))
+            .unwrap()
+            .expect("子任务在库");
+        assert_eq!(
+            store.parent_key_of(&child.key).unwrap().as_deref(),
+            Some(legacy_task_key("01944f77-3500-7abc-8def-0123456789ab").as_str()),
+            "legacy_first={legacy_first}:子任务挂回父任务"
+        );
+    }
+
+    // kilo.db 里那份没了(用户在 Kilo 里删了它):旧任务文件顶上来,key 不变
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("DELETE FROM session WHERE id = ?1", [&migrated_id])
+        .unwrap();
+    drop(conn);
+    let adapters: Vec<Box<dyn AgentAdapter>> = vec![
+        OpencodeAdapter::kilo().with_custom_root(db.clone()),
+        KiloLegacyAdapter::new().with_custom_root(tasks.clone()),
+    ];
+    let store = temp_store(&dir.path().join("store-false"));
+    run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+    let row = store
+        .get_session(&migrated)
+        .unwrap()
+        .expect("库里那份没了,旧任务还在");
+    assert_eq!(Path::new(&row.file_path), legacy_copy.as_path());
+}
+
 /// 跨 agent 重叠根:文件只归**最长根**的实例(与 watcher 分派同一语义)。
 /// 旧行为两家轮流认领——先写的一家留下错误归属,后写的撞 file_path UNIQUE
 #[test]

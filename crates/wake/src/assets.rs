@@ -65,6 +65,8 @@ brands!(
     "craft-agents",
     "devin",
     "devin-light",
+    "kilo",
+    "kilo-light",
 );
 
 fn lookup_product(path: &str) -> Option<&'static [u8]> {

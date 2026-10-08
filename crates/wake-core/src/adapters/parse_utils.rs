@@ -70,6 +70,26 @@ pub fn project_name_of(cwd: &str) -> String {
         .unwrap_or_else(|| "Unknown project".to_string())
 }
 
+/// 项目路径的规范形。Windows 形状的路径(`c:\…`、`C:/…`、`//server/…`)盘符改大写,
+/// 在 Windows 上斜杠换成反斜杠:VS Code 的 fsPath 写小写盘符,OpenCode 系把目录存成
+/// 正斜杠(它自己读出来时再换回),原样用就与别家记下的 `C:\…` 分成两个项目。
+/// POSIX 路径(含远程镜像来的)原样
+pub fn canonical_project_path(path: &str) -> String {
+    let drive = matches!(path.as_bytes(), [d, b':', b'\\' | b'/', ..] if d.is_ascii_alphabetic());
+    if !drive && !path.starts_with("//") {
+        return path.to_string();
+    }
+    let mut out = if cfg!(windows) {
+        path.replace('/', "\\")
+    } else {
+        path.to_string()
+    };
+    if drive {
+        out[..1].make_ascii_uppercase();
+    }
+    out
+}
+
 /// user 消息的 kind:注入内容归 Meta 折叠
 pub fn user_kind(text: &str) -> MessageKind {
     if is_injected_user_content(text) {
@@ -1036,6 +1056,24 @@ pub fn make_preview(input: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows 形状的项目路径换成别家记的写法:盘符大写、Windows 上正斜杠换反斜杠;
+    /// POSIX 路径(含远程镜像来的)原样
+    #[test]
+    fn project_paths_are_canonical() {
+        assert_eq!(canonical_project_path("/Users/x/app"), "/Users/x/app");
+        assert_eq!(canonical_project_path(r"c:\Users\x\app"), r"C:\Users\x\app");
+        if cfg!(windows) {
+            assert_eq!(canonical_project_path("c:/Users/x/app"), r"C:\Users\x\app");
+            assert_eq!(
+                canonical_project_path("//nas/share/app"),
+                r"\\nas\share\app"
+            );
+        } else {
+            assert_eq!(canonical_project_path("c:/Users/x/app"), "C:/Users/x/app");
+            assert_eq!(canonical_project_path("//nas/share/app"), "//nas/share/app");
+        }
+    }
 
     #[test]
     fn clip_chars_counts_characters() {
