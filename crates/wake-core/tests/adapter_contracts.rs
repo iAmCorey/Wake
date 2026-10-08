@@ -77,6 +77,9 @@ fn all_memories(adapter: &Box<dyn AgentAdapter>) -> anyhow::Result<Vec<MemoryDoc
     adapter.list_memories(&adapter.memory_sources(), &[])
 }
 
+/// 共用的假 HOME:各测试只读。要写文件的测试在自己的临时目录里搭——
+/// `listed_sessions_round_trip_through_file_ref` 并行地把整个 HOME 枚举一遍,中途被改写、删掉的
+/// 文件会让列表与 file_ref 对不上,Windows 上开着的库还删不掉
 fn setup() -> &'static TestEnv {
     ENV.get_or_init(|| {
         let home = tempfile::Builder::new()
@@ -373,13 +376,13 @@ fn claude_bridge_metadata_can_pass_cleanup_review() {
     use std::sync::atomic::AtomicBool;
     use wake_core::{cleanup, db::Store};
 
-    setup(); // All paths below belong to the shared synthetic home.
-    let adapter = ClaudeAdapter::new();
-    let root = adapter.data_roots().remove(0);
-    fs::create_dir_all(&root).unwrap();
+    setup();
+    // A private projects root: the shared synthetic home is read-only for tests.
     // macOS temp paths may start with the /var alias; cleanup requires real paths.
-    let root = root.canonicalize().unwrap();
-    let adapter = adapter.with_custom_root(root.clone());
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap().join("projects");
+    fs::create_dir_all(&root).unwrap();
+    let adapter = ClaudeAdapter::new().with_custom_root(root.clone());
     let project = tempfile::tempdir_in(&root).unwrap();
     let path = project.path().join("bridge-cleanup-fixture.jsonl");
     let original = fs::read_to_string(&claude_ref().file_path).unwrap();
@@ -2615,8 +2618,11 @@ fn dsh_parse_contract() {
     assert_eq!(listed[0].native_id, "dsh-e2e4-0001");
 
     // 压缩配置换挡会两后缀并存:陈旧的一份在 file_ref 就让位(裁决单点,
-    // watcher 入口同样受保护,不会把旧文件当主文件解析)
-    let stale = env.dsh_log.with_file_name("session.jsonl");
+    // watcher 入口同样受保护,不会把旧文件当主文件解析)。在私有拷贝里摆
+    let copy = tempfile::tempdir().unwrap();
+    let main = copy.path().join(env.dsh_log.file_name().unwrap());
+    fs::copy(&env.dsh_log, &main).unwrap();
+    let stale = main.with_file_name("session.jsonl");
     fs::write(&stale, "{\"type\":\"session\",\"version\":0,\"id\":\"dsh-e2e4-0001\",\"createdAt\":1786000000000,\"cwd\":\"/Users/tester/Github/wakefx\",\"delegationDepth\":0}\n")
         .expect("write stale sibling");
     let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
@@ -2626,11 +2632,7 @@ fn dsh_parse_contract() {
         .and_then(|f| f.set_modified(hour_ago))
         .expect("age stale sibling");
     assert!(adapter.file_ref(&stale).is_none(), "陈旧 sibling 应让位");
-    assert!(
-        adapter.file_ref(&env.dsh_log).is_some(),
-        "较新主文件不受影响"
-    );
-    fs::remove_file(&stale).expect("remove stale sibling");
+    assert!(adapter.file_ref(&main).is_some(), "较新主文件不受影响");
 
     let s = adapter.parse_session(&r).expect("dsh parse_session");
     let t = adapter.parse_transcript(&r).expect("dsh parse_transcript");
@@ -4198,29 +4200,32 @@ fn hermes_parse_contract() {
     assert_eq!(a2.tool_calls[0].output.as_deref(), Some("README.md"));
     assert_eq!(a2.text, "好的。");
 
-    // 自定义 location:选 Hermes home(连同 profiles/*)或库文件本身都认
-    let home = env.hermes_db.parent().unwrap().to_path_buf();
+    // 自定义 location:选 Hermes home(连同 profiles/*)或库文件本身都认。在私有目录里搭
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join(".hermes");
+    let main_db = home.join("state.db");
     let profile_db = home.join("profiles").join("coder").join("state.db");
-    fs::create_dir_all(profile_db.parent().unwrap()).unwrap();
-    common::build_hermes_db(&profile_db);
+    for db in [&main_db, &profile_db] {
+        fs::create_dir_all(db.parent().unwrap()).unwrap();
+        common::build_hermes_db(db);
+    }
     let rooted = HermesAdapter::new().with_custom_root(home.clone());
     assert_eq!(
         rooted.data_roots(),
-        vec![env.hermes_db.clone(), profile_db.clone()]
+        vec![main_db.clone(), profile_db.clone()]
     );
-    let direct = HermesAdapter::new().with_custom_root(env.hermes_db.clone());
-    assert_eq!(direct.data_roots(), vec![env.hermes_db.clone()]);
+    let direct = HermesAdapter::new().with_custom_root(main_db.clone());
+    assert_eq!(direct.data_roots(), vec![main_db.clone()]);
     // resume 必须带所属档案:主库 = default,profiles/<name> = name(虚拟路径同样认)
     use wake_core::adapters::hermes::profile_of;
     assert_eq!(
-        profile_of(&format!("{}#hs-0001", env.hermes_db.display())),
+        profile_of(&format!("{}#hs-0001", main_db.display())),
         "default"
     );
     assert_eq!(
         profile_of(&format!("{}#hs-0001", profile_db.display())),
         "coder"
     );
-    fs::remove_dir_all(home.join("profiles")).unwrap();
 }
 
 /// 没被新版 Hermes 迁移过的库(schema v2:无 title、无 cache/reasoning 列、
