@@ -9,3 +9,10 @@
 {"type":"turn.prompt","time":1791417610.0,"input":"谢谢","origin":{"kind":"user"}}
 {"type":"agent.message.appended","time":1791417611.0,"message":{"message":{"role":"assistant","content":[{"type":"text","text":"不客气。"}]},"meta":{"source":"llm"}}}
 {"type":"agent.message.appended","time":1791417612.0,"message":{"role":"assistant","content":"包装层缺了一层"}}
+{"type":"agent.message.appended","time":1791417612.5,"message":{"message":{"role":"narrator","content":[{"type":"text","text":"不认识的角色"}]},"meta":{"source":"llm"}}}
+{"type":"turn.ended","time":1791417613.0,"turnId":2,"reason":"completed"}
+{"type":"turn.prompt","time":1791417620.0,"input":[{"type":"video_url","videoUrl":{"url":"file:///tmp/demo.mp4"}}],"origin":{"kind":"user"}}
+{"type":"turn.step.started","time":1791417620.5,"step":1}
+{"type":"agent.message.appended","time":1791417621.0,"message":{"message":{"role":"assistant","content":[{"type":"text","text":"视频里的按钮错位了。"}]},"meta":{"source":"llm"}}}
+{"type":"turn.step.completed","time":1791417621.5,"step":1}
+{"type":"agent.message.appended","time":1791417622.0,"message":{"message":{"role":"assistant","content":[{"type":"text","text":"已经对齐。"}]},"meta":{"source":"llm"}}}

@@ -1949,36 +1949,16 @@ fn kimi_parse_contract() {
 
 /// Kimi Code 桌面端(0.4x)的 wire(PR #61):助手回复在 agent.message.appended,包装层
 /// `{message, meta}`;一次模型调用一条事件、多半只有 think,同一轮连续的助手事件并成
-/// 一条回复,think 进 thinking。user 角色与 turn.prompt 重复、tool 角色不展开,都跳过;
-/// 每行带事件时间。列表走 list_session_files——主代理的 wire.jsonl 按路径分段认,原先
-/// 按字符串比 `/agents/main/wire.jsonl`,Windows 的反斜杠路径一条都列不出来
+/// 一条回复(turn.step.* 不分割),think 进 thinking;新的一轮另起一条,哪怕那一轮的输入
+/// 渲染不出来(只带视频)、没有用户消息隔开。user / tool 角色跳过,不认识的角色与缺包装层
+/// 都计未知行;每行带事件时间。列表走 list_session_files——主代理的 wire.jsonl 按路径分段
+/// 认,原先按字符串比 `/agents/main/wire.jsonl`,Windows 的反斜杠路径一条都列不出来;
+/// Kimi 在 Windows 上记的 `c:/…` 工作目录换成别家同款写法
 #[test]
 fn kimi_desktop_wire_contract() {
     setup();
-    let home = tempfile::tempdir().unwrap();
     let session_id = "session_77777777-aaaa-bbbb-cccc-000000000007";
-    let main = home
-        .path()
-        .join("sessions")
-        .join("wd_wakefx_desktop1")
-        .join(session_id)
-        .join("agents")
-        .join("main");
-    fs::create_dir_all(&main).unwrap();
-    fs::copy(fixture("kimi-desktop/wire.jsonl"), main.join("wire.jsonl")).unwrap();
-    // 子代理的 wire.jsonl 不列
-    let sub = main.parent().unwrap().join("sub-1");
-    fs::create_dir_all(&sub).unwrap();
-    fs::copy(fixture("kimi-desktop/wire.jsonl"), sub.join("wire.jsonl")).unwrap();
-    fs::write(
-        home.path().join("session_index.jsonl"),
-        format!(
-            r#"{{"sessionId":"{session_id}","sessionDir":"/x","workDir":"/Users/tester/Github/wakefx"}}"#
-        ) + "\n",
-    )
-    .unwrap();
-
-    let adapter = KimiAdapter::new().with_custom_root(home.path().to_path_buf());
+    let adapter = KimiAdapter::new().with_custom_root(fixture("kimi-desktop"));
     let refs = adapter.list_session_files().expect("kimi list");
     assert_eq!(
         refs.iter()
@@ -1987,7 +1967,11 @@ fn kimi_desktop_wire_contract() {
         vec![session_id]
     );
     let r = &refs[0];
-    assert!(adapter.file_ref(&sub.join("wire.jsonl")).is_none());
+    // 子代理的 wire.jsonl(文件确实在)按路径分段拒掉
+    let agents = Path::new(&r.file_path).parent().unwrap().parent().unwrap();
+    let sub = agents.join("sub-1").join("wire.jsonl");
+    assert!(sub.is_file());
+    assert!(adapter.file_ref(&sub).is_none());
 
     let t = adapter
         .parse_transcript(r)
@@ -1998,6 +1982,7 @@ fn kimi_desktop_wire_contract() {
             (Role::User, MessageKind::Text),
             (Role::Assistant, MessageKind::Text),
             (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
             (Role::Assistant, MessageKind::Text),
         ]
     );
@@ -2011,13 +1996,22 @@ fn kimi_desktop_wire_contract() {
     assert_eq!(reply.timestamp, Some(ms("2026-10-08T00:00:02Z")));
     assert_eq!(t.mainline[2].text, "谢谢");
     assert_eq!(t.mainline[3].text, "不客气。");
-    // 包装层缺了一层的那行计 unknown
-    assert_eq!(t.unknown_line_count, 1);
+    // 只带视频的那一轮:回复另起一条,不并进上一轮的「不客气。」;同一轮的两步并成一条
+    assert_eq!(t.mainline[4].text, "视频里的按钮错位了。\n\n已经对齐。");
+    assert_eq!(t.mainline[4].timestamp, Some(ms("2026-10-08T00:00:21Z")));
+    // 缺包装层的一行 + 不认识的角色一行
+    assert_eq!(t.unknown_line_count, 2);
 
     let s = adapter.parse_session(r).expect("kimi desktop session");
     assert_eq!(s.meta.title, "Kimi 修一下 QrScanner 的 useEffect 内存泄漏");
-    assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx");
-    assert_eq!(s.meta.message_count, 4);
+    let project = if cfg!(windows) {
+        r"C:\Users\tester\Github\wakefx"
+    } else {
+        "C:/Users/tester/Github/wakefx"
+    };
+    assert_eq!(s.meta.project_path, project);
+    assert_eq!(s.meta.project_name, "wakefx");
+    assert_eq!(s.meta.message_count, 5);
     assert_seq_contract(adapter.as_ref(), r);
 }
 

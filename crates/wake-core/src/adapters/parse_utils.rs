@@ -406,6 +406,53 @@ pub fn append_content_to_message(
     message.images = combined.images;
 }
 
+/// 一次模型调用的产出并进最后一条助手消息(最后一条不是助手就先开一条空的),返回它的下标
+/// (登记工具调用用)。整个 agentic 回合并成一条,单行 `text_msg` 的 clip 靠不住:正文合并后
+/// 统一压 MAX_MSG_TEXT(截过之后只收图片),thinking 压 MAX_TOOL_IO、截过就不再拼接——反复
+/// 对已带截断标记的串再 clip,标记前会一次次多出换行。截过的串连标记一起必然长过上限,所以
+/// 守卫是 `<=`:恰好停在上限上的还要再收一次,不然后面的正文悄悄丢掉、连标记都没有。
+/// 最后一条还没有时间时用这一次的
+pub fn merge_into_last_assistant(
+    messages: &mut Vec<TranscriptMessage>,
+    ts: i64,
+    content: ParsedContent,
+    thinking: &str,
+) -> usize {
+    if !matches!(messages.last(), Some(m) if m.role == Role::Assistant) {
+        messages.push(text_msg(Role::Assistant, "", ts));
+    }
+    let ix = messages.len() - 1;
+    let last = &mut messages[ix];
+    if last.timestamp.is_none() && ts > 0 {
+        last.timestamp = Some(ts);
+    }
+    if !content.text.is_empty() || !content.images.is_empty() {
+        if last.text.len() <= MAX_MSG_TEXT {
+            append_content_to_message(last, content, "\n\n");
+        } else {
+            append_images_to_message_end(last, content.images);
+        }
+        if last.text.len() > MAX_MSG_TEXT {
+            last.text = clip(&last.text, MAX_MSG_TEXT).0;
+            last.truncated = true;
+        }
+    }
+    let thinking = thinking.trim();
+    if !thinking.is_empty() && last.thinking.as_deref().map_or(0, str::len) <= MAX_TOOL_IO {
+        match &mut last.thinking {
+            Some(t) => {
+                t.push_str("\n\n");
+                t.push_str(thinking);
+                if t.len() > MAX_TOOL_IO {
+                    *t = clip(t, MAX_TOOL_IO).0;
+                }
+            }
+            slot => *slot = Some(clip(thinking, MAX_TOOL_IO).0),
+        }
+    }
+    ix
+}
+
 /// 工具结果不属于消息正文流；其图片统一放到现有正文末尾。
 pub fn append_images_to_message_end(
     message: &mut TranscriptMessage,
@@ -1111,6 +1158,37 @@ pub fn make_preview(input: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merging_into_the_last_assistant_caps_text_and_thinking() {
+        let content = |text: &str| ParsedContent {
+            text: text.to_string(),
+            images: Vec::new(),
+        };
+        let mut messages = vec![text_msg(Role::User, "hi", 1)];
+        // 最后一条是用户:先开一条空的助手消息
+        assert_eq!(
+            merge_into_last_assistant(&mut messages, 0, content(""), "plan"),
+            1
+        );
+        assert_eq!(messages[1].timestamp, None);
+        let big = "x".repeat(MAX_MSG_TEXT);
+        let long_thinking = "t".repeat(MAX_TOOL_IO);
+        for ts in [2, 3] {
+            merge_into_last_assistant(&mut messages, ts, content(&big), &long_thinking);
+        }
+        assert_eq!(messages.len(), 2);
+        let reply = &messages[1];
+        assert_eq!(reply.timestamp, Some(2), "还没有时间的用第一次带时间的");
+        assert!(reply.truncated);
+        assert_eq!(reply.text.matches("(truncated)").count(), 1);
+        let thinking = reply.thinking.clone().unwrap();
+        assert!(thinking.starts_with("plan\n\n"));
+        assert_eq!(thinking.matches("(truncated)").count(), 1);
+        // 到上限后不再拼接,也不再反复 clip
+        merge_into_last_assistant(&mut messages, 4, content(""), "more");
+        assert_eq!(messages[1].thinking.as_deref(), Some(thinking.as_str()));
+    }
 
     #[test]
     fn percent_decode_walks_bytes() {
