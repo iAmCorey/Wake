@@ -127,7 +127,7 @@ impl AgentId {
             AgentId::Omp => "Oh My Pi",
             AgentId::Grok => "Grok Build",
             AgentId::Kimi => "Kimi Code",
-            AgentId::Antigravity => "Antigravity CLI",
+            AgentId::Antigravity => "Antigravity",
             AgentId::Dsh => "DeepSeek Harness",
             AgentId::Hermes => "Hermes Agent",
             AgentId::Openclaw => "OpenClaw",

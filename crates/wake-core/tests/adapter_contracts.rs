@@ -1984,6 +1984,200 @@ fn antigravity_parse_contract() {
     assert!(s.units[0].text.contains("QR overlay polish"));
 }
 
+/// 新版本写下的明文转录(PR #52 整理的格式,合成 fixture):转录与索引卡片都如实列出,
+/// 同一个 id 由 dedup_rank 让转录胜出;索引里的子会话两种都不列
+#[test]
+fn antigravity_transcripts_replace_index_cards() {
+    use common::AgIndexRow;
+    setup();
+    let tmp = tempfile::tempdir().unwrap();
+    let gemini = tmp.path().join(".gemini");
+    let db = common::build_antigravity_index(
+        &gemini,
+        &[
+            AgIndexRow {
+                id: "ag-1",
+                preview: "Dashboard buttons",
+                workspace: "/Users/tester/Github/dashboard",
+                app: "antigravity-ide",
+                ..Default::default()
+            },
+            AgIndexRow {
+                id: "ag-2",
+                preview: "Card only conversation",
+                workspace: "/Users/tester/Github/wakefx",
+                app: "antigravity",
+                ..Default::default()
+            },
+            AgIndexRow {
+                id: "ag-3",
+                preview: "Spawned helper",
+                workspace: "/Users/tester/Github/dashboard",
+                parent: "ag-1",
+                app: "antigravity-ide",
+            },
+        ],
+    );
+    let ide = gemini.join("antigravity-ide").join("brain");
+    let desktop = gemini.join("antigravity").join("brain");
+    let asked = ms("2026-08-30T02:11:10Z");
+    // 第一张贴图在第一轮之后几秒;第二张离哪一轮都差出两个小时,不挂
+    let t1 =
+        common::stage_antigravity_transcript(&ide, "ag-1", &[asked + 3_000, asked + 2 * 3_600_000]);
+    // 指到会话目录外面的贴图(远程镜像原样保留符号链接)不读
+    #[cfg(unix)]
+    {
+        let outside = tmp.path().join("outside.png");
+        fs::write(&outside, b"\x89PNG\r\n\x1a\noutside").unwrap();
+        let uploads = ide.join("ag-1").join(".user_uploaded");
+        std::os::unix::fs::symlink(
+            &outside,
+            uploads.join(format!("media_{}.png", asked + 5_000)),
+        )
+        .unwrap();
+    }
+    let t3 = common::stage_antigravity_transcript(&ide, "ag-3", &[]);
+    let t4 = common::stage_antigravity_transcript(&desktop, "ag-4", &[]);
+    // brain 根下不是会话的目录(浏览器子代理的临时录屏)
+    fs::create_dir_all(desktop.join("tempmediaStorage")).unwrap();
+
+    let adapter = AntigravityAdapter::new().with_custom_root(gemini.clone());
+    assert_eq!(
+        adapter.data_roots(),
+        vec![db.clone(), desktop.clone(), ide.clone()]
+    );
+    let mut refs = adapter.list_session_files().expect("antigravity list");
+    refs.sort_by(|a, b| (&a.native_id, &a.file_path).cmp(&(&b.native_id, &b.file_path)));
+    let card = |id: &str| format!("{}#{id}", db.display());
+    let listed: Vec<(&str, String)> = refs
+        .iter()
+        .map(|r| (r.native_id.as_str(), r.file_path.clone()))
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            ("ag-1", card("ag-1")),
+            ("ag-1", t1.to_string_lossy().to_string()),
+            ("ag-2", card("ag-2")),
+            ("ag-4", t4.to_string_lossy().to_string()),
+        ]
+    );
+    // 同一个 id 的卡片与转录同时出现时,转录胜出
+    assert_eq!(adapter.dedup_rank(&refs[1].file_path), 0);
+    assert_eq!(adapter.dedup_rank(&refs[0].file_path), 1);
+
+    let r = &refs[1];
+    let s = adapter.parse_session(r).expect("ag-1 parse_session");
+    let t = adapter.parse_transcript(r).expect("ag-1 parse_transcript");
+    assert_eq!(s.meta.key, "antigravity:ag-1");
+    // 索引没起标题(title 列空),第一轮请求压过 preview
+    assert_eq!(s.meta.title, "Fix the button layout on the dashboard");
+    assert_eq!(s.meta.project_path, "/Users/tester/Github/dashboard");
+    assert_eq!(s.meta.source.as_deref(), Some("IDE"));
+    assert_eq!(s.meta.model.as_deref(), Some("Gemini 3.7 Flash (High)"));
+    assert_eq!(s.meta.created_at, asked);
+    assert_eq!(s.meta.updated_at, ms("2026-08-30T02:12:06Z"));
+    assert_eq!(t.unknown_line_count, 1);
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+            (Role::System, MessageKind::CompactSummary),
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+        ]
+    );
+    let answer = &t.mainline[1];
+    assert!(answer.text.contains("updated the button alignment"));
+    assert!(answer
+        .thinking
+        .as_deref()
+        .is_some_and(|thinking| thinking.contains("find where the buttons")));
+    // 一轮里的两步并成一条;工具结果按调用顺序回填
+    let tools: Vec<(&str, &str)> = answer
+        .tool_calls
+        .iter()
+        .map(|call| (call.name.as_str(), call.output.as_deref().unwrap_or("")))
+        .collect();
+    assert_eq!(
+        tools,
+        vec![
+            ("view_file", "pub fn render_buttons() {}"),
+            ("grep_search", "src/ui.rs:12: pub fn render_buttons() {}"),
+            ("run_command", "test result: ok. 5 passed"),
+        ]
+    );
+    assert_eq!(answer.tool_calls[0].input_preview, "View ui.rs");
+    // 装在 JSON 字符串里的参数也解开
+    assert_eq!(answer.tool_calls[1].input_preview, "render_buttons");
+    assert!(answer.tool_calls[1]
+        .input
+        .as_deref()
+        .is_some_and(|input| input.contains("\"SearchPath\"")));
+    // 贴图只在详情页解码,挂在正文末尾
+    let asked_msg = &t.mainline[0];
+    assert_eq!(asked_msg.images.len(), 1);
+    assert_eq!(asked_msg.images[0].media_type, "image/png");
+    assert_eq!(asked_msg.images[0].text_offset, asked_msg.text.len());
+    assert!(t.mainline[3].images.is_empty());
+    assert_seq_contract(adapter.as_ref(), r);
+
+    // 卡片:preview 作标题,正文是加密说明;同一会话转录读不出时就是它
+    let card1 = adapter.parse_transcript(&refs[0]).expect("ag-1 card");
+    assert_eq!(card1.meta.title, "Dashboard buttons");
+    assert_eq!(card1.meta.source.as_deref(), Some("IDE"));
+    let card2 = adapter.parse_transcript(&refs[2]).expect("ag-2 card");
+    assert_eq!(card2.meta.title, "Card only conversation");
+    assert_eq!(card2.meta.source, None);
+    assert!(card2.mainline[0].text.contains("encrypted"));
+
+    // 没进索引的会话:工作区取工具的工作目录,桌面端不挂 via
+    let s4 = adapter.parse_session(&refs[3]).expect("ag-4 parse_session");
+    assert_eq!(s4.meta.project_path, "/Users/tester/Github/wakefx");
+    assert_eq!(s4.meta.source, None);
+    assert_eq!(s4.meta.title, "Fix the button layout on the dashboard");
+
+    // watcher 入口与列表同一个判据(含索引那一行算进的指纹)
+    let watched = adapter.file_ref(&t1).expect("ag-1 转录");
+    assert_eq!(
+        (watched.native_id.as_str(), watched.mtime_ms, watched.size),
+        ("ag-1", r.mtime_ms, r.size)
+    );
+    assert!(adapter.file_ref(&t3).is_none(), "子会话不列");
+    // 转录会话整个目录进废纸篓,卡片只记墓碑
+    assert_eq!(
+        adapter.session_paths(&s.meta),
+        vec![ide.join("ag-1").to_string_lossy().to_string()]
+    );
+    assert_eq!(adapter.cleanup_paths(&card2.meta), None);
+
+    // 一条消息都读不出的转录算解析失败(scanner 据此退回同一会话的卡片)
+    let broken = common::stage_antigravity_transcript(&desktop, "ag-5", &[]);
+    fs::write(&broken, "{\"type\":\"USER_INPUT\",\"content\":\"trunc").unwrap();
+    let broken_ref = adapter.file_ref(&broken).expect("ag-5 转录");
+    assert!(adapter.parse_session(&broken_ref).is_err());
+
+    // 索引库删掉了:卡片不再列,不交回上一次读到的
+    fs::remove_file(&db).unwrap();
+    let after: Vec<String> = adapter
+        .list_session_files()
+        .expect("antigravity list without index")
+        .into_iter()
+        .map(|r| r.file_path)
+        .collect();
+    assert!(
+        after.iter().all(|path| path.ends_with("transcript.jsonl")),
+        "{after:?}"
+    );
+
+    // 自定义 location 的其余形状:单个 brain、app 数据目录、索引所在目录
+    let roots = |dir: PathBuf| AntigravityAdapter::new().with_custom_root(dir).data_roots();
+    assert_eq!(roots(ide.clone()), vec![ide.clone()]);
+    assert_eq!(roots(gemini.join("antigravity-ide")), vec![ide.clone()]);
+    assert_eq!(roots(gemini.join("antigravity-cli")), vec![db.clone()]);
+}
+
 // ---------------------------------------------------------------- seq 契约
 
 /// 跨文件不变量 1:FTS 单元的 seq 必须能在详情页 mainline 中找到同号消息,

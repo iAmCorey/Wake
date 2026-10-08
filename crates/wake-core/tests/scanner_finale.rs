@@ -205,6 +205,71 @@ fn finale_fires_when_adapter_fails() {
     assert_terminal_event(&rec.0.lock().unwrap(), "adapter 枚举失败");
 }
 
+/// 一家枚举失败(库在却读不出)只冻结这一家:它在库里的行原样留着,别家照常入库、照常
+/// 删除检测,整轮跑完;失败记进进度的 error,界面照常提示
+#[test]
+fn one_failing_adapter_freezes_only_its_own_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    let adapters: Vec<Box<dyn AgentAdapter>> = vec![
+        Box::new(seed(
+            AgentId::Grok,
+            "/tmp/freeze-a",
+            "/tmp/freeze-a/a.jsonl",
+            "a",
+            10,
+        )),
+        Box::new(seed(
+            AgentId::Devin,
+            "/tmp/freeze-b",
+            "/tmp/freeze-b/b.jsonl",
+            "b",
+            10,
+        )),
+    ];
+    run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+    assert!(store.get_session("devin:b").unwrap().is_some());
+
+    let mut unreadable = seed(
+        AgentId::Devin,
+        "/tmp/freeze-b",
+        "/tmp/freeze-b/b.jsonl",
+        "b",
+        10,
+    );
+    unreadable.fail_list = true;
+    let adapters: Vec<Box<dyn AgentAdapter>> = vec![
+        Box::new(seed(
+            AgentId::Grok,
+            "/tmp/freeze-a",
+            "/tmp/freeze-a/a2.jsonl",
+            "a2",
+            20,
+        )),
+        Box::new(unreadable),
+    ];
+    let rec = Recorder::new();
+    run_scan(&adapters, &store, &rec, false).expect("一家读不出不截断整轮");
+    assert!(
+        store.get_session("devin:b").unwrap().is_some(),
+        "读不出的那家行原样留着"
+    );
+    assert!(
+        store.get_session("grok:a2").unwrap().is_some(),
+        "别家照常入库"
+    );
+    assert!(
+        store.get_session("grok:a").unwrap().is_none(),
+        "别家的删除检测照常"
+    );
+    let events = rec.0.lock().unwrap();
+    assert_terminal_event(&events, "一家枚举失败");
+    assert!(events
+        .last()
+        .and_then(|p| p.error.as_deref())
+        .is_some_and(|e| e.contains("simulated unreadable index")));
+}
+
 #[test]
 fn parent_links_from_multiple_locations_are_merged_by_winning_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -584,6 +649,8 @@ struct SeedAdapter {
     meta: SessionMeta,
     /// 模拟截断/损坏副本:解析一律报错(副本回退测试用)
     fail_parse: bool,
+    /// 模拟库在却读不出:枚举报错
+    fail_list: bool,
     /// 模拟 codex 的 state 改名:quick 给出的 key 与文件 native key 不同,
     /// merge 时 quick key 压过 parsed(codex 同款优先级)
     quick_key: Option<String>,
@@ -602,6 +669,9 @@ impl AgentAdapter for SeedAdapter {
         self.rank
     }
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
+        if self.fail_list {
+            bail!("simulated unreadable index")
+        }
         Ok(vec![self.r.clone()])
     }
     fn file_ref(&self, path: &Path) -> Option<SessionFileRef> {
@@ -655,6 +725,7 @@ impl AgentAdapter for SeedAdapter {
             r: self.r.clone(),
             meta: self.meta.clone(),
             fail_parse: self.fail_parse,
+            fail_list: self.fail_list,
             quick_key: self.quick_key.clone(),
             manages_links: self.manages_links,
             parent_links: self.parent_links.clone(),
@@ -1060,6 +1131,7 @@ fn seed(agent: AgentId, root: &str, path: &str, native_id: &str, mtime: i64) -> 
             pinned: false,
         },
         fail_parse: false,
+        fail_list: false,
         quick_key: None,
         manages_links: false,
         parent_links: Vec::new(),
@@ -1108,6 +1180,7 @@ fn tombstoned_session_does_not_resurrect_on_rescan() {
         r,
         meta: meta.clone(),
         fail_parse: false,
+        fail_list: false,
         quick_key: None,
         manages_links: false,
         parent_links: Vec::new(),
@@ -1280,6 +1353,78 @@ fn dsh_newer_generation_takes_over_an_indexed_older_one() {
         store.get_session(KEY).unwrap().unwrap().file_path,
         v4.to_string_lossy()
     );
+}
+
+/// Antigravity:索引里先只有卡片,明文转录后来才写出来——同一个 key 由转录接替
+/// (`dedup_rank`,转录的 mtime 与卡片的时间毫不相干),增量与全量两条写路径都是;
+/// 转录目录没了、索引还在,卡片回来。库里始终只有一行
+#[test]
+fn antigravity_transcript_takes_over_its_index_card() {
+    use wake_core::adapters::antigravity::AntigravityAdapter;
+    const KEY: &str = "antigravity:ag-1";
+    let home = tempfile::tempdir().unwrap();
+    let gemini = home.path().join(".gemini");
+    common::build_antigravity_index(
+        &gemini,
+        &[common::AgIndexRow {
+            id: "ag-1",
+            preview: "Dashboard buttons",
+            workspace: "/Users/tester/Github/dashboard",
+            app: "antigravity-ide",
+            ..Default::default()
+        }],
+    );
+    let adapters: Vec<Box<dyn AgentAdapter>> =
+        vec![AntigravityAdapter::new().with_custom_root(gemini.clone())];
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    let rows = || {
+        store
+            .list_sessions(&SessionFilter {
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap()
+            .1
+    };
+    run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+    let s = store.get_session(KEY).unwrap().expect("卡片入库");
+    assert!(s.file_path.ends_with("#ag-1"));
+    assert_eq!(s.title, "Dashboard buttons");
+
+    let brain = gemini.join("antigravity-ide").join("brain");
+    let transcript = common::stage_antigravity_transcript(&brain, "ag-1", &[]);
+    // 转录写坏了(一条消息都读不出):卡片接着顶着,不被空会话顶掉
+    let good = std::fs::read(&transcript).unwrap();
+    std::fs::write(&transcript, "{\"type\":\"USER_INPUT\",\"content\":\"trunc").unwrap();
+    run_scan(&adapters, &store, &Recorder::new(), false).unwrap();
+    let s = store.get_session(KEY).unwrap().expect("会话仍在库");
+    assert!(s.file_path.ends_with("#ag-1"), "坏转录退回卡片");
+    assert_eq!(rows(), 1);
+
+    std::fs::write(&transcript, good).unwrap();
+    let incoming = adapters[0].file_ref(&transcript).expect("转录是这个会话的");
+    scan_files(&adapters, &store, &Recorder::new(), vec![incoming]);
+    let s = store.get_session(KEY).unwrap().expect("会话仍在库");
+    assert_eq!(
+        s.file_path,
+        transcript.to_string_lossy(),
+        "增量写入由转录接替"
+    );
+    assert_eq!(s.title, "Fix the button layout on the dashboard");
+    assert_eq!(s.source.as_deref(), Some("IDE"));
+    assert_eq!(rows(), 1);
+
+    run_scan(&adapters, &store, &Recorder::new(), false).unwrap();
+    let s = store.get_session(KEY).unwrap().unwrap();
+    assert_eq!(s.file_path, transcript.to_string_lossy());
+    assert_eq!(rows(), 1);
+
+    std::fs::remove_dir_all(brain.join("ag-1")).unwrap();
+    run_scan(&adapters, &store, &Recorder::new(), false).unwrap();
+    let s = store.get_session(KEY).unwrap().expect("索引还在,卡片回来");
+    assert!(s.file_path.ends_with("#ag-1"));
+    assert_eq!(rows(), 1);
 }
 
 /// Cursor 两源端到端:转录带正文的会话固定由 CLI 源胜出(它有 slug 可反推

@@ -282,7 +282,10 @@ pub fn run_scan(
     events.on_progress(&fin.progress);
 
     let result = run_scan_inner(adapters, store, events, full, &mut fin.progress);
-    fin.progress.error = result.as_ref().err().map(|e| e.to_string());
+    // 某一家枚举失败时 run_scan_inner 已把它记在 error 上、整轮照常跑完:只在整轮失败时覆盖
+    if let Err(e) = &result {
+        fin.progress.error = Some(e.to_string());
+    }
     fin.graceful = true;
     result
 }
@@ -364,11 +367,25 @@ fn run_scan_inner(
     // 下面四处同一口径,别各自 format
     let key_of =
         |ix: usize, r: &SessionFileRef| session_key(r.agent, adapters[ix].host(), &r.native_id);
-    // 第一遍:全量枚举 + 归属过滤
+    // 第一遍:全量枚举 + 归属过滤。一家枚举报错(库在却读不出、目录读不了)只冻结这一家:
+    // 这一轮不入队,库里归它的行原样留着(下面的删除检测跳过),错误记进进度、别家照常——
+    // 一个坏库既不能截断整轮(别家的新会话跟着进不来),也不能被当成"会话全没了"
     let mut per_adapter: Vec<Vec<SessionFileRef>> = Vec::with_capacity(adapters.len());
+    let mut frozen: Vec<usize> = Vec::new();
     for (ix, adapter) in adapters.iter().enumerate() {
-        let refs: Vec<SessionFileRef> = adapter
-            .list_session_files()?
+        let listed = match adapter.list_session_files() {
+            Ok(listed) => listed,
+            Err(e) => {
+                eprintln!("[scan] {}: {e:#}", adapter.agent().as_str());
+                progress
+                    .error
+                    .get_or_insert_with(|| format!("{}: {e}", adapter.agent().display_name()));
+                frozen.push(ix);
+                per_adapter.push(Vec::new());
+                continue;
+            }
+        };
+        let refs: Vec<SessionFileRef> = listed
             .into_iter()
             // 墓碑双轨:物理路径之外还按逻辑会话(key)屏蔽——多 location 下
             // 删除只 trash 了胜者文件,别的 location 里的副本不得复活它
@@ -505,10 +522,10 @@ fn run_scan_inner(
         }
     }
 
-    // 删除检测:库里有但磁盘没了
+    // 删除检测:库里有但磁盘没了。枚举失败的那几家这一轮不知道在不在,归它们的行不动
     let mut pruned = false;
     for (path, (_, _, key)) in &known {
-        if !seen_paths.contains(path) {
+        if !seen_paths.contains(path) && !owner_of(path).is_some_and(|ix| frozen.contains(&ix)) {
             let _ = store.remove_session(key, false);
             pruned = true;
         }

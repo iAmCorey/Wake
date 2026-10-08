@@ -44,7 +44,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and a dozen othe
 | Oh My Pi | `~/.omp/agent/sessions/**/*.jsonl` | ✅ | — |
 | Grok Build | `~/.grok/sessions/**/updates.jsonl` | ✅ | — |
 | Kimi Code | `~/.kimi-code/sessions/**/wire.jsonl` | — | — |
-| Antigravity CLI | `~/.gemini/antigravity-cli/conversation_summaries.db` (metadata only — transcripts are encrypted) | — | — |
+| Antigravity | `~/.gemini/antigravity/brain` and `~/.gemini/antigravity-ide/brain` (the plain-text transcripts recent versions of the desktop app and the IDE write, pasted images included) + `~/.gemini/antigravity-cli/conversation_summaries.db` (the conversation index shared by the CLI, desktop app and IDE; a conversation with no transcript on disk is listed from it as a summary card, since its body is stored encrypted) | ✅ | ✅ |
 | DeepSeek Harness (`dsh`) | `~/.dsh/sessions/**/session[.vN].jsonl[.zstd]` (the newest log format generation is read; zstd-compressed logs are decoded transparently) | ✅ | — |
 | Hermes Agent | `~/.hermes/state.db` + `profiles/*/state.db` (`HERMES_HOME` is respected) | ✅ | ✅ |
 | OpenClaw | `~/.openclaw/agents/*/agent/openclaw-agent.sqlite` + legacy `agents/*/sessions/*.jsonl` (`OPENCLAW_STATE_DIR` is respected) | ✅ | ✅ |
@@ -55,7 +55,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and a dozen othe
 | Devin | `~/.local/share/devin/cli/sessions.db` (read-only; `XDG_DATA_HOME` is respected) | ✅ | — |
 | Kilo Code | `~/.local/share/kilo/kilo.db` (VS Code extension, CLI and JetBrains plugin share it; read-only; `XDG_DATA_HOME` and `KILO_DB` are respected) + the legacy extension's `globalStorage/kilocode.kilo-code/tasks` in VS Code and other VS Code-based editors | ✅ | ✅ |
 
-**Model** = whether Wake shows which LLM a session used (the model the session last used). **Via** = whether Wake shows where the session was started from (CLI, IDE extension, desktop app) — Codex records this in its local data; Hermes and OpenClaw record the channel a session came in through (Telegram, Discord, …); Craft Agents marks sessions its automations started; Kilo Code's legacy tasks show which editor they ran in. A "—" means the agent's local data simply doesn't record that field, not a missing feature.
+**Model** = whether Wake shows which LLM a session used (the model the session last used). **Via** = whether Wake shows where the session was started from (CLI, IDE extension, desktop app) — Codex records this in its local data; Hermes and OpenClaw record the channel a session came in through (Telegram, Discord, …); Antigravity marks conversations from its IDE; Craft Agents marks sessions its automations started; Kilo Code's legacy tasks show which editor they ran in. A "—" means the agent's local data simply doesn't record that field, not a missing feature.
 
 Craft Agents runs other agents' engines rather than its own: a Claude connection drives the Claude Agent SDK, which also saves every conversation into Claude Code's history. Wake lists the Craft session and hides that engine copy for as long as the Craft session exists — delete the session in Craft and the copy shows up again as a Claude Code session. Craft's short title-generation calls on a Claude connection are saved by the SDK too, and appear as one-message Claude Code sessions under *Unknown project*.
 

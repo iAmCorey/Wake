@@ -1,7 +1,7 @@
 //! Grok 会话归组：主会话登记的 subagent 关系优先，无父会话时再用
 //! worktree registry、git remote 与临时 worktree 名称恢复真实项目。
 
-use super::parse_utils::project_name_of;
+use super::parse_utils::{percent_decode, project_name_of};
 use super::sqlite_ro::open_sqlite_ro;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -137,33 +137,6 @@ fn load_worktree_rows(grok_home: &Path) -> Vec<WorktreeRow> {
         return Vec::new();
     };
     rows.flatten().collect()
-}
-
-fn hex_digit(c: u8) -> Option<u8> {
-    Some(match c {
-        b'0'..=b'9' => c - b'0',
-        b'a'..=b'f' => c - b'a' + 10,
-        b'A'..=b'F' => c - b'A' + 10,
-        _ => return None,
-    })
-}
-
-fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut ix = 0;
-    while ix < bytes.len() {
-        if bytes[ix] == b'%' && ix + 2 < bytes.len() {
-            if let (Some(high), Some(low)) = (hex_digit(bytes[ix + 1]), hex_digit(bytes[ix + 2])) {
-                out.push((high << 4) | low);
-                ix += 3;
-                continue;
-            }
-        }
-        out.push(bytes[ix]);
-        ix += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn group_cwd(cwd_dir: &Path) -> String {

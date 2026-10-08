@@ -830,21 +830,27 @@ pub fn build_opencode_next_db(path: &Path) {
     .expect("populate opencode next fixture db");
 }
 
-/// Antigravity `conversation_summaries.db` 最小同构库:标题在 preview 列
-/// (title 列常空);ag-0002 是子会话(parent 非空),必须被过滤。
+/// Antigravity 会话索引表,老库形态(新版多一列 `app_data_dir`,见 `build_antigravity_index`)
+const ANTIGRAVITY_INDEX_TABLE: &str = r#"
+    CREATE TABLE conversation_summaries (
+        conversation_id text, title text NOT NULL DEFAULT "",
+        preview text NOT NULL DEFAULT "", step_count integer NOT NULL DEFAULT 0,
+        last_modified_time datetime NOT NULL, workspace_uris text NOT NULL,
+        parent_conversation_id text NOT NULL DEFAULT "",
+        nesting_depth integer NOT NULL DEFAULT 0,
+        last_user_input_time datetime NOT NULL,
+        PRIMARY KEY (conversation_id)
+    );
+"#;
+
+/// Antigravity `conversation_summaries.db` 最小同构库(老库,没有 `app_data_dir`):标题在
+/// preview 列(title 列常空);ag-0002 是子会话(parent 非空),必须被过滤。
 pub fn build_antigravity_db(path: &Path) {
     let conn = rusqlite::Connection::open(path).expect("create antigravity fixture db");
+    conn.execute_batch(ANTIGRAVITY_INDEX_TABLE)
+        .expect("create antigravity fixture table");
     conn.execute_batch(
         r#"
-        CREATE TABLE conversation_summaries (
-            conversation_id text, title text NOT NULL DEFAULT "",
-            preview text NOT NULL DEFAULT "", step_count integer NOT NULL DEFAULT 0,
-            last_modified_time datetime NOT NULL, workspace_uris text NOT NULL,
-            parent_conversation_id text NOT NULL DEFAULT "",
-            nesting_depth integer NOT NULL DEFAULT 0,
-            last_user_input_time datetime NOT NULL,
-            PRIMARY KEY (conversation_id)
-        );
         INSERT INTO conversation_summaries
             (conversation_id, title, preview, step_count, last_modified_time,
              workspace_uris, parent_conversation_id, nesting_depth, last_user_input_time)
@@ -856,6 +862,73 @@ pub fn build_antigravity_db(path: &Path) {
         "#,
     )
     .expect("populate antigravity fixture db");
+}
+
+/// 新版 Antigravity 会话索引里的一行(`build_antigravity_index` 用)
+#[derive(Clone, Copy, Default)]
+pub struct AgIndexRow {
+    pub id: &'static str,
+    pub preview: &'static str,
+    pub workspace: &'static str,
+    /// 父会话 id;非空 = 子会话,同时记 nesting_depth = 1
+    pub parent: &'static str,
+    /// 会话所在的 app 数据目录名(`antigravity` / `antigravity-ide`)
+    pub app: &'static str,
+}
+
+/// 新版的会话索引(多一列 `app_data_dir`)建在 `<gemini>/antigravity-cli/` 下,返回库路径
+pub fn build_antigravity_index(gemini: &Path, rows: &[AgIndexRow]) -> PathBuf {
+    let dir = gemini.join("antigravity-cli");
+    fs::create_dir_all(&dir).expect("mkdir antigravity-cli");
+    let path = dir.join("conversation_summaries.db");
+    let conn = rusqlite::Connection::open(&path).expect("create antigravity index");
+    conn.execute_batch(ANTIGRAVITY_INDEX_TABLE)
+        .expect("create antigravity index table");
+    conn.execute_batch(
+        r#"ALTER TABLE conversation_summaries ADD COLUMN app_data_dir text NOT NULL DEFAULT """#,
+    )
+    .expect("add app_data_dir");
+    for row in rows {
+        conn.execute(
+            "INSERT INTO conversation_summaries (conversation_id, preview, step_count,
+                 last_modified_time, workspace_uris, parent_conversation_id, nesting_depth,
+                 last_user_input_time, app_data_dir)
+             VALUES (?1, ?2, 4, '2026-08-30 02:12:05.000000+00:00', ?3, ?4, ?5,
+                     '2026-08-30 02:12:00.000000+00:00', ?6)",
+            rusqlite::params![
+                row.id,
+                row.preview,
+                format!("[\"file://{}\"]", row.workspace),
+                row.parent,
+                i64::from(!row.parent.is_empty()),
+                row.app
+            ],
+        )
+        .expect("insert antigravity index row");
+    }
+    path
+}
+
+/// 一条 Antigravity brain 转录(合成 fixture,格式见 PR #52)+ 若干用户贴图
+/// (`.user_uploaded/media_<毫秒>.png`),返回转录路径
+pub fn stage_antigravity_transcript(brain: &Path, id: &str, uploads: &[i64]) -> PathBuf {
+    let session = brain.join(id);
+    let logs = session.join(".system_generated").join("logs");
+    fs::create_dir_all(&logs).expect("mkdir antigravity transcript dir");
+    let transcript = logs.join("transcript.jsonl");
+    fs::copy(fixture("antigravity/transcript.jsonl"), &transcript).expect("copy transcript");
+    if !uploads.is_empty() {
+        let dir = session.join(".user_uploaded");
+        fs::create_dir_all(&dir).expect("mkdir .user_uploaded");
+        for ms in uploads {
+            fs::write(
+                dir.join(format!("media_{ms}.png")),
+                b"\x89PNG\r\n\x1a\nfixture",
+            )
+            .expect("write upload");
+        }
+    }
+    transcript
 }
 
 /// Cursor IDE `state.vscdb` 最小同构库:VS Code 的两张 KV 表 + 2026 新增的

@@ -53,7 +53,8 @@ pub trait AgentAdapter: Send + Sync {
     }
     /// 枚举全部会话文件。契约是"枚举必须廉价、绝不做全量解析":多数家纯 stat,
     /// SQLite 型跑元数据查询,dsh 读有界首行(子代理标志只存在于文件头)。
-    /// 故障就地降级为空列表,不外溢炸掉整轮扫描。
+    /// 根不在就是确定没有,降级为 Ok(空);Err 只表示"这一刻读不出"(库在却打不开)——
+    /// scanner 冻结这一家这一轮(库里归它的行原样留着),别家照常。
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>>;
     /// watcher 事件路径 → 本 adapter 的会话文件引用;None = 非会话文件
     /// (边车、子代理转录等)。默认:非空 .jsonl,stem 即 native_id。
@@ -320,8 +321,8 @@ pub(crate) fn home_dir() -> Option<std::path::PathBuf> {
 
 /// 全量二十二家 roster,**不按 detect 过滤**。这是全应用唯一的构造点:
 /// scanner/watcher/resume/Session locations 面板共享 Workbench 启动时的
-/// 同一份实例。缺根的家由各自 list_session_files 降级为 Ok(空)(scanner
-/// 对 Err 会 `?` 截断整轮,新 adapter 必须维持这条降级约定,contract 测试
+/// 同一份实例。缺根的家由各自 list_session_files 降级为 Ok(空)(Err 会让
+/// scanner 把这一家这一轮当成"读不出"冻结住,缺根不是读不出,contract 测试
 /// 有卡)。**不要为任何用途二次构造 roster**:根路径是构造时刻对 env
 /// (CODEX_HOME/XDG_DATA_HOME)与文件系统的快照,两份实例可能解析出不同的
 /// 根,UI 就会展示一个扫描器并不在读的路径。

@@ -156,13 +156,17 @@ pub const REMOTE_LAYOUTS: &[RemoteAgentLayout] = &[
     },
     RemoteAgentLayout {
         agent: AgentId::Antigravity,
-        // 库所在目录层(is_file 判据对未同步目录失真,目录层恒正确)
-        mount: ".gemini/antigravity-cli",
+        // `.gemini` 层:with_custom_root 按目录名认出整套布局(会话索引 + 两个 app 数据
+        // 目录下的 brain 转录),未同步时目录还不存在也不失真。brain 只拉会话目录,
+        // 浏览器子代理的临时录屏不拉;凭证(oauth_creds.json 等)不在白名单里
+        mount: ".gemini",
         sync_paths: &[
             ".gemini/antigravity-cli/conversation_summaries.db",
             ".gemini/antigravity-cli/conversation_summaries.db-wal",
+            ".gemini/antigravity/brain",
+            ".gemini/antigravity-ide/brain",
         ],
-        exclude: &[],
+        exclude: &["brain/tempmediaStorage"],
     },
     RemoteAgentLayout {
         agent: AgentId::Dsh,
