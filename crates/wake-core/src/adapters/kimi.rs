@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 
 /// Kimi Code(Moonshot AI):`~/.kimi-code/sessions/wd_<名>_<hash>/session_<uuid>/`
 /// 一目录一会话,主文件 `agents/main/wire.jsonl`(事件溯源:turn.prompt 是用户
-/// 输入,context.append_message 是落入上下文的完整消息,turn.* 生命周期与
-/// config 行为已知跳过);`state.json` 边车给标题/时间("New Session" 是占位),
+/// 输入;桌面端 0.4x 的助手消息在 agent.message.appended(包装层带 meta.source),
+/// 旧 CLI 的助手消息在 context.append_message;turn.* 生命周期与 config 行为
+/// 已知跳过);`state.json` 边车给标题/时间("New Session" 是占位),
 /// cwd 靠根级 `session_index.jsonl` 的 sessionId→workDir 映射(目录名 hash
 /// 不可反推)。`agents/<非main>/` 是子代理,不进列表。
 pub struct KimiAdapter {
@@ -107,6 +108,22 @@ fn read_state(wire_path: &Path) -> KimiState {
     s
 }
 
+/// Kimi 桌面端思考块:content 里 {"type":"think","think":"..."},多段拼一条
+fn think_texts(v: &Value) -> Option<String> {
+    let texts: Vec<&str> = v
+        .as_array()?
+        .iter()
+        .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("think"))
+        .filter_map(|p| p.get("think").and_then(|t| t.as_str()).map(str::trim))
+        .filter(|t| !t.is_empty())
+        .collect();
+    if texts.is_empty() {
+        None
+    } else {
+        Some(clip(&texts.join("\n\n"), MAX_TOOL_IO).0)
+    }
+}
+
 fn parse_kimi_wire(path: &Path, decode_images: bool) -> Result<(Vec<TranscriptMessage>, u32)> {
     let _image_budget = transcript_image_decode_budget(decode_images);
     let file = fs::File::open(path)?;
@@ -152,6 +169,51 @@ fn parse_kimi_wire(path: &Path, decode_images: bool) -> Result<(Vec<TranscriptMe
                     message.images = parsed.images;
                     messages.push(message);
                 }
+            }
+            // 桌面端(0.4x)现行事件流:助手消息在 agent.message.appended,
+            // 包装层 {"message":{...},"meta":{"source":...}};source=input 的
+            // 用户消息已由 turn.prompt/turn.steer 覆盖,这里只取助手,
+            // tool/notify 等其余角色与来源跳过(工具明细在 loop_event 里,v1 不展开)
+            Some("agent.message.appended") => {
+                let Some(msg) = row
+                    .get("message")
+                    .and_then(|wrapper| wrapper.get("message"))
+                else {
+                    unknown += 1;
+                    continue;
+                };
+                if msg.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+                    continue;
+                }
+                let ts = row.get("time").map(to_epoch_ms).unwrap_or(0);
+                let content = msg.get("content").unwrap_or(&Value::Null);
+                let parsed = content_parts(content, decode_images);
+                let thinking = think_texts(content);
+                if parsed.text.is_empty() && parsed.images.is_empty() && thinking.is_none() {
+                    continue;
+                }
+                // 同一轮里每个 LLM 调用一条事件(多数只有 think),合并连续的
+                // 助手消息为一个气泡,避免转写被无正文的思考事件刷屏
+                if let Some(last) = messages.last_mut() {
+                    if last.role == Role::Assistant {
+                        append_content_to_message(last, parsed, "\n\n");
+                        if let Some(t) = thinking {
+                            let joined = match &last.thinking {
+                                Some(prev) => format!("{prev}\n\n{t}"),
+                                None => t,
+                            };
+                            last.thinking = Some(clip(&joined, MAX_TOOL_IO).0);
+                        }
+                        if last.timestamp.is_none() && ts > 0 {
+                            last.timestamp = Some(ts);
+                        }
+                        continue;
+                    }
+                }
+                let mut message = text_msg(Role::Assistant, &parsed.text, ts);
+                message.images = parsed.images;
+                message.thinking = thinking;
+                messages.push(message);
             }
             // 已知的配置/生命周期/工具事件行(工具明细在 loop_event 里,v1 不展开)
             Some("metadata")
@@ -250,8 +312,8 @@ impl AgentAdapter for KimiAdapter {
 
     fn file_ref(&self, path: &Path) -> Option<SessionFileRef> {
         // 只认主代理的 wire.jsonl;agents/<其他>/ 是子代理
-        let p = path.to_string_lossy();
-        if !p.ends_with("/agents/main/wire.jsonl") {
+        // 按路径组件比较:Windows 上 join 出反斜杠,字符串 ends_with 会全部漏掉
+        if !path.ends_with(Path::new("agents").join("main").join("wire.jsonl")) {
             return None;
         }
         let native = native_id_of(path)?;
