@@ -15,6 +15,12 @@ use chrono::{NaiveDate, NaiveDateTime};
 /// 各 adapter 经 `project_name_of` 取的路径尾段,不必再自己切一遍)。
 /// 返回空 = 没匹配上,调用方据此报"未知项目",**不要退化成不过滤**。
 pub fn resolve_project_paths(arg: &str, projects: &[ProjectInfo]) -> Vec<String> {
+    let home = crate::adapters::home_dir().map(|h| h.to_string_lossy().into_owned());
+    resolve_in(arg, projects, home.as_deref())
+}
+
+/// `resolve_project_paths` 的本体,家目录由调用方给(单测不碰环境)
+fn resolve_in(arg: &str, projects: &[ProjectInfo], home: Option<&str>) -> Vec<String> {
     let arg = crate::adapters::expand_tilde(arg.trim());
     let wanted = strip_trailing_sep(&arg);
     if wanted.is_empty() {
@@ -27,8 +33,14 @@ pub fn resolve_project_paths(arg: &str, projects: &[ProjectInfo]) -> Vec<String>
         {
             return vec![p.path.clone()];
         }
+        // 最长的祖先,但文件系统根与家目录不算:从 Dock 起的进程 cwd 是 "/"、在家目录随手
+        // 开的 agent 落在 "~",它们是一切路径的祖先——拿来当"这个目录所在的项目",在还没有
+        // 会话的新项目里一问就是一堆不相干的会话(SessionStart 钩子注入的正是这个,2026-10-09)
         let mut best: Option<&ProjectInfo> = None;
-        for p in projects.iter().filter(|p| !p.path.is_empty()) {
+        for p in projects
+            .iter()
+            .filter(|p| !p.path.is_empty() && !catch_all(&p.path, home))
+        {
             if path_owns(&p.path, wanted) && best.is_none_or(|b| p.path.len() > b.path.len()) {
                 best = Some(p);
             }
@@ -56,16 +68,29 @@ pub fn resolve_project_paths(arg: &str, projects: &[ProjectInfo]) -> Vec<String>
     matched
 }
 
+/// 一切路径的祖先、当不了"所在项目"的目录:文件系统根(`/`、`C:\`)与家目录
+fn catch_all(path: &str, home: Option<&str>) -> bool {
+    let p = strip_trailing_sep(path);
+    // 盘符根两种写法都认:Unix 上 `\` 不是分隔符,`C:\` 剥不掉尾巴(镜像来的 Windows 路径)
+    let drive_root = after_drive(p).is_some_and(|rest| matches!(rest, "" | "\\" | "/"));
+    let root = p.chars().all(std::path::is_separator) || drive_root;
+    root || home.is_some_and(|h| strip_trailing_sep(h) == p)
+}
+
 /// 是"路径"而非"项目名"的判据。不能只看 `Path::is_absolute`:Windows 上它对
 /// `/Users/…` 返回 false,而索引里的远程镜像会话(以及 CI 上的 fixture)全是
 /// POSIX 路径;反过来 Unix 上也认 `C:\…` 形态,一个盘符串不可能是项目名
 fn looks_like_path(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    let drive = bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    let drive = after_drive(s).is_some_and(|rest| rest.starts_with(['\\', '/']));
     std::path::Path::new(s).is_absolute() || s.starts_with(std::path::is_separator) || drive
+}
+
+/// 盘符(`C:`)之后的部分;不以盘符开头给 None
+fn after_drive(s: &str) -> Option<&str> {
+    match s.as_bytes() {
+        [d, b':', ..] if d.is_ascii_alphabetic() => Some(&s[2..]),
+        _ => None,
+    }
 }
 
 fn strip_trailing_sep(s: &str) -> &str {
@@ -190,6 +215,29 @@ mod tests {
         assert!(resolve_project_paths("/Users/t/Github/wake-old", &p).is_empty());
         assert!(resolve_project_paths("/nope", &p).is_empty());
         assert!(resolve_project_paths("   ", &p).is_empty());
+    }
+
+    /// 根与家目录是一切路径的祖先,不当"所在项目":还没有会话的新项目问不出它们的会话;
+    /// 真正的上级项目照常,人就站在家目录里时也照常是它
+    #[test]
+    fn root_and_home_are_nobodys_enclosing_project() {
+        let mut p = fixtures();
+        p.push(project("/", ""));
+        p.push(project("/Users/t", "t"));
+        let home = Some("/Users/t/");
+        assert!(resolve_in("/Users/t/Github/brand-new", &p, home).is_empty());
+        assert!(resolve_in("/opt/elsewhere", &p, home).is_empty());
+        assert_eq!(
+            resolve_in("/Users/t/Github/wake/src", &p, home),
+            vec!["/Users/t/Github/wake".to_string()]
+        );
+        assert_eq!(
+            resolve_in("/Users/t", &p, home),
+            vec!["/Users/t".to_string()]
+        );
+        assert_eq!(resolve_in("/", &p, home), vec!["/".to_string()]);
+        assert!(catch_all(r"C:\", None));
+        assert!(!catch_all("/Users/t/Github", home));
     }
 
     #[test]

@@ -8,6 +8,33 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use wake_core::db::{IndexLock, Ownership};
+use wake_core::models::{AgentId, SessionMeta};
+
+/// 一条最小的会话元数据(Claude Code、无模型无 token);测试按需用 `..meta(..)` 改字段。
+/// SessionMeta 没有 Default,新字段只补这一处
+pub fn meta(key: &str, title: &str) -> SessionMeta {
+    SessionMeta {
+        host: String::new(),
+        key: key.to_string(),
+        id: key.split(':').nth(1).unwrap_or(key).to_string(),
+        agent: AgentId::ClaudeCode,
+        title: title.to_string(),
+        project_path: "/tmp/proj".into(),
+        project_name: "proj".into(),
+        file_path: format!("/tmp/fixtures/{key}.jsonl"),
+        created_at: 1_700_000_000_000,
+        updated_at: 1_700_000_100_000,
+        message_count: 2,
+        size_bytes: 128,
+        git_branch: None,
+        model: None,
+        tokens_used: None,
+        archived: false,
+        source: None,
+        favorite: false,
+        pinned: false,
+    }
+}
 
 /// dsh 默认落盘的 zstd 多帧日志:首帧 header 行、次帧事件批,帧直接连接(写端每次 append
 /// 一帧,解码器解到 EOF)

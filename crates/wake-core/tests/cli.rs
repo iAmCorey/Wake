@@ -18,7 +18,7 @@ use wake_core::adapters::{create_adapter_roster_for, create_adapters_for, AgentA
 use wake_core::cli;
 use wake_core::db::{self, Store};
 use wake_core::mcp::tools::{self, TranscriptCache};
-use wake_core::models::SessionFilter;
+use wake_core::models::{SessionFilter, SessionMeta};
 use wake_core::scanner::{run_scan, NullEvents};
 
 mod common;
@@ -84,13 +84,17 @@ fn call(
     tools::invoke(store, adapters, &TranscriptCache::default(), tool, args)
 }
 
-/// 唯一的 spawn 实现。不要 .env_clear():子进程的 roster 全靠继承
-/// WAKE_HOME/HOME
 fn cli_raw(args: &[&str]) -> (String, String, Option<i32>) {
-    let out = Command::new(env!("CARGO_BIN_EXE_wake-cli"))
-        .args(args)
-        .output()
-        .expect("spawn wake-cli");
+    cli_raw_with(args, |_| {})
+}
+
+/// 唯一的 spawn 实现(`with` 改环境与工作目录)。不要 .env_clear():子进程的
+/// roster 全靠继承 WAKE_HOME/HOME
+fn cli_raw_with(args: &[&str], with: impl FnOnce(&mut Command)) -> (String, String, Option<i32>) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_wake-cli"));
+    cmd.args(args);
+    with(&mut cmd);
+    let out = cmd.output().expect("spawn wake-cli");
     (
         String::from_utf8(out.stdout).expect("stdout is utf-8"),
         String::from_utf8(out.stderr).expect("stderr is utf-8"),
@@ -752,4 +756,104 @@ fn refresh_refuses_when_only_remote_memories_would_be_lost() {
         )
         .unwrap();
     assert_eq!(left, 1, "远程记忆不许被清掉");
+}
+
+/// `context` 给 SessionStart 钩子用:当前目录所在项目最近两周的会话,子目录归到所在项目;
+/// 认不出项目、两周内没有会话时一个字节都不输出、退 0——钩子的输出原样进 agent 的上下文。
+/// 家目录不当"所在项目":在家目录随手开的会话不该被塞进每个新项目
+#[test]
+fn context_prints_this_folders_recent_sessions_or_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = std::fs::canonicalize(tmp.path()).unwrap();
+    let project = home.join("app");
+    let fresh = home.join("fresh");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::create_dir_all(&fresh).unwrap();
+    let db = home.join("wake.db");
+    {
+        let store = Store::open(&db).unwrap();
+        let now = db::now_ms();
+        let session = |id: &str, at: &Path, updated_at: i64| SessionMeta {
+            project_path: at.to_string_lossy().into_owned(),
+            created_at: updated_at,
+            updated_at,
+            ..common::meta(&format!("claude-code:{id}"), &format!("about {id}"))
+        };
+        store
+            .write_meta_only(&[
+                (session("recent", &project, now), 1),
+                (session("stale", &project, now - 30 * 86_400_000), 1),
+                (session("in-home", &home, now), 1),
+            ])
+            .unwrap();
+    }
+    let context = |dir: &Path| {
+        let (out, _, code) = cli_raw_with(&["--db", db.to_str().unwrap(), "context"], |cmd| {
+            cmd.env("WAKE_HOME", &home).current_dir(dir);
+        });
+        (out, code)
+    };
+    let (text, code) = context(&project.join("src"));
+    assert_eq!(code, Some(0));
+    assert!(
+        text.starts_with("Wake: 1 session in this project in the last 14 days:"),
+        "{text}"
+    );
+    assert!(text.contains("`claude-code:recent`"), "{text}");
+    assert!(!text.contains("stale"), "两周以前的不列: {text}");
+    assert!(!text.contains("in-home"), "家目录的会话不跟进来: {text}");
+
+    let elsewhere = tempfile::tempdir().unwrap();
+    for dir in [fresh.as_path(), elsewhere.path()] {
+        assert_eq!(context(dir), (String::new(), Some(0)), "{}", dir.display());
+    }
+}
+
+/// 插件只是一层壳:清单、钩子、MCP 配置都指向仓库里真实存在的脚本,钩子调的是 `wake-cli
+/// context`,启动脚本找的正是各平台打包落下二进制的地方。`claude plugin validate` 不在 CI
+/// 里跑,这里卡住最容易漂的几处
+#[test]
+fn the_claude_code_plugin_points_at_real_files() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let json = |path: PathBuf| -> Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    };
+    let market = json(repo.join(".claude-plugin/marketplace.json"));
+    let entry = &market["plugins"][0];
+    let id = format!(
+        "{}@{}",
+        entry["name"].as_str().unwrap(),
+        market["name"].as_str().unwrap()
+    );
+    assert!(cli::CLAUDE_PLUGIN_INSTALL.ends_with(&id), "{id}");
+    let plugin = repo.join(entry["source"].as_str().unwrap());
+    let manifest = json(plugin.join(".claude-plugin/plugin.json"));
+    assert_eq!(manifest["name"], entry["name"]);
+
+    let hooks = json(plugin.join("hooks/hooks.json"));
+    let command = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        command.contains("${CLAUDE_PLUGIN_ROOT}/scripts/session-start"),
+        "{command}"
+    );
+    let start = std::fs::read_to_string(plugin.join("scripts/session-start")).unwrap();
+    assert!(start.contains("wake-cli context"), "{start}");
+
+    let mcp = json(plugin.join(".mcp.json"));
+    let args = &mcp["mcpServers"]["wake"]["args"];
+    assert_eq!(args[0], "${CLAUDE_PLUGIN_ROOT}/scripts/wake");
+    assert_eq!(args[1], "wake-mcp");
+    let launcher = std::fs::read_to_string(plugin.join("scripts/wake")).unwrap();
+    assert!(launcher.contains("/Applications/Wake.app/Contents/MacOS"));
+    // tar 包装进 ~/.local/bin、deb 装进 /usr/bin
+    let linux = std::fs::read_to_string(repo.join("scripts/make-linux.sh")).unwrap();
+    for dir in ["$HOME/.local/bin", "/usr/bin"] {
+        assert!(launcher.contains(dir), "启动脚本没找 {dir}");
+        assert!(
+            linux.contains(&format!("{dir}/wake-cli")),
+            "Linux 打包不再落在 {dir}"
+        );
+    }
 }

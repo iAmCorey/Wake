@@ -8,35 +8,12 @@ use wake_core::db::{self, IndexLock, Ownership, Store, Wait};
 use wake_core::models::*;
 
 mod common;
+use common::meta;
 
 fn temp_store() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Store::open(&dir.path().join("test.db")).expect("open store");
     (dir, store)
-}
-
-fn meta(key: &str, title: &str) -> SessionMeta {
-    SessionMeta {
-        host: String::new(),
-        key: key.to_string(),
-        id: key.split(':').nth(1).unwrap_or(key).to_string(),
-        agent: AgentId::ClaudeCode,
-        title: title.to_string(),
-        project_path: "/tmp/proj".into(),
-        project_name: "proj".into(),
-        file_path: format!("/tmp/fixtures/{key}.jsonl"),
-        created_at: 1_700_000_000_000,
-        updated_at: 1_700_000_100_000,
-        message_count: 2,
-        size_bytes: 128,
-        git_branch: None,
-        model: None,
-        tokens_used: None,
-        archived: false,
-        source: None,
-        favorite: false,
-        pinned: false,
-    }
 }
 
 fn unit(seq: i64, role: Role, text: &str) -> IndexUnit {

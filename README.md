@@ -134,7 +134,7 @@ wake-cli refresh                                  # update the index while Wake 
 
 It prints what the MCP tools return, asserted byte for byte in the test suite apart from a trailing newline the CLI adds, so an agent driving it through a shell sees what a connected one does. Full reference in [docs/cli.md](docs/cli.md).
 
-To make an agent reach for it without being told, install the bundled skill with `npx skills add iAmCorey/Wake` (or copy `skills/wake/` into `~/.claude/skills/wake/`). Claude Code can go one step further and receive the project's recent sessions the moment a session starts, through a `SessionStart` hook that runs `wake-cli` — the recipe is in [docs/cli.md](docs/cli.md#teaching-an-agent-to-use-it).
+To make an agent reach for it without being told, install the bundled skill with `npx skills add iAmCorey/Wake` (or copy `skills/wake/` into `~/.claude/skills/wake/`). Every new session can also start with the project's recent sessions already in context: for Claude Code, `claude plugin marketplace add iAmCorey/Wake && claude plugin install wake@wake` installs the Wake plugin, which does this and adds Wake's MCP tools in one go ([Claude Code plugin](docs/cli.md#claude-code-plugin)); Codex gets the same through [Codex hooks](docs/cli.md#codex-hooks). Both are in Settings → Connect.
 
 ## Zoom
 

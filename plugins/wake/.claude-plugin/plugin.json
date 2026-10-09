@@ -1,0 +1,13 @@
+{
+  "name": "wake",
+  "displayName": "Wake",
+  "description": "Every new session starts with this project's recent sessions, and Wake's MCP tools let Claude search and read any earlier session from any coding agent. Read-only; needs the Wake app.",
+  "author": {
+    "name": "Corey Chiu",
+    "url": "https://github.com/iAmCorey"
+  },
+  "homepage": "https://github.com/iAmCorey/Wake",
+  "repository": "https://github.com/iAmCorey/Wake",
+  "license": "MIT",
+  "keywords": ["sessions", "history", "memory", "context", "mcp"]
+}

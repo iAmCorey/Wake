@@ -1,0 +1,15 @@
+{
+  "name": "wake",
+  "owner": {
+    "name": "Corey Chiu",
+    "url": "https://github.com/iAmCorey"
+  },
+  "description": "Wake — every coding-agent session on this machine, searchable and readable by your agents",
+  "plugins": [
+    {
+      "name": "wake",
+      "source": "./plugins/wake",
+      "description": "Every new session starts with this project's recent sessions (from Claude Code, Codex and the other agents Wake indexes), and Wake's MCP tools let Claude search and read any earlier session. Needs the Wake app."
+    }
+  ]
+}

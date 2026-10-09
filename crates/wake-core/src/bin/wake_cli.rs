@@ -7,11 +7,13 @@
 //!   wake-cli setup                    路径、进 PATH、给 agent 的说明
 //!   wake-cli index                    库不存在时建一次(见 scanner::build_index)
 //!   wake-cli refresh                  库已在、Wake 没开时增量刷一轮(见 scanner::refresh_index)
+//!   wake-cli context                  当前目录所在项目最近的会话,给 SessionStart 钩子
 //!   wake-cli --version | --help
 //!
 //! 输出就是 MCP 工具那份文本、一字不改(tests/cli.rs 逐字节卡),所以 docs 与
 //! 将来的 Skill 只需描述一份格式。解析在 `wake_core::cli`,这里只做 I/O 与退
-//! 出码。查询一律只读打开索引(`mcp::open_index`),**绝不 open_or_rebuild**;
+//! 出码。查询一律只读打开索引(工具走 `mcp::open_index`;`setup` / `context` 不读会话
+//! 文件,直接 `Store::open_read_only`、不建 roster),**绝不 open_or_rebuild**;
 //! 写库的只有 `index` 与 `refresh` 两个子命令,都先拿 `db::IndexLock`——规矩与
 //! 理由在 `scanner::build_index` / `refresh_index`,别在这里复述或放宽。
 //!
@@ -55,6 +57,7 @@ fn main() -> ExitCode {
         Action::Setup => write(ok(setup(&inv.db))),
         Action::Index => write(index(&db_path(&inv.db))),
         Action::Refresh => write(refresh(&db_path(&inv.db))),
+        Action::Context => context(&inv.db),
         Action::Tool { tool, args } => run(&inv.db, tool, &args),
     }
 }
@@ -84,6 +87,26 @@ fn run(db: &Option<PathBuf>, tool: &str, args: &serde_json::Value) -> ExitCode {
     write(cli::report(tools::invoke(
         &store, &adapters, &cache, tool, args,
     )))
+}
+
+/// 新会话开场的上下文:当前目录(钩子在会话目录里跑)所在项目最近的会话。没有就一个字都
+/// 不写、退 0——钩子的输出原样进 agent 的上下文,连空行都是噪音。缺库、读不出照常走诊断
+/// 出口,钩子那头自己吞掉
+fn context(db: &Option<PathBuf>) -> ExitCode {
+    let dir = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(e) => return write(refuse(format!("cannot read the current directory: {e}"))),
+    };
+    // 只读库里的会话行、不读会话文件,不必把 roster 建起来(与 setup 同理);库不存在或
+    // 太老由 open_read_only 给出 "launch Wake once"。哪天要读会话文件了,改回 open_index
+    let store = match Store::open_read_only(&db_path(db)) {
+        Ok(store) => store,
+        Err(e) => return write(refuse(format!("{e:#}"))),
+    };
+    match tools::session_start_context(&store, &dir).transpose() {
+        None => ExitCode::SUCCESS,
+        Some(result) => write(cli::report(result)),
+    }
 }
 
 /// 建一次索引,然后说一句人话。建不建、凭什么敢建全在 `scanner::build_index`,

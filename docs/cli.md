@@ -35,6 +35,7 @@ wake-cli show KEY [OPTIONS]
 wake-cli projects [OPTIONS]
 wake-cli memories [OPTIONS]
 wake-cli setup
+wake-cli context
 wake-cli index
 wake-cli refresh
 wake-cli --help | --version
@@ -117,68 +118,24 @@ wake-cli show 'wake://memory/claude-code:/Users/me/.claude/projects/-Users-me-ap
 
 Prints this binary's path, the index path, how to put it on your `PATH`, a paste-able block that tells an agent when and how to use it, and — when `wake-mcp` sits next to it — the one-line MCP setup for Claude Code. It installs nothing and never edits another tool's config files. The one thing it can write is Wake's own: resolving the default index path creates Wake's data directory and migrates an index left by the old `vibex` builds (`--db` skips that).
 
-To make this automatic instead of per-project, install the skill (next section).
+To make this automatic instead of per-project, install the skill (see [Teaching an agent to use it](#teaching-an-agent-to-use-it)).
 
-## Teaching an agent to use it
+### `context`
 
-Two ways to teach it, same content — and a third that skips the teaching by handing the
-agent this project's recent sessions before it asks.
-
-**A skill, once, for every project** — the repository ships one at `skills/wake/`:
+Prints the recent sessions of the project the current directory belongs to — up to five
+from the last 14 days, in the same lines `sessions` uses — and nothing at all when there
+are none:
 
 ```bash
-npx skills add iAmCorey/Wake
+cd ~/Github/my-app && wake-cli context
 ```
 
-That works for Claude Code, Codex and anything else that reads the skills format. To do
-it by hand, copy `skills/wake/` into `~/.claude/skills/wake/`. The skill tells the agent
-*when* to look back — earlier conversations, past decisions, where work stopped, whether
-an error has been seen before — and how to read keys, references and pages.
+It is what the [Claude Code plugin](#claude-code-plugin) and the [Codex hooks](#codex-hooks) setup run: whatever the hook
+prints lands in the new session's context, where a "no sessions" reply or a list of other
+projects would only be noise. A subfolder counts as its project, as with `--project
+"$PWD"`. Your home folder and the filesystem root never count as the project a folder
+belongs to — sessions started there are not about the project you open next.
 
-**A paste block, for one project** — `wake-cli setup` prints a short version you can drop
-into that project's `CLAUDE.md` or `AGENTS.md`. Use this when you would rather not
-install anything, or want the guidance to live in the repository.
-
-**Automatically, at session start (Claude Code)** — a `SessionStart` hook runs a command
-when a session begins and hands its output to the agent as context. This one lists the
-project's recent sessions, so the agent already knows what happened here before you say
-"continue from yesterday":
-
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "startup|resume",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "wake-cli sessions --project \"$CLAUDE_PROJECT_DIR\" --limit 5 --since 14d 2>/dev/null || true",
-            "timeout": 30
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Put it in `~/.claude/settings.json` to get it in every project, or in a project's
-`.claude/settings.json`. A few things to know:
-
-- If `wake-cli` is not on your `PATH`, use its full path (see *Where it lives*).
-- Keep the trailing `|| true`. A hook that exits `2` stops the session from starting, and
-  `wake-cli` exits `2` when there is no index yet.
-- What gets injected is titles, keys and dates — a handful of lines, not transcripts. The
-  agent still reads a session with `show` when it needs the details.
-- `startup|resume` skips `/clear` and compaction; drop the matcher to run on those too.
-- A lookup made by the hook is not the agent asking Wake, so it does not show up in
-  Insights under *Agents asking Wake*; the lookups the agent then makes on its own do.
-- Only Claude Code has this hook. Codex and Gemini CLI have no equivalent, so there the
-  skill is the way in.
-
-None of the three writes to another tool's configuration; Wake only ever prints, and the
-hook is yours to add.
 
 ### `index`
 
@@ -295,6 +252,110 @@ Two things to know:
 - Ten minutes is a sensible interval: a refresh with nothing new takes well under a second,
   and every reply already says how fresh the index is.
 
+## Teaching an agent to use it
+
+Two ways to teach it, same content. To hand every new session this project's recent
+sessions before the agent even asks, see [Claude Code plugin](#claude-code-plugin) and
+[Codex hooks](#codex-hooks).
+
+**A skill, once, for every project** — the repository ships one at `skills/wake/`:
+
+```bash
+npx skills add iAmCorey/Wake
+```
+
+That works for Claude Code, Codex and anything else that reads the skills format. To do
+it by hand, copy `skills/wake/` into `~/.claude/skills/wake/`. The skill tells the agent
+*when* to look back — earlier conversations, past decisions, where work stopped, whether
+an error has been seen before — and how to read keys, references and pages.
+
+**A paste block, for one project** — `wake-cli setup` prints a short version you can drop
+into that project's `CLAUDE.md` or `AGENTS.md`. Use this when you would rather not
+install anything, or want the guidance to live in the repository.
+
+## Claude Code plugin
+
+The Wake plugin starts every new Claude Code session with this project's recent sessions
+already in its context — from Claude Code, Codex and every other agent Wake indexes — so
+"continue from yesterday" needs no explaining, and it adds Wake's MCP tools so Claude can
+open any of them with `wake_get_session`. Underneath it is a session-start hook that runs
+[`wake-cli context`](#context), which prints nothing in a project without recent history.
+It needs Wake 0.8.9 or later and covers macOS and Linux. Settings → Connect shows the
+command with a Copy button.
+
+```bash
+claude plugin marketplace add iAmCorey/Wake && claude plugin install wake@wake
+```
+
+Inside a session, `/plugin marketplace add iAmCorey/Wake` and then `/plugin install
+wake@wake` do the same. The plugin carries no binaries of its own: it runs the `wake-cli`
+and `wake-mcp` inside your installed Wake (set `WAKE_BIN_DIR` to their folder if Wake
+lives somewhere other than the usual place). If you added the `wake` MCP server by hand
+earlier, remove it with `claude mcp remove wake` so the tools are not listed twice.
+`claude plugin update wake@wake` updates it, or turn on auto-update for the `wake`
+marketplace in `/plugin`.
+
+**Without the plugin**, the same hook goes in `~/.claude/settings.json` (every project) or
+in a project's `.claude/settings.json`; add the MCP server as [docs/mcp.md](mcp.md#claude-code)
+shows:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "wake-cli context 2>/dev/null || true",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Use `wake-cli`'s full path if it is not on your `PATH` (see *Where it lives*).
+
+## Codex hooks
+
+Codex gets the same start through its own [hooks](https://developers.openai.com/codex/hooks).
+Add this to `~/.codex/config.toml` — Settings → Connect shows it with your path to
+`wake-cli` filled in:
+
+```toml
+[[hooks.SessionStart]]
+matcher = "startup|clear"
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "/Applications/Wake.app/Contents/MacOS/wake-cli context 2>/dev/null || true"
+timeout = 30
+```
+
+Codex runs a hook you added only after you approve it: start Codex and open `/hooks`. For
+Wake's tools in Codex, add the MCP server as [docs/mcp.md](mcp.md#codex) shows. There is no
+Codex plugin: Codex runs a plugin's hooks only when the plugin was installed by hand in its
+desktop app, and a plugin's MCP server has to be a remote one, so a plugin could not do this
+from the command line. Like the Claude Code plugin, this needs Wake 0.8.9 or later and covers
+macOS and Linux.
+
+For both:
+
+- What gets injected is titles, keys, dates and models for up to five sessions — not
+  transcripts. The agent reads one with `wake_get_session` or `wake-cli show` when it needs
+  the details.
+- `startup|clear` covers new sessions and `/clear`. A resumed or compacted session keeps
+  its own history, so the hook stays out of those.
+- A lookup made by the hook is not the agent asking Wake, so it does not show up in
+  Insights under *Agents asking Wake*; the lookups the agent then makes on its own do.
+- None of this edits another tool's configuration: Claude Code installs its own plugin,
+  and the hook settings are yours to paste.
+- On Windows, use the skill and the MCP server for now.
+
 ## When
 
 `--since` accepts a relative window — `30m`, `24h`, `7d`, `2w` — or an absolute date/time: `2026-09-01`, `"2026-09-01 09:30"`, `2026-09-01T09:30:00Z`. Date-times without a zone are read in local time.
@@ -329,7 +390,7 @@ Exactly one trailing newline is added when the text does not already end with on
 | `1` | it ran and failed — unknown or ambiguous key, a transcript that would not parse, a query that errored, or a failed write to stdout |
 | `2` | the command line was wrong, or the index is missing / unreadable / too old |
 
-Empty results are never an error, so `wake-cli search x || fallback` does not fire just because nothing was ever discussed about `x`. Diagnostics go to stderr, prefixed `wake-cli: `, so `wake-cli show <key> > out.md` cannot capture one. Two commands treat a missing index as normal rather than as the `2` above. `setup` always exits `0`, even with no index, and reports a missing one as a `Note:` line on stdout — "not set up yet" is the normal state for someone running it. `index` exits `0` both when it builds one and when it declines because one already exists or because Wake or another writer holds the index; a build that starts and then fails exits `1`. `refresh` exits `0` when it updates the index and when it declines because Wake or another writer holds the index; it exits `2` when there is no index, when `--db` is not a Wake index, or when the index holds remote-host sessions or memories whose mirrors are not next to that path (a copy or an alias in another directory); a scan that starts and then fails exits `1`.
+Empty results are never an error, so `wake-cli search x || fallback` does not fire just because nothing was ever discussed about `x`. Diagnostics go to stderr, prefixed `wake-cli: `, so `wake-cli show <key> > out.md` cannot capture one. Two commands treat a missing index as normal rather than as the `2` above. `setup` always exits `0`, even with no index, and reports a missing one as a `Note:` line on stdout — "not set up yet" is the normal state for someone running it. `index` exits `0` both when it builds one and when it declines because one already exists or because Wake or another writer holds the index; a build that starts and then fails exits `1`. `context` exits `0` and prints nothing when the folder has no recent sessions or belongs to no indexed project. `refresh` exits `0` when it updates the index and when it declines because Wake or another writer holds the index; it exits `2` when there is no index, when `--db` is not a Wake index, or when the index holds remote-host sessions or memories whose mirrors are not next to that path (a copy or an alias in another directory); a scan that starts and then fails exits `1`.
 
 Both a mistyped option (`--sinse 7d`) and a value the tools reject (`--since 7dd`) exit `2` — from a user's seat they are the same mistake, and the layer that caught it is not visible. This is a deliberate difference from `wake-mcp call`, which exits `1` for anything the tool layer rejects — its JSON-RPC envelope already carries the classification, so the exit code never had to. (`wake-mcp` still uses `2` for its own argv problems: a missing tool name, unparsable JSON, or an index it cannot open.)
 

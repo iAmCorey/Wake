@@ -269,6 +269,49 @@ pub fn invoke(
     call(&ctx, name, args)
 }
 
+/// 新会话开场注入几条、看多久以内的(`wake-cli context`;插件与 Codex 钩子都调它)
+const CONTEXT_SESSIONS: i64 = 5;
+const CONTEXT_DAYS: i64 = 14;
+
+/// 新会话开场的上下文(`wake-cli context`,Claude Code 插件与 Codex 的 SessionStart 钩子
+/// 调它):`dir` 所在项目最近两周的几条会话,查询与条目都是 wake_list_sessions 那一份
+/// (`recent_roots` / `push_session_lines`)。认不出项目、这段时间没有会话时给 None——钩子的
+/// 输出原样进 agent 的上下文,"没有结果"的提示与已知项目清单在这里只是噪音。不是 MCP 工具、
+/// 没有要逐字节对齐的另一面,只读库里的会话行、不读会话文件,所以不经 ToolContext、不要 roster
+pub fn session_start_context(
+    store: &Store,
+    dir: &std::path::Path,
+) -> Result<Option<String>, ToolError> {
+    let project_paths = resolve_project_paths(&dir.to_string_lossy(), &store.list_projects(true)?);
+    if project_paths.is_empty() {
+        return Ok(None);
+    }
+    let since = crate::db::now_ms() - CONTEXT_DAYS * crate::cleanup::DAY;
+    let (sessions, total) = recent_roots(
+        store,
+        project_paths,
+        Vec::new(),
+        Some(since),
+        false,
+        CONTEXT_SESSIONS,
+    )?;
+    if sessions.is_empty() {
+        return Ok(None);
+    }
+    let mut out = format!(
+        "Wake: {total} session{} in this project in the last {CONTEXT_DAYS} days{}:\n\n",
+        plural(total),
+        if total > sessions.len() as i64 {
+            format!(", the {} most recent", sessions.len())
+        } else {
+            String::new()
+        }
+    );
+    push_session_lines(&mut out, &sessions);
+    out.push_str("\nRead one with the wake_get_session tool, or run `wake-cli show <key>`.\n");
+    Ok(Some(out))
+}
+
 // ---------------------------------------------------------------- 参数读取
 
 fn str_arg<'a>(args: &'a Value, name: &str) -> Result<Option<&'a str>, ToolError> {
@@ -904,17 +947,20 @@ fn get_memory(ctx: &ToolContext, key: &str, args: &Value) -> ToolResult {
     Ok(out)
 }
 
-fn list_sessions(ctx: &ToolContext, args: &Value) -> ToolResult {
-    let agents = agents_arg(args)?;
-    let since = since_arg(ctx, args)?;
-    let starred = bool_arg(args, "starred", false)?;
-    let limit = int_arg(args, "limit", 20, 1, MAX_LIST_SESSIONS)?;
-    let project = project_scope!(ctx, args);
-    // 字段全列、不带 ..Default:新增筛选字段时这里必须表态(与 workbench
-    // current_filter 同一约定)
-    let (sessions, total) = ctx.store.list_sessions(&SessionFilter {
-        agents: agents.clone(),
-        favorite_only: starred,
+/// 最近的根会话:wake_list_sessions 与新会话开场的上下文共用这一份筛选——不含归档、按
+/// 更新时间、置顶不优先。字段全列、不带 ..Default:新增筛选字段时这里必须表态(与
+/// workbench current_filter 同一约定)
+fn recent_roots(
+    store: &Store,
+    project_paths: Vec<String>,
+    agents: Vec<AgentId>,
+    updated_since: Option<i64>,
+    favorite_only: bool,
+    limit: i64,
+) -> Result<(Vec<SessionMeta>, i64), ToolError> {
+    Ok(store.list_sessions(&SessionFilter {
+        agents,
+        favorite_only,
         include_archived: false,
         roots_only: true,
         title_query: None,
@@ -922,11 +968,35 @@ fn list_sessions(ctx: &ToolContext, args: &Value) -> ToolResult {
         ascending: false,
         limit,
         offset: 0,
-        updated_since: since,
-        project_paths: project.clone().unwrap_or_default(),
+        updated_since,
+        project_paths,
         // "最近"就是最近:GUI 的置顶优先在这里会让 limit 先被旧置顶会话占掉
         ignore_pins: true,
-    })?;
+    })?)
+}
+
+/// 会话清单的条目,一条一行("- " + `session_line`)
+fn push_session_lines(out: &mut String, sessions: &[SessionMeta]) {
+    for s in sessions {
+        out.push_str("- ");
+        out.push_str(&session_line(s));
+    }
+}
+
+fn list_sessions(ctx: &ToolContext, args: &Value) -> ToolResult {
+    let agents = agents_arg(args)?;
+    let since = since_arg(ctx, args)?;
+    let starred = bool_arg(args, "starred", false)?;
+    let limit = int_arg(args, "limit", 20, 1, MAX_LIST_SESSIONS)?;
+    let project = project_scope!(ctx, args);
+    let (sessions, total) = recent_roots(
+        ctx.store,
+        project.clone().unwrap_or_default(),
+        agents.clone(),
+        since,
+        starred,
+        limit,
+    )?;
     let scope = scope_note(&project, &agents, since, starred);
     let mut out = String::new();
     if sessions.is_empty() {
@@ -939,10 +1009,7 @@ fn list_sessions(ctx: &ToolContext, args: &Value) -> ToolResult {
         plural(total),
         sessions.len()
     ));
-    for s in &sessions {
-        out.push_str("- ");
-        out.push_str(&session_line(s));
-    }
+    push_session_lines(&mut out, &sessions);
     out.push_str("\nRead one with wake_get_session using its key.\n");
     out.push_str(&index_note(ctx.store));
     Ok(out)

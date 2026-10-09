@@ -33,6 +33,10 @@ const SETTINGS_PAGE_TOP: Zpx = Zpx(38.);
 /// Connect 页两条 Setup guide 的去处:MCP 面与命令行面各自的完整文档
 const CONNECT_GUIDE_URL: &str = "https://github.com/iAmCorey/Wake/blob/main/docs/mcp.md";
 const CONNECT_CLI_GUIDE_URL: &str = "https://github.com/iAmCorey/Wake/blob/main/docs/cli.md";
+const CONNECT_PLUGIN_GUIDE_URL: &str =
+    "https://github.com/iAmCorey/Wake/blob/main/docs/cli.md#claude-code-plugin";
+const CONNECT_CODEX_HOOKS_GUIDE_URL: &str =
+    "https://github.com/iAmCorey/Wake/blob/main/docs/cli.md#codex-hooks";
 
 fn icon(path: &'static str) -> Icon {
     Icon::empty().path(path)
@@ -230,6 +234,10 @@ struct ConnectInfo {
     /// MCP clients 卡的三行:文案与片段来自 wake-core,与 `wake-mcp setup`
     /// 同源;GUI 只展示与复制,不代写别家配置
     snippets: Vec<wake_core::mcp::SetupSnippet>,
+    /// Claude Code plugin 与 Codex hooks 两块各一行,与 `wake-cli setup` 同源;这个平台不给
+    /// (`cli::SESSION_START_HOOKS` 为假,即 Windows)时是 None,两块都不画
+    claude_plugin: Option<wake_core::mcp::SetupSnippet>,
+    codex_hooks: Option<wake_core::mcp::SetupSnippet>,
 }
 
 impl ConnectInfo {
@@ -238,6 +246,10 @@ impl ConnectInfo {
         let cli = BinaryFacts::probe("wake-cli");
         Self {
             snippets: wake_core::mcp::setup_snippets(std::path::Path::new(&mcp.path)),
+            claude_plugin: wake_core::cli::SESSION_START_HOOKS
+                .then(wake_core::cli::claude_plugin_snippet),
+            codex_hooks: wake_core::cli::SESSION_START_HOOKS
+                .then(|| wake_core::cli::codex_hooks_snippet(std::path::Path::new(&cli.path))),
             cli_path_command: wake_core::cli::path_command(std::path::Path::new(&cli.path)),
             mcp,
             cli,
@@ -253,7 +265,7 @@ pub(crate) struct SettingsView {
     connect: ConnectInfo,
     /// Connect 页里展开了代码片段的行(按 snippets 下标);Settings 重开即复位
     connect_shown: std::collections::HashSet<usize>,
-    /// 刚复制过的按钮 id:按钮原地显示 "Copied" 1.6s。不用 toast——gpui-component 的
+    /// 刚复制过的按钮 id:图标原地变对勾(tooltip 说 Copied)1.6s。不用 toast——gpui-component 的
     /// 通知在窗口失活或被悬停时会暂停自动关闭,Settings 这种从属窗里它常常就
     /// 挂着不走(用户 2026-09-08 反馈);主界面的 Copy Session ID / Copy code 也
     /// 从不弹通知
@@ -820,30 +832,35 @@ impl SettingsView {
         )
     }
 
-    /// Settings → Connect 的复制按钮:写剪贴板,按钮原地变 "Copied" 片刻后复原
+    /// Settings → Connect 的复制钮:只有图标,说明在 tooltip——卡上已经摆着要复制的东西或
+    /// 一句用法,按钮再写一遍 "Copy path" / "Copy command" 是重复(用户 2026-10-09 定,整页
+    /// 统一)。写剪贴板后图标原地变对勾、tooltip 说 Copied,1.6s 复原
     fn copy_button(
         &self,
         id: SharedString,
-        label: &'static str,
+        tooltip: &'static str,
+        text: String,
+        cx: &Context<Self>,
+    ) -> Button {
+        self.copy_button_with("icons/copy.svg", id, tooltip, text, cx)
+    }
+
+    /// 同一张卡上的第二个复制钮换个字形:wake-cli 卡的路径与"放进 PATH"的命令并排,
+    /// 两个一样的图标分不清
+    fn copy_button_with(
+        &self,
+        glyph: &'static str,
+        id: SharedString,
+        tooltip: &'static str,
         text: String,
         cx: &Context<Self>,
     ) -> Button {
         let copied = self.copied.as_ref() == Some(&id);
         let clicked_id = id.clone();
-        settings_button(
-            Button::new(id)
-                .icon(
-                    icon(if copied {
-                        "icons/check.svg"
-                    } else {
-                        "icons/copy.svg"
-                    })
-                    .with_size(zpx(13.)),
-                )
-                .label(if copied { t("Copied") } else { label }),
-            cx,
-        )
-        .on_click(cx.listener(move |this, _, _, cx| {
+        let button = Button::new(id)
+            .icon(icon(if copied { "icons/check.svg" } else { glyph }).with_size(zpx(13.)))
+            .tooltip(if copied { t("Copied") } else { tooltip });
+        settings_button(button, cx).on_click(cx.listener(move |this, _, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
             this.show_copied(clicked_id.clone(), cx);
         }))
@@ -869,11 +886,11 @@ impl SettingsView {
         .detach();
     }
 
-    /// Settings → Connect:把 Wake 的索引以 MCP 只读暴露给 coding agent。页面只放
-    /// **状态与动作**:server 卡(路径 + Copy path)、Agents 卡(每家一行一个
-    /// Copy 钮)、一句 caption 加 Setup guide 链接。代码块与工具表都不放——那是
-    /// README 的内容,塞进设置窗怎么排都像教程(用户 2026-09-08 三轮定稿)。
-    /// 只展示与复制,不代写别家配置;片段与 `wake-mcp setup` 同源(wake-core mcp)
+    /// Settings → Connect:把 Wake 的索引只读接给 coding agent。页面只放**状态与动作**:
+    /// 每块一张卡(二进制路径、一句用法或每家一行)+ 只有图标的复制钮,区块标题右端挂
+    /// Setup guide。代码块与工具表都不放——那是 README 的内容,塞进设置窗怎么排都像教程
+    /// (用户 2026-09-08 三轮定稿)。只展示与复制,不代写别家配置;片段与 `wake-mcp setup` /
+    /// `wake-cli setup` 同源(wake-core 的 mcp / cli)
     fn render_connect(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let dark = theme.mode.is_dark();
@@ -1009,7 +1026,7 @@ impl SettingsView {
             settings_info_card(
                 primary,
                 mono_details(f.display.clone(), f.exists),
-                // Copy path 恒在最右,两张卡的同名动作才对得齐;附加动作放它左边
+                // 复制路径的钮恒在最右,两张卡的同一个动作才对得齐;附加动作放它左边
                 h_flex()
                     .flex_shrink_0()
                     .gap(SPACE_SM)
@@ -1020,11 +1037,13 @@ impl SettingsView {
                 zpx(84.),
                 cx,
             )
+            .into_any_element()
         };
         let copy_cli_command = info.cli_path_command.clone().map(|cmd| {
-            self.copy_button(
+            self.copy_button_with(
+                "icons/terminal.svg",
                 "connect-copy-cli-command".into(),
-                t("Copy command"),
+                t("Copy the command that adds wake-cli to PATH"),
                 cmd,
                 cx,
             )
@@ -1043,6 +1062,19 @@ impl SettingsView {
             zpx(84.),
             cx,
         );
+        // 一行卡:区块标题已经点了名,卡里只放一句怎么用 + 复制钮(用户 2026-10-09:名字行
+        // 多余、两行没必要、一张等宽一张正文挨着太杂;命令在复制钮里,不必摆出来)
+        let one_line_card = |s: &wake_core::mcp::SetupSnippet, id: &'static str| {
+            settings_info_card(
+                t(s.hint),
+                Vec::new(),
+                self.copy_button(id.into(), t(s.copy_label), s.text.clone(), cx)
+                    .into_any_element(),
+                zpx(48.),
+                cx,
+            )
+            .into_any_element()
+        };
 
         let section = |label: &'static str| {
             div()
@@ -1054,7 +1086,7 @@ impl SettingsView {
         };
         // 区块标题右侧的文档链接:MCP 面与命令行面各链自己那份,页尾只放一条
         // 会让读 CLI 那半页的人点进 MCP 的参考里。设置窗里不放文档,所以这页
-        // 只有状态、动作与这两个去处,没有解释性的散文(用户 2026-09-11 定)
+        // 只有状态、动作与这几个去处,没有解释性的散文(用户 2026-09-11 定)
         let titled = |label: &'static str, guide: Option<(&'static str, &'static str)>| {
             h_flex()
                 .flex_shrink_0()
@@ -1073,47 +1105,81 @@ impl SettingsView {
                 }))
         };
 
-        // 四个区块同一种写法,有没有文档链接写在参数里,不靠两种拼法
-        // 区分。规则一句话:**每个面的第一个区块挂自己的文档**——
-        // MCP 面 = MCP server + MCP clients,命令行面 = Command line
-        // + Skill,所以链接落在第一、第三块上。第五个区块该不该有
-        // 链接,照这条判就行,不用再拍脑袋
-        let rows = [
-            titled(
+        // 区块同一种写法:(标题, 文档链接, 卡),有没有链接、有没有这块都写在数据里,
+        // 间距一律"不是第一块就加",不靠各块自己记。链接的规则一句话:**每个面的第一个
+        // 区块挂自己的文档**——Claude Code plugin、Codex hooks 各是一面,MCP 面 = MCP server
+        // + MCP clients,命令行面 = Command line + Skill。两家的开场上下文放最前:插件一条
+        // 命令就把 MCP 与开场上下文一起装好,是最省事的那条路。标题用各家的正名(用户
+        // 2026-10-09 定:不自己起名字;Codex 那个是它官方的 hooks,不是插件);这两块
+        // Windows 上没有(片段给 None)
+        let sections = [
+            (
+                t("Claude Code plugin"),
+                Some(("connect-plugin-setup-guide", CONNECT_PLUGIN_GUIDE_URL)),
+                info.claude_plugin
+                    .as_ref()
+                    .map(|s| one_line_card(s, "connect-copy-plugin")),
+            ),
+            (
+                t("Codex hooks"),
+                Some((
+                    "connect-codex-hooks-setup-guide",
+                    CONNECT_CODEX_HOOKS_GUIDE_URL,
+                )),
+                info.codex_hooks
+                    .as_ref()
+                    .map(|s| one_line_card(s, "connect-copy-codex-hooks")),
+            ),
+            (
                 t("MCP server"),
                 Some(("connect-setup-guide", CONNECT_GUIDE_URL)),
-            )
-            .into_any_element(),
-            binary_card("wake-mcp", "connect-copy-path", &info.mcp, None).into_any_element(),
-            titled(t("MCP clients"), None)
-                .pt(SPACE_LG)
-                .into_any_element(),
-            v_flex()
-                .w_full()
-                .flex_shrink_0()
-                .overflow_hidden()
-                .rounded(theme.radius_lg)
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.popover)
-                .children(agent_rows)
-                .into_any_element(),
-            titled(
+                Some(binary_card(
+                    "wake-mcp",
+                    "connect-copy-path",
+                    &info.mcp,
+                    None,
+                )),
+            ),
+            (
+                t("MCP clients"),
+                None,
+                Some(
+                    v_flex()
+                        .w_full()
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .rounded(theme.radius_lg)
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.popover)
+                        .children(agent_rows)
+                        .into_any_element(),
+                ),
+            ),
+            (
                 t("Command line"),
                 Some(("connect-cli-setup-guide", CONNECT_CLI_GUIDE_URL)),
-            )
-            .pt(SPACE_LG)
-            .into_any_element(),
-            binary_card(
-                "wake-cli",
-                "connect-copy-cli-path",
-                &info.cli,
-                copy_cli_command,
-            )
-            .into_any_element(),
-            titled(t("Skill"), None).pt(SPACE_LG).into_any_element(),
-            skill_card.into_any_element(),
+                Some(binary_card(
+                    "wake-cli",
+                    "connect-copy-cli-path",
+                    &info.cli,
+                    copy_cli_command,
+                )),
+            ),
+            (t("Skill"), None, Some(skill_card.into_any_element())),
         ];
+        let rows = sections
+            .into_iter()
+            .filter_map(|(title, guide, card)| card.map(|card| (title, guide, card)))
+            .enumerate()
+            .flat_map(|(ix, (title, guide, card))| {
+                [
+                    titled(title, guide)
+                        .when(ix > 0, |this| this.pt(SPACE_LG))
+                        .into_any_element(),
+                    card,
+                ]
+            });
         Self::rows_page(
             "settings-connect-scroll",
             t("Connect"),

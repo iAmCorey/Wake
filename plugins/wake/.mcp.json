@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "wake": {
+      "command": "sh",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/wake", "wake-mcp"]
+    }
+  }
+}

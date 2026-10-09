@@ -12,7 +12,7 @@ It covers everything Wake indexes: sessions from every supported agent on this m
 | Linux | next to `wake`: `~/.local/bin/wake-mcp` (tar.gz install) or `/usr/bin/wake-mcp` (deb) |
 | Windows | next to `Wake.exe` in the unpacked zip |
 
-Settings → Connect in Wake shows the exact path for your install with a *Copy path* button, and one *Copy command* / *Copy config* button per client (*Show* reveals the snippet before you copy it). `wake-mcp setup` prints the same snippets from a terminal. Updating Wake keeps the path, so there is nothing to redo after an update.
+Settings → Connect in Wake shows the exact path for your install with a copy button next to it, and one copy button per client (*Show* reveals the snippet before you copy it). `wake-mcp setup` prints the same snippets from a terminal. Updating Wake keeps the path, so there is nothing to redo after an update.
 
 ## Setup
 
@@ -21,6 +21,11 @@ Settings → Connect in Wake shows the exact path for your install with a *Copy 
 ```bash
 claude mcp add --scope user wake -- "/Applications/Wake.app/Contents/MacOS/wake-mcp"
 ```
+
+Or install the Wake plugin instead, which adds this server and starts every new session with
+the project's recent sessions — `claude plugin marketplace add iAmCorey/Wake && claude plugin
+install wake@wake` (see [Claude Code plugin](cli.md#claude-code-plugin)). Use one or the other, not
+both, or the tools are listed twice.
 
 ### Codex
 
@@ -85,9 +90,10 @@ Before asking me for context about this repository, check earlier sessions with 
 wake_list_sessions with the current directory, then wake_get_session for the relevant one.
 ```
 
-Claude Code can also be handed the project's recent sessions automatically when a session
-starts, through a `SessionStart` hook that runs `wake-cli` — see
-[Automatically, at session start](cli.md#teaching-an-agent-to-use-it) in the command-line guide.
+Claude Code and Codex can also be handed the project's recent sessions automatically when a
+session starts, through a hook that runs `wake-cli context` — see
+[Claude Code plugin](cli.md#claude-code-plugin) and [Codex hooks](cli.md#codex-hooks) in the
+command-line guide. The Claude Code plugin brings this MCP server along.
 
 ### A worked example
 
@@ -131,7 +137,7 @@ All five tools are read-only and return Markdown text (`content[0].text`). Param
 
 | Parameter | Type | Meaning |
 |---|---|---|
-| `project` | string | Scope to one project. Pass an absolute path — the agent's working directory is ideal — or a project name. Path matching is three-tier: an exact match of an indexed project path; otherwise the longest indexed project that contains the path (you are in a subdirectory); otherwise every indexed project below the path (a monorepo root or a parent folder). A bare name matches the project name case-insensitively. When nothing matches, the reply lists the known projects instead of erroring. |
+| `project` | string | Scope to one project. Pass an absolute path — the agent's working directory is ideal — or a project name. Path matching is three-tier: an exact match of an indexed project path; otherwise the longest indexed project that contains the path (you are in a subdirectory) — your home folder and the filesystem root never count here, since sessions started there are not about the project you are in; otherwise every indexed project below the path (a monorepo root or a parent folder). A bare name matches the project name case-insensitively. When nothing matches, the reply lists the known projects instead of erroring. |
 | `agents` | string[] | Only these agents. Ids: `claude-code`, `codex`, `grok`, `dsh`, `cursor`, `opencode`, `pi`, `omp`, `kiro`, `kimi`, `gemini`, `copilot`, `antigravity`, `qoder`, `hermes`, `openclaw`, `codebuddy`, `workbuddy`, `zcode`, `craft-agents`, `devin`, `kilo`. Display names (`"Claude Code"`, `"Gemini CLI"`) and a few aliases (`claude`, `deepseek`, `opencode2`, `craft`) are accepted too. |
 | `since` | string | Only sessions updated at or after this time. Relative: `30m`, `24h`, `7d`, `2w`. Absolute: `2026-09-01`, `2026-09-01 09:30`, `2026-09-01T09:30:00Z`. Naive date-times are read in local time. |
 | `limit` | integer | Maximum items to return; values outside the allowed range are clamped. |

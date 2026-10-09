@@ -114,6 +114,11 @@ const PLAIN: &[PlainSpec] = &[
         action: Action::Refresh,
         summary: "update an existing index while Wake is closed",
     },
+    PlainSpec {
+        name: "context",
+        action: Action::Context,
+        summary: "this folder's project, its recent sessions — for a session-start hook; prints nothing when there are none",
+    },
 ];
 
 const F_PROJECT: FlagSpec = FlagSpec::new(
@@ -266,6 +271,9 @@ pub enum Action {
     Index,
     /// 增量刷一轮已有的索引。**只在 Wake 没运行时**——它在跑就退让
     Refresh,
+    /// 当前目录所在项目最近的会话,给 SessionStart 钩子(`tools::session_start_context`);
+    /// 没有就一个字都不写
+    Context,
     /// 一次工具调用。`args` **恒为 JSON object**——mcp/mod.rs 那道
     /// `arguments` 形状检查在这条路上不可达,别再补一遍
     Tool {
@@ -785,6 +793,53 @@ project on the machine is in scope. Everything is read-only.";
 /// 与 `wake-cli setup` 同一个来源
 pub const SKILL_INSTALL: &str = "npx skills add iAmCorey/Wake";
 
+/// Claude Code 插件的安装命令:仓库根的 `.claude-plugin/marketplace.json` 就是插件市场,插件
+/// 在 `plugins/wake/`(SessionStart 钩子调 `wake-cli context` + wake-mcp)。与 Settings →
+/// Connect、`wake-cli setup` 同一个来源
+pub const CLAUDE_PLUGIN_INSTALL: &str =
+    "claude plugin marketplace add iAmCorey/Wake && claude plugin install wake@wake";
+
+/// 这个平台给不给新会话开场的两家接法(Claude Code plugin / Codex hooks)。Windows 上不给:
+/// 插件的脚本是 sh,Codex 钩子在 Windows 上走哪个 shell 也没核实。判断只在这里——设置页与
+/// `wake-cli setup` 各自问它;片段函数本身不分平台,i18n 的死条目检查在 Windows 上也得看得见
+/// 这两句用法(片段给 None 时 Windows CI 必红,2026-10-09 Codex review)
+pub const SESSION_START_HOOKS: bool = !cfg!(target_os = "windows");
+
+/// 让每个新会话一开场就拿到这个项目最近的会话(`wake-cli context`)的两家接法,各用各家的
+/// 正名(用户 2026-10-09 定:不自己起名字):**Claude Code plugin** 装仓库里的插件,MCP 一起
+/// 带上;**Codex hooks** 是 Codex 官方的钩子功能,给一段用户级配置——Codex 插件里的钩子只在
+/// 桌面版手动安装时生效、插件里的 MCP 只认远端服务,做成插件命令行用户什么都拿不到;用户加的
+/// 钩子 Codex 一律要在 /hooks 里批准过才跑。Settings → Connect 的两块与 `wake-cli setup`
+/// 同源,给不给看 `SESSION_START_HOOKS`
+pub fn claude_plugin_snippet() -> crate::mcp::SetupSnippet {
+    crate::mcp::SetupSnippet {
+        client: "Claude Code",
+        agent: AgentId::ClaudeCode,
+        hint: "Run in a terminal to install the Wake plugin",
+        copy_label: "Copy command",
+        text: CLAUDE_PLUGIN_INSTALL.to_string(),
+    }
+}
+
+/// 见 `claude_plugin_snippet`
+pub fn codex_hooks_snippet(cli_bin: &Path) -> crate::mcp::SetupSnippet {
+    // 路径先按 sh 引好,整条再引成 TOML 字符串
+    let command = crate::mcp::json_quote(&format!(
+        "{} context 2>/dev/null || true",
+        sh_quote(&cli_bin.to_string_lossy())
+    ));
+    crate::mcp::SetupSnippet {
+        client: "Codex",
+        agent: AgentId::Codex,
+        hint: "Add to ~/.codex/config.toml, then approve it in /hooks",
+        copy_label: "Copy config",
+        text: format!(
+            "[[hooks.SessionStart]]\nmatcher = \"startup|clear\"\n\n\
+             [[hooks.SessionStart.hooks]]\ntype = \"command\"\ncommand = {command}\ntimeout = 30"
+        ),
+    }
+}
+
 /// 把 CLI 放进 PATH 的那一条**可粘命令**,给 GUI 的 Copy 按钮用。与
 /// `wake-cli setup` 打印的是同一个来源。返回 None 的两种情况都不该给按钮:
 /// 已经装在 `…/bin` 里(deb / tar)、以及 Windows——那边 path_hint 给的是
@@ -847,6 +902,11 @@ fn path_hint(bin: &Path) -> Option<String> {
     })
 }
 
+/// `wake-cli setup` 里一段可复制的配置:`## {标题} — {怎么用这段}`、片段、一句说明
+fn snippet_section(title: &str, s: &crate::mcp::SetupSnippet, note: &str) -> String {
+    format!("\n## {title} — {}\n\n{}\n\n{note}\n", s.hint, s.text)
+}
+
 /// `## {标题} — {怎么用这段}` 与 `wake-mcp setup` 同形,两个 bin 的输出读起来
 /// 才是一家人
 pub fn setup_text(f: &SetupFacts<'_>) -> String {
@@ -869,6 +929,19 @@ pub fn setup_text(f: &SetupFacts<'_>) -> String {
          project. Manual install: copy `skills/wake/` from the repository into\n\
          `~/.claude/skills/wake/`.\n"
     ));
+    if SESSION_START_HOOKS {
+        out.push_str(&snippet_section(
+            "Claude Code plugin",
+            &claude_plugin_snippet(),
+            "Every new session starts with this project's recent sessions, and Claude gets\n\
+             Wake's MCP tools to read them.",
+        ));
+        out.push_str(&snippet_section(
+            "Codex hooks",
+            &codex_hooks_snippet(f.cli_bin),
+            "Every new Codex session starts with this project's recent sessions.",
+        ));
+    }
     // 片段按 agent 认,不按下标——那个顺序是 Connect 页的事;hint 也用它自己
     // 带的,两个 bin 的 setup 输出才真的同形
     if let Some(snippet) = f.mcp_bin.and_then(|mcp| {
@@ -876,10 +949,10 @@ pub fn setup_text(f: &SetupFacts<'_>) -> String {
             .into_iter()
             .find(|s| s.agent == AgentId::ClaudeCode)
     }) {
-        out.push_str(&format!(
-            "\n## Tool-calling clients: prefer MCP — {}\n\n{}\n\n\
-             `wake-mcp setup` prints the same for Codex and Cursor.\n",
-            snippet.hint, snippet.text
+        out.push_str(&snippet_section(
+            "Tool-calling clients: prefer MCP",
+            &snippet,
+            "`wake-mcp setup` prints the same for Codex and Cursor.",
         ));
     }
     out.push_str("\nFull reference: docs/cli.md\n");
@@ -1197,6 +1270,7 @@ mod tests {
         assert_eq!(p(&["setup"]).unwrap().action, Action::Setup);
         assert_eq!(p(&["index"]).unwrap().action, Action::Index);
         assert_eq!(p(&["refresh"]).unwrap().action, Action::Refresh);
+        assert_eq!(p(&["context"]).unwrap().action, Action::Context);
         assert!(USAGE.lines().count() < 15, "USAGE 不该长回参考手册");
         assert!(!USAGE.ends_with('\n'));
     }
@@ -1353,6 +1427,13 @@ mod tests {
         assert!(t.contains(SKILL_INSTALL), "{t}");
         assert!(t.contains("~/.claude/skills/wake/"), "{t}");
         assert!(t.contains("claude mcp add"));
+        // 开场上下文的两段跟着平台走(Windows 上不给),判断只在 SESSION_START_HOOKS
+        assert_eq!(
+            t.contains("## Claude Code plugin"),
+            SESSION_START_HOOKS,
+            "{t}"
+        );
+        assert_eq!(t.contains("## Codex hooks"), SESSION_START_HOOKS, "{t}");
 
         let t = setup_text(&SetupFacts {
             cli_bin: &cli_bin,
@@ -1367,6 +1448,27 @@ mod tests {
         assert!(t
             .trim_end()
             .ends_with("Note: no Wake index at /tmp/wake.db"));
+    }
+
+    #[test]
+    fn plugin_and_hooks_snippets_call_context_with_the_given_binary() {
+        // 片段不分平台(Windows 上不显示由 SESSION_START_HOOKS 管),这条三个平台都跑
+        let bin = PathBuf::from("/Apps/My Wake.app/Contents/MacOS/wake-cli");
+        assert_eq!(claude_plugin_snippet().text, CLAUDE_PLUGIN_INSTALL);
+        let codex = codex_hooks_snippet(&bin);
+        assert!(
+            codex.text.starts_with("[[hooks.SessionStart]]"),
+            "{}",
+            codex.text
+        );
+        // 带空格的路径按 sh 引好,外面再套一层 TOML basic string
+        assert!(
+            codex.text.contains(
+                "command = \"'/Apps/My Wake.app/Contents/MacOS/wake-cli' context 2>/dev/null || true\""
+            ),
+            "{}",
+            codex.text
+        );
     }
 
     #[test]
