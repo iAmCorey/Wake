@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- Fix: Open In offers Codex Desktop when the app is installed as Codex.app (#55, thanks @yangmingyuan380)
+
 ## [0.8.7] — 2026-10-09
 
 - New: Kilo Code sessions are indexed — from the database the VS Code extension, the `kilo` CLI and the JetBrains plugin share (`~/.local/share/kilo/kilo.db`, read-only), and from the legacy extension's task folders in VS Code and other VS Code-based editors. Titles, models, thinking, tool calls and token counts included; legacy sub-tasks are listed under the task that started them, and a legacy task the new extension has imported is listed once. Open In continues a session with `kilo --session` in its project directory (legacy tasks have no Open In). On remote hosts only the legacy tasks are mirrored, since `kilo.db` also holds Kilo's credentials (#59, thanks @ICEY4040727)
