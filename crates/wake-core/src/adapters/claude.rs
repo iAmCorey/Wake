@@ -85,6 +85,13 @@ struct Lineage {
 /// 一个项目目录的分支分组,按目录 mtime 校验:文件进出、改名都会改它;文件追加不会,也
 /// 不影响分组(头写下就不变)。根那一行还没写的文件(刚建、头不全)让这份分组不作数,
 /// 下次重算;已经读全的头留着复用,目录变了也只读新来的文件
+///
+/// mtime 是按时钟节拍走的(Linux 的粗粒度时钟几毫秒一跳、Windows 约 16 ms、FAT 2 s):读目录
+/// 那一刻离它上次变动不到 `MTIME_SETTLE_MS`,同一个节拍里紧接着的增删就不会再改 mtime,这份
+/// 分组也不作数(racy git 同款判法;2026-10-09 Linux / Windows CI 抓到,macOS 的 APFS 时间戳
+/// 够细,本机测不出)
+const MTIME_SETTLE_MS: i64 = 2_000;
+
 struct DirBranches {
     mtime: i64,
     complete: bool,
@@ -245,6 +252,7 @@ impl ClaudeAdapter {
     /// 一个项目目录里的分支(见 `DirBranches`)。目录没变就直接用上次的分组,一次 stat;
     /// 变了只读新来文件的头。文件 I/O 不持锁——扫描、watcher、GUI 打开详情、导出可能同时问
     fn branches_in(&self, dir: &Path) -> Arc<HashMap<PathBuf, Branch>> {
+        let checked_at = chrono::Utc::now().timestamp_millis();
         let mtime = fs::metadata(dir).map(|m| mtime_ms(&m)).unwrap_or(0);
         let known = {
             let cache = self.branches.lock().unwrap();
@@ -277,7 +285,8 @@ impl ClaudeAdapter {
             };
             heads.insert(path, head);
         }
-        let complete = !unwritten && heads.values().all(|head| head.root.is_some());
+        let settled = mtime.saturating_add(MTIME_SETTLE_MS) < checked_at;
+        let complete = settled && !unwritten && heads.values().all(|head| head.root.is_some());
         let branches = Arc::new(group_branches(&heads, self.local));
         heads.retain(|_, head| head.root.is_some());
         self.branches.lock().unwrap().dirs.insert(
@@ -1254,18 +1263,49 @@ mod tests {
 
     /// 建好了、还没写下第一行的会话文件(零字节)不进分组,分组却不能记成完整:之后的写入
     /// 不改目录 mtime,缓存成完整就再也认不出它是分支
+    #[cfg(unix)]
     #[test]
     fn an_unwritten_session_file_keeps_the_grouping_open() {
         let tmp = tempfile::tempdir().unwrap();
         let (dir, _, branch) = stage_branch(tmp.path());
         let content = fs::read(&branch).unwrap();
         fs::write(&branch, "").unwrap();
+        // 目录早就不动了,只剩零字节这一条理由让分组不作数
+        pin_mtime(
+            &dir,
+            std::time::SystemTime::now() - std::time::Duration::from_secs(3600),
+        );
         let adapter = ClaudeAdapter::at(tmp.path().to_path_buf(), None, false);
         assert!(adapter.branches_in(&dir).is_empty());
         fs::write(&branch, content).unwrap();
         assert!(
             adapter.branches_in(&dir).contains_key(&branch),
             "写下第一行以后要认出分支"
+        );
+    }
+
+    /// 把目录的 mtime 定在给定时刻(只在 unix 上能对目录开文件句柄)
+    #[cfg(unix)]
+    fn pin_mtime(dir: &Path, when: std::time::SystemTime) {
+        fs::File::open(dir).unwrap().set_modified(when).unwrap();
+    }
+
+    /// 刚变过的目录:同一个时钟节拍里再删一份文件,mtime 不变(Linux / Windows 的时间戳按
+    /// 节拍走)——这时的分组不能当成完整缓存,否则原件没了分支还挂着
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_that_just_changed_is_not_trusted_yet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (dir, original, branch) = stage_branch(tmp.path());
+        let adapter = ClaudeAdapter::at(tmp.path().to_path_buf(), None, false);
+        let now = std::time::SystemTime::now();
+        pin_mtime(&dir, now);
+        assert!(adapter.branches_in(&dir).contains_key(&branch));
+        fs::remove_file(&original).unwrap();
+        pin_mtime(&dir, now);
+        assert!(
+            adapter.branches_in(&dir).is_empty(),
+            "同一节拍里删掉的原件也得看见"
         );
     }
 
