@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fix: Grok Build sessions closed before the first message no longer show up as empty Untitled sessions (#55, thanks @yangmingyuan380)
 - Fix: Open In offers Codex Desktop when the app is installed as Codex.app (#55, thanks @yangmingyuan380)
 
 ## [0.8.7] — 2026-10-09

@@ -250,6 +250,70 @@ fn apply_tool_update(
     images
 }
 
+/// `sessionUpdate` 的分类。解析按它分派,`file_ref` 判空壳也问它(`opens_message`),
+/// 两边是同一个判据、不会分家
+#[derive(Clone, Copy)]
+enum UpdateKind {
+    /// user / agent 的文本 chunk
+    Chunk(Role),
+    Thought,
+    ToolCall,
+    /// 只回填已有的调用,自己不起消息
+    ToolCallUpdate,
+    /// 已知的非内容更新:任务后台化 / 压缩等
+    Known,
+    Unknown,
+}
+
+impl UpdateKind {
+    fn of(update: &Value) -> Self {
+        match update.get("sessionUpdate").and_then(Value::as_str) {
+            Some("user_message_chunk") => Self::Chunk(Role::User),
+            Some("agent_message_chunk") => Self::Chunk(Role::Assistant),
+            Some("agent_thought_chunk") => Self::Thought,
+            Some("tool_call") => Self::ToolCall,
+            Some("tool_call_update") => Self::ToolCallUpdate,
+            Some(
+                "task_backgrounded"
+                | "task_completed"
+                | "auto_compact_started"
+                | "auto_compact_completed"
+                | "compaction_checkpoint"
+                | "plan"
+                | "current_mode_update",
+            ) => Self::Known,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn opens_message(self) -> bool {
+        match self {
+            Self::Chunk(_) | Self::Thought | Self::ToolCall => true,
+            Self::ToolCallUpdate | Self::Known | Self::Unknown => false,
+        }
+    }
+}
+
+/// 一条会起消息的更新都没有的 updates.jsonl:Grok 一开会话就落盘,没发消息就关掉的
+/// 会话只剩插件钩子之类的流水,原先被收成一条条 Untitled 空记录(PR #55)。流式读、
+/// 命中即停,不设大小上限(理由同 cursor.rs 的 `is_turn_marker_only`:钩子输出多大
+/// 没有结构保证)。读不出来按有内容放行,交给解析去报错
+fn is_empty_shell(path: &Path) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    for row in jsonl_values(BufReader::new(file)) {
+        let Ok(row) = row else {
+            return false;
+        };
+        let update = row.as_ref().and_then(|row| row.pointer("/params/update"));
+        if update.is_some_and(|update| UpdateKind::of(update).opens_message()) {
+            return false;
+        }
+    }
+    true
+}
+
 fn parse_grok_updates(path: &Path, decode_images: bool) -> Result<(Vec<TranscriptMessage>, u32)> {
     let _image_budget = transcript_image_decode_budget(decode_images);
     let file = fs::File::open(path)?;
@@ -267,18 +331,15 @@ fn parse_grok_updates(path: &Path, decode_images: bool) -> Result<(Vec<Transcrip
             unknown += 1;
             continue;
         };
-        match update.get("sessionUpdate").and_then(|v| v.as_str()) {
-            Some("user_message_chunk") => {
-                append_message_chunk(&mut rp, update, Role::User, ts, decode_images);
+        match UpdateKind::of(update) {
+            UpdateKind::Chunk(role) => {
+                append_message_chunk(&mut rp, update, role, ts, decode_images);
             }
-            Some("agent_message_chunk") => {
-                append_message_chunk(&mut rp, update, Role::Assistant, ts, decode_images);
-            }
-            Some("agent_thought_chunk") => {
+            UpdateKind::Thought => {
                 rp.ensure(Role::Assistant, ts);
                 rp.cur_thinking.push_str(chunk_text(update));
             }
-            Some("tool_call") => {
+            UpdateKind::ToolCall => {
                 rp.ensure(Role::Assistant, ts);
                 let id = update
                     .get("toolCallId")
@@ -292,7 +353,7 @@ fn parse_grok_updates(path: &Path, decode_images: bool) -> Result<(Vec<Transcrip
                 rp.cur_tools
                     .push(tool_call_view(id.to_string(), name, &input, None, false));
             }
-            Some("tool_call_update") => {
+            UpdateKind::ToolCallUpdate => {
                 let Some(id) = update.get("toolCallId").and_then(|v| v.as_str()) else {
                     continue;
                 };
@@ -312,17 +373,8 @@ fn parse_grok_updates(path: &Path, decode_images: bool) -> Result<(Vec<Transcrip
                     append_images_to_message_end(message, images);
                 }
             }
-            // 已知的非内容更新:任务后台化/压缩等
-            Some(
-                "task_backgrounded"
-                | "task_completed"
-                | "auto_compact_started"
-                | "auto_compact_completed"
-                | "compaction_checkpoint"
-                | "plan"
-                | "current_mode_update",
-            ) => {}
-            _ => {
+            UpdateKind::Known => {}
+            UpdateKind::Unknown => {
                 unknown += 1;
             }
         }
@@ -415,7 +467,7 @@ impl AgentAdapter for GrokAdapter {
             return Ok(refs);
         };
         // session_search.sqlite 等根级文件对 read_dir 自然失败跳过;
-        // 会话主文件的判定(存在、非空、native_id)统一走 file_ref
+        // 会话主文件的判定(存在、非空、不是空壳、native_id)统一走 file_ref
         for cwd_dir in cwds.flatten() {
             let Ok(sessions) = fs::read_dir(cwd_dir.path()) else {
                 continue;
@@ -436,6 +488,9 @@ impl AgentAdapter for GrokAdapter {
         }
         let session_dir = path.parent()?;
         let mut r = default_file_ref(self.agent(), path)?;
+        if is_empty_shell(path) {
+            return None;
+        }
         r.native_id = session_dir.file_name()?.to_string_lossy().to_string();
         Some(r)
     }

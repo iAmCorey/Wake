@@ -1900,6 +1900,61 @@ fn grok_parse_contract() {
     );
 }
 
+/// 没发过消息就关掉的 Grok 会话只剩插件钩子之类的流水,不列(PR #55)。判据与解析器是
+/// 同一个分类:只有思考、只有工具调用的会话照列,列出来的都解析得出消息,空壳一条都没有。
+/// 钩子行的真实格式还没见过样本,这里只要它不是会起消息的更新;current_mode_update 是
+/// 认得的非内容更新
+#[test]
+fn grok_skips_sessions_without_content() {
+    use serde_json::json;
+    setup();
+    let home = tempfile::tempdir().unwrap();
+    let cwd = home
+        .path()
+        .join("sessions")
+        .join("%2FUsers%2Ftester%2FGithub%2Fwakefx");
+    fs::create_dir_all(&cwd).unwrap();
+    // 根在构造时按目录形状定下,sessions/ 得先在
+    let adapter = GrokAdapter::new().with_custom_root(home.path().to_path_buf());
+    let text =
+        |kind: &str| json!({"sessionUpdate": kind, "content": {"type": "text", "text": "看看"}});
+    let hook = json!({"sessionUpdate": "hook_execution", "hook": "session_start"});
+    let mode = json!({"sessionUpdate": "current_mode_update", "currentModeId": "default"});
+    for (id, updates, listed) in [
+        ("shell", vec![hook.clone(), mode.clone()], false),
+        ("thought", vec![text("agent_thought_chunk")], true),
+        (
+            "tool",
+            vec![json!({"sessionUpdate": "tool_call", "title": "Grep"})],
+            true,
+        ),
+        ("chat", vec![hook, mode, text("user_message_chunk")], true),
+    ] {
+        let dir = cwd.join(id);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("updates.jsonl");
+        let body: String = updates
+            .iter()
+            .map(|update| format!("{}\n", json!({"params": {"update": update}})))
+            .collect();
+        fs::write(&path, body).unwrap();
+        // 列表与监听都只经 file_ref
+        assert_eq!(adapter.file_ref(&path).is_some(), listed, "{id}");
+        let parsed = adapter
+            .parse_session(&fs_ref(AgentId::Grok, &path, id))
+            .unwrap();
+        assert_eq!(parsed.meta.message_count > 0, listed, "{id}");
+    }
+    let mut ids: Vec<String> = adapter
+        .list_session_files()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.native_id)
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["chat", "thought", "tool"]);
+}
+
 #[test]
 fn kimi_parse_contract() {
     setup();
