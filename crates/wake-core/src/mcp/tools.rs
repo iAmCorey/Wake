@@ -47,19 +47,24 @@ impl TranscriptCache {
         meta: &SessionMeta,
     ) -> anyhow::Result<Arc<ParsedTranscript>> {
         let r = SessionFileRef::from_meta(meta);
-        // SQLite 型会话的 `<db>#<id>` 虚拟路径 stat 不到,from_meta 退回索引里的
-        // 时间——源库变了、Wake 没重扫时键不会变。改用库文件与 -wal 的 mtime
-        // 作戳(sqlite_ro 行缓存同款判据),源库一写就失效
-        let stamp = if std::path::Path::new(&r.file_path).exists() {
-            r.mtime_ms
-        } else {
-            let db = crate::adapters::sqlite_ro::strip_virtual_path(&r.file_path);
-            crate::adapters::sqlite_ro::db_cache_stamp(std::path::Path::new(db))
+        let path = std::path::Path::new(&r.file_path);
+        // 戳与扫描的脏判据同一把尺子:adapter 的引用(`file_ref`)把边车与同根文件数都算了
+        // 进去——Claude 分支的原件被删 / 放回,分支文件不动,转录却要展开 / 折叠,只看文件
+        // 本身会一直交旧转录、seq 与搜索对不上。SQLite 型会话的 `<db>#<id>` 虚拟路径 stat
+        // 不到、也没有引用,改用库文件与 -wal 的 mtime(sqlite_ro 行缓存同款),源库一写就失效
+        let (stamp, size) = match adapter.file_ref(path) {
+            Some(current) => (current.mtime_ms, current.size),
+            None if path.exists() => (r.mtime_ms, r.size),
+            None => {
+                let db = crate::adapters::sqlite_ro::strip_virtual_path(&r.file_path);
+                let stamp = crate::adapters::sqlite_ro::db_cache_stamp(std::path::Path::new(db));
+                (stamp, r.size)
+            }
         };
         if let Some(cached) = self.0.lock().unwrap().as_ref() {
             if cached.path == r.file_path
                 && cached.mtime == stamp
-                && cached.size == r.size
+                && cached.size == size
                 && cached.indexed_project == meta.project_path
                 && cached.indexed_model == meta.model
             {
@@ -70,7 +75,7 @@ impl TranscriptCache {
         *self.0.lock().unwrap() = Some(CachedTranscript {
             path: r.file_path,
             mtime: stamp,
-            size: r.size,
+            size,
             indexed_project: meta.project_path.clone(),
             indexed_model: meta.model.clone(),
             transcript: t.clone(),

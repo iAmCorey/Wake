@@ -662,7 +662,7 @@ mod tests {
             "Move to ",
             "Session moved to ",
             "{} sessions moved to ",
-            "The session file will be moved to ",
+            "This file will be moved to ",
             "You can restore files from ",
             "Show in ",
             "Reveal in ",

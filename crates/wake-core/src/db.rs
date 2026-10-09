@@ -78,7 +78,12 @@ CREATE TABLE IF NOT EXISTS user_data (
 CREATE TABLE IF NOT EXISTS tombstones (
   file_path  TEXT PRIMARY KEY,
   key        TEXT,
-  deleted_at INTEGER
+  deleted_at INTEGER,
+  -- 单条删除把文件移进废纸篓之前记下的文件指纹(`put_back_fingerprint`):同一路径再
+  -- 出现、指纹对得上,就是用户从废纸篓放回来了(`Store::release_put_back`)。没被移走的、
+  -- 批量清理与老版本写的墓碑留 NULL,永远对不上
+  file_size  INTEGER,
+  file_mtime INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS custom_roots (
@@ -215,8 +220,19 @@ CREATE TABLE IF NOT EXISTS claimed_sessions (
 ///       Windows 上 `C:/…` 形态的工作目录换成反斜杠(PR #61),老行靠这轮重解析回填;
 /// "11" = Kimi Code CLI 的助手回复(context.append_loop_event 的 text / think / 工具调用与结果)、
 ///       系统产生的输入记 Meta、分叉复制来的历史折成一条、迁移来的 `ses_` 会话;pi / dsh / Hermes
-///       的回复合并改走同一个封顶合并(恰好停在上限上的回复也补截断标记),老行靠这轮重解析回填。
-pub const FTS_FORMAT: &str = "11";
+///       的回复合并改走同一个封顶合并(恰好停在上限上的回复也补截断标记),老行靠这轮重解析回填;
+/// "12" = Claude Code 的分支会话(开头原样复制了原对话的那种)折掉复制来的一段、挂到原件下,
+///       token / 标题 / 创建时间只算分支自己的行;后台任务结束时注入的 `<task-notification>`
+///       user 行归注入内容(Meta),老行靠这轮重解析回填。
+pub const FTS_FORMAT: &str = "12";
+
+/// FTS 压缩的节奏(见 `Store::compact_fts`):距上次压缩满一天、或从没压过才压。没有记录
+/// 就算到期——老库升级后、新建库首轮扫描收尾各压一次;`FTS_FORMAT` 换代时 open_conn 把
+/// 记录清掉,换代的全量重写收尾也一定压
+const FTS_COMPACT_EVERY_MS: i64 = 24 * 3600 * 1000;
+/// 分块合并的块大小(FTS5 页):本机 561 MB 的 messages_fts 段实测 88 次合并、共 8 秒,
+/// 每次持写锁不超过 120 ms(1000 页一块时最慢一次 550 ms,收藏切换会被它卡住)
+const FTS_MERGE_PAGES: i64 = 250;
 
 fn open_conn(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent() {
@@ -236,6 +252,16 @@ fn open_conn(path: &Path) -> Result<Connection> {
     // tombstones.key 迁移(2026-08-24 加列,老库无此列;重复加列报错即忽略):
     // 墓碑按逻辑会话(key)+物理路径双轨屏蔽,多 location 副本不得复活已删会话
     let _ = conn.execute("ALTER TABLE tombstones ADD COLUMN key TEXT", []);
+    // 放回识别的指纹列(2026-10-09):老墓碑的指纹是 NULL,永远不会被当成放回。逐列判:
+    // 半途中断留下的半套列不得让下次开库报 duplicate column(那会被当成坏库重建)
+    for column in ["file_size", "file_mtime"] {
+        if !table_has_column(&conn, "tombstones", column)? {
+            conn.execute(
+                &format!("ALTER TABLE tombstones ADD COLUMN {column} INTEGER"),
+                [],
+            )?;
+        }
+    }
     if !table_has_column(&conn, "sessions", "parent_key")? {
         let tx = conn.transaction()?;
         tx.execute(
@@ -272,6 +298,9 @@ fn open_conn(path: &Path) -> Result<Connection> {
                 "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('fts_reindex', '1')",
                 [],
             )?;
+            // 全量重写会给每一行留一份删除标记加一份新段,收尾必须压一次:清掉上次压缩的
+            // 记录,让它到期
+            conn.execute("DELETE FROM schema_meta WHERE key = 'fts_compacted_at'", [])?;
         }
         conn.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('fts_format', ?1)",
@@ -851,17 +880,21 @@ impl Store {
         Ok(changed)
     }
 
-    /// schema_meta 里的一次性旗子(升级后要补做的事),做完由 scanner 清掉
-    fn has_meta_flag(&self, key: &str) -> bool {
+    /// schema_meta 里的一个值;没有、或读不出都给 None
+    fn meta_value(&self, key: &str) -> Option<String> {
         let conn = self.read.lock().unwrap();
         conn.query_row(
-            "SELECT 1 FROM schema_meta WHERE key = ?1",
+            "SELECT value FROM schema_meta WHERE key = ?1",
             params![key],
-            |_| Ok(()),
+            |r| r.get(0),
         )
         .optional()
-        .map(|value| value.is_some())
-        .unwrap_or(false)
+        .unwrap_or(None)
+    }
+
+    /// schema_meta 里的一次性旗子(升级后要补做的事),做完由 scanner 清掉
+    fn has_meta_flag(&self, key: &str) -> bool {
+        self.meta_value(key).is_some()
     }
 
     fn clear_meta_flag(&self, key: &str) -> Result<()> {
@@ -888,6 +921,65 @@ impl Store {
 
     pub fn finish_fts_reindex(&self) -> Result<()> {
         self.clear_meta_flag("fts_reindex")
+    }
+
+    /// 该不该做一次 FTS 压缩(节奏见 `FTS_COMPACT_EVERY_MS`)。读不出记录按到期算——
+    /// 多压一次只费几秒
+    pub fn fts_compaction_due(&self, now: i64) -> bool {
+        self.meta_value("fts_compacted_at")
+            .and_then(|v| v.parse::<i64>().ok())
+            .is_none_or(|at| now.saturating_sub(at) >= FTS_COMPACT_EVERY_MS)
+    }
+
+    /// 把三张 FTS 表各自的段合并成一棵 b-tree,顺带丢掉删除标记。会话每重写一次
+    /// (watcher 的增量、`FTS_FORMAT` 换代的全量重解析)都只追加新段与删除标记,automerge
+    /// 收不回大段里的旧版本:本机实测 661 MB 的库里 557 MB 是 messages_fts 的段,压完
+    /// 87 MB,多词查询从 10–20 ms 降到 0.4–2 ms。
+    ///
+    /// 按 FTS5 文档的分块做法:第一次 merge 传负数(所有段归到同一层、开局),之后传正数
+    /// 续跑,`total_changes` 的增量小于 2 就是做完了。每块之间放开写锁,watcher 写入与
+    /// 收藏切换照常插队;插进来的新段由正数续跑接着并,不会让合并重新开局
+    pub fn compact_fts(&self, now: i64) -> Result<()> {
+        // 防御上限:持续有写入时合并也终会收敛,这里只防万一卡在循环里(250 页一块,
+        // 一万块远超任何真实索引)
+        const MAX_CHUNKS: usize = 10_000;
+        for table in ["messages_fts", "titles_fts", "memories_fts"] {
+            let sql = format!("INSERT INTO {table}({table}, rank) VALUES ('merge', ?1)");
+            let mut pages = -FTS_MERGE_PAGES;
+            for _ in 0..MAX_CHUNKS {
+                let conn = self.write.lock().unwrap();
+                let before = conn.total_changes();
+                conn.execute(&sql, params![pages])?;
+                let done = conn.total_changes() - before < 2;
+                drop(conn);
+                if done {
+                    break;
+                }
+                pages = FTS_MERGE_PAGES;
+            }
+        }
+        self.write.lock().unwrap().execute(
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('fts_compacted_at', ?1)",
+            params![now.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// 压缩后空闲页占到三成、且至少 64 MiB 才 VACUUM,把文件真正缩回去(Settings → Data
+    /// 显示的占用随之下降)。VACUUM 持写锁重写整个文件(本机 161 MB 约 1 秒),所以只在
+    /// 确有大块空闲时做;做完把 WAL 截断,否则 WAL 文件会停在整库那么大
+    pub fn reclaim_free_pages(&self) -> Result<()> {
+        let conn = self.write.lock().unwrap();
+        let pages: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        let free: i64 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+        let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        if free * 10 < pages * 3 || free * page_size < 64 << 20 {
+            return Ok(());
+        }
+        conn.execute_batch("VACUUM")?;
+        // 有读者(MCP / CLI 进程)占着快照时截不了,下次检查点再缩;不算失败
+        let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+        Ok(())
     }
 
     /// 当前胜出副本的 `(key, file_path)`，scanner 用 file_path 把同一 agent
@@ -920,6 +1012,11 @@ impl Store {
     /// 用某家 adapter 的全量快照原子替换父子关系。只接受库内存在、同 agent、
     /// 非自指的父子键；陈旧关系会被清空。返回是否真的改变了任何行。
     pub fn replace_parent_links(&self, agent: AgentId, links: &[(String, String)]) -> Result<bool> {
+        // Claude 的分支关系每批 watcher 事件都会对账一遍,绝大多数时候什么都没变:在读连接
+        // 上比一眼即回,不开写事务(replace_claims 同款早退)
+        if self.parent_links_settled(agent, links)? {
+            return Ok(false);
+        }
         let mut conn = self.write.lock().unwrap();
         let tx = conn.transaction()?;
         let before: Vec<(String, String)> = {
@@ -972,21 +1069,84 @@ impl Store {
         Ok(before != after)
     }
 
-    pub fn remove_session(&self, key: &str, tombstone: bool) -> Result<()> {
-        self.remove_sessions(&[key.to_string()], tombstone)
+    /// `replace_parent_links` 写下去会不会什么都不变:每个子会话挂的父会话与写入路径算的
+    /// 一致(每个子会话取第一条边;父会话不在库里、或就是自己的不挂),而且挂着的子会话
+    /// 已经是父会话的项目(写入路径会把父会话的项目再铺一遍——子会话重解析后自己的项目
+    /// 会盖回来,这时必须写)
+    fn parent_links_settled(&self, agent: AgentId, links: &[(String, String)]) -> Result<bool> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT key, parent_key, project_path, project_name FROM sessions WHERE agent_id = ?1",
+        )?;
+        let rows: HashMap<String, (String, String, String)> = stmt
+            .query_map(params![agent.as_str()], |r| {
+                Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?)))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut first: HashMap<&str, &str> = HashMap::new();
+        for (child, parent) in links {
+            first.entry(child.as_str()).or_insert(parent.as_str());
+        }
+        Ok(rows.iter().all(|(key, (parent_key, path, name))| {
+            let wanted = first
+                .get(key.as_str())
+                .filter(|parent| **parent != key.as_str())
+                .and_then(|parent| rows.get(*parent).map(|row| (*parent, row)));
+            match wanted {
+                None => parent_key.is_empty(),
+                Some((parent, (_, parent_path, parent_name))) => {
+                    parent_key == parent
+                        && (parent_path.is_empty() || path == parent_path)
+                        && (parent_name.is_empty() || name == parent_name)
+                }
+            }
+        }))
     }
 
-    /// 一棵会话树在索引侧原子删除。磁盘路径由调用方先整体移入废纸篓；若
-    /// 任一索引步骤失败，所有 session/message/FTS/tombstone 改动一起回滚。
-    pub fn remove_sessions(&self, keys: &[String], tombstone: bool) -> Result<()> {
-        self.remove_sessions_recorded(keys, tombstone, &[], now_ms())
+    /// 出库、不记墓碑:扫描与 watcher 发现文件已经不在了。用户删除走
+    /// `remove_trashed_sessions`,批量清理走 `complete_cleanup`
+    pub fn remove_session(&self, key: &str) -> Result<()> {
+        self.remove_sessions_recorded(&[key.to_string()], false, &[], now_ms(), &HashMap::new())
+    }
+
+    /// 单条删除:文件已经进了废纸篓。`fingerprint` 给出被移走的会话文件在移动**之前**的
+    /// 指纹(`put_back_fingerprint`;SQLite 型会话的虚拟路径、移动前就不在的文件给 None),
+    /// 记进墓碑。用户从废纸篓放回原处后,扫描看到同一路径、同一指纹的文件就撤掉墓碑
+    /// (`release_put_back`)——确认框说"放回原处就会重新出现"靠的是这个。批量清理不走
+    /// 这里:它有自己的清理记录与 Check 校验(内容哈希)
+    pub fn remove_trashed_sessions(
+        &self,
+        keys: &[String],
+        prints: &HashMap<String, (i64, i64)>,
+    ) -> Result<()> {
+        self.remove_sessions_recorded(keys, true, &[], now_ms(), prints)
     }
 
     /// Keep the reviewed paths even if the watcher already removed a missing
     /// source row. File moves and watcher delivery cannot share a transaction.
     pub fn complete_cleanup(&self, sessions: &[SessionMeta], stamp: i64) -> Result<()> {
         let keys = sessions.iter().map(|s| s.key.clone()).collect::<Vec<_>>();
-        self.remove_sessions_recorded(&keys, true, sessions, stamp)
+        self.remove_sessions_recorded(&keys, true, sessions, stamp, &HashMap::new())
+    }
+
+    /// 这条路径压在墓碑下吗。扫描对每份候选文件都会问;读不出交 Err,扫描当它压着
+    pub fn is_tombstoned(&self, file_path: &str) -> Result<bool> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare_cached("SELECT 1 FROM tombstones WHERE file_path = ?1")?;
+        Ok(stmt.exists(params![file_path])?)
+    }
+
+    /// 放回识别:磁盘上这份文件的指纹(`put_back_fingerprint`)与删除前记下的一致——用户
+    /// 把它从废纸篓放回原处了,撤掉墓碑(路径与 key 是同一行)。返回撤没撤。比较只在这条
+    /// DELETE 的 WHERE 里:没记指纹的墓碑(批量清理、老墓碑、库存型会话)永远对不上,agent
+    /// 在同一路径重新写出的文件也对不上,删除照旧生效
+    pub fn release_put_back(&self, file_path: &str, print: (i64, i64)) -> Result<bool> {
+        let conn = self.write.lock().unwrap();
+        let released = conn.execute(
+            "DELETE FROM tombstones WHERE file_path = ?1 AND file_size = ?2 AND file_mtime = ?3",
+            params![file_path, print.0, print.1],
+        )?;
+        Ok(released > 0)
     }
 
     fn remove_sessions_recorded(
@@ -995,6 +1155,7 @@ impl Store {
         tombstone: bool,
         recorded: &[SessionMeta],
         stamp: i64,
+        prints: &HashMap<String, (i64, i64)>,
     ) -> Result<()> {
         let mut conn = self.write.lock().unwrap();
         let tx = conn.transaction()?;
@@ -1028,15 +1189,29 @@ impl Store {
                         .find(|s| s.key == *key)
                         .map(|s| s.file_path.clone())
                 }) {
+                    let (size, mtime) = prints.get(&fp).copied().unzip();
                     tx.execute(
-                        "INSERT OR REPLACE INTO tombstones(file_path, key, deleted_at) VALUES (?1, ?2, ?3)",
-                        params![fp, key, stamp],
+                        "INSERT OR REPLACE INTO tombstones
+                           (file_path, key, deleted_at, file_size, file_mtime)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![fp, key, stamp, size, mtime],
                     )?;
                 }
             }
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// 索引里这条路径的变更戳 (file_mtime, file_size),没入库给 None。watcher 拿它与
+    /// `file_ref` 现算的引用比:没入库 = 新出现的文件,对不上 = 引用变了(`ref_dependents`)
+    pub fn file_stamp(&self, file_path: &str) -> Result<Option<(i64, i64)>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt =
+            conn.prepare_cached("SELECT file_mtime, file_size FROM sessions WHERE file_path = ?1")?;
+        Ok(stmt
+            .query_row(params![file_path], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?)
     }
 
     /// 路径 → 现行 key(watcher 增量的易主清理用)
@@ -1064,7 +1239,7 @@ impl Store {
             .optional()?
         };
         if let Some(k) = &key {
-            self.remove_session(k, false)?;
+            self.remove_session(k)?;
         }
         Ok(key)
     }
@@ -1533,18 +1708,6 @@ impl Store {
         conn.query_row(
             "SELECT 1 FROM tombstones WHERE key = ?1",
             params![key],
-            |_| Ok(()),
-        )
-        .optional()
-        .map(|o| o.is_some())
-        .unwrap_or(false)
-    }
-
-    pub fn is_tombstoned(&self, file_path: &str) -> bool {
-        let conn = self.read.lock().unwrap();
-        conn.query_row(
-            "SELECT 1 FROM tombstones WHERE file_path = ?1",
-            params![file_path],
             |_| Ok(()),
         )
         .optional()
@@ -2223,58 +2386,46 @@ impl Store {
         }
         let limit = if f.limit > 0 { f.limit } else { 20 };
         let (filter_sql, filter_args) = memory_filter(f);
+        // FTS 与 LIKE 降级只差 SQL 与前导参数。片段取自正文、在 make_snippet 里开窗(FTS5 的
+        // snippet() 在 trigram 下只露十几个字);只在标题里命中的,正文里找不到词,给正文开头
+        let (sql, mut all_args): (String, Vec<Box<dyn rusqlite::ToSql>>) =
+            if !needs_like_fallback(&segs) {
+                (
+                    format!(
+                        "SELECT {MEMORY_COLS}
+                         FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
+                         {MEMORY_SESSION_JOIN}
+                         WHERE memories_fts MATCH ?{filter_sql}
+                         ORDER BY bm25(memories_fts) LIMIT ?"
+                    ),
+                    vec![Box::new(fts_match_expr(&segs))],
+                )
+            } else {
+                (
+                    format!(
+                        "SELECT {MEMORY_COLS} FROM memories m {MEMORY_SESSION_JOIN}
+                         WHERE {}{filter_sql}
+                         ORDER BY m.updated_at DESC LIMIT ?",
+                        like_where(&["m.title", "m.body"], segs.len())
+                    ),
+                    like_args(&segs, 2),
+                )
+            };
+        all_args.extend(filter_args);
+        all_args.push(Box::new(limit));
         let conn = self.read.lock().unwrap();
-        let mut out = Vec::new();
-        if !needs_like_fallback(&segs) {
-            let mut stmt = conn.prepare_cached(&format!(
-                "SELECT {MEMORY_COLS}, snippet(memories_fts, 1, ?, ?, '…', 16)
-                 FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
-                 {MEMORY_SESSION_JOIN}
-                 WHERE memories_fts MATCH ?{filter_sql}
-                 ORDER BY bm25(memories_fts) LIMIT ?"
-            ))?;
-            let mut all_args: Vec<Box<dyn rusqlite::ToSql>> = vec![
-                Box::new(HL_OPEN.to_string()),
-                Box::new(HL_CLOSE.to_string()),
-                Box::new(fts_match_expr(&segs)),
-            ];
-            all_args.extend(filter_args);
-            all_args.push(Box::new(limit));
-            let rows = stmt.query_map(
+        let hits = conn
+            .prepare_cached(&sql)?
+            .query_map(
                 rusqlite::params_from_iter(all_args.iter().map(|b| b.as_ref())),
                 |r| {
-                    Ok(MemoryHit {
-                        doc: row_to_memory(r)?,
-                        // snippet 是 SELECT 里跟在 memory_cols! 后面的最后一列,按列数取——写死下标加列时
-                        // 顶错过一次(2026-09-21)
-                        snippet: r.get(r.as_ref().column_count() - 1)?,
-                    })
+                    let doc = row_to_memory(r)?;
+                    let snippet = make_snippet(&doc.body, &segs);
+                    Ok(MemoryHit { doc, snippet })
                 },
-            )?;
-            for r in rows {
-                out.push(r?);
-            }
-        } else {
-            let like_where = like_where(&["m.title", "m.body"], segs.len());
-            let mut stmt = conn.prepare_cached(&format!(
-                "SELECT {MEMORY_COLS} FROM memories m {MEMORY_SESSION_JOIN}
-                 WHERE {like_where}{filter_sql}
-                 ORDER BY m.updated_at DESC LIMIT ?"
-            ))?;
-            let mut all_args = like_args(&segs, 2);
-            all_args.extend(filter_args);
-            all_args.push(Box::new(limit));
-            let rows = stmt.query_map(
-                rusqlite::params_from_iter(all_args.iter().map(|b| b.as_ref())),
-                row_to_memory,
-            )?;
-            for r in rows {
-                let doc = r?;
-                let snippet = make_like_snippet(&doc.body, segs[0]);
-                out.push(MemoryHit { doc, snippet });
-            }
-        }
-        Ok(out)
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(hits)
     }
 
     pub fn agent_counts(&self) -> Result<HashMap<String, i64>> {
@@ -2621,80 +2772,55 @@ impl Store {
         let match_expr = fts_match_expr(&segs);
 
         let conn = self.read.lock().unwrap();
-        let mut raw: Vec<(String, i64, Option<String>, String, Option<i64>, String)> = Vec::new();
 
-        if !degraded {
-            let sql = format!(
-                "SELECT m.session_key, m.seq, m.sidechain_id, m.role, m.ts,
-                        snippet(messages_fts, 0, ?, ?, '…', 16)
-                 FROM messages_fts
-                 JOIN messages m ON m.id = messages_fts.rowid
-                 JOIN sessions s ON s.key = m.session_key
-                 WHERE messages_fts MATCH ?{filter_sql}
-                 ORDER BY bm25(messages_fts) * {RECENCY_BOOST} LIMIT ?"
-            );
-            let mut stmt = conn.prepare_cached(&sql)?;
-            let mut all_args: Vec<Box<dyn rusqlite::ToSql>> = vec![
-                Box::new(HL_OPEN.to_string()),
-                Box::new(HL_CLOSE.to_string()),
-                Box::new(match_expr.clone()),
-            ];
-            all_args.extend(filter_args(f));
-            all_args.push(Box::new(now));
-            all_args.push(Box::new(limit));
-            let rows = stmt.query_map(
-                rusqlite::params_from_iter(all_args.iter().map(|b| b.as_ref())),
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                    ))
-                },
-            )?;
-            for r in rows {
-                raw.push(r?);
-            }
+        // 正文命中:FTS 与 LIKE 降级只差 SQL 与前导参数;片段都取原文在 make_snippet 里开窗
+        // (FTS5 的 snippet() 在 trigram 下只露十几个字)
+        let (sql, mut all_args): (String, Vec<Box<dyn rusqlite::ToSql>>) = if !degraded {
+            (
+                format!(
+                    "SELECT m.session_key, m.seq, m.sidechain_id, m.role, m.ts, m.text
+                     FROM messages_fts
+                     JOIN messages m ON m.id = messages_fts.rowid
+                     JOIN sessions s ON s.key = m.session_key
+                     WHERE messages_fts MATCH ?{filter_sql}
+                     ORDER BY bm25(messages_fts) * {RECENCY_BOOST} LIMIT ?"
+                ),
+                vec![Box::new(match_expr.clone())],
+            )
         } else {
-            let like_where = like_where(&["m.text"], segs.len());
-            let sql = format!(
-                "SELECT m.session_key, m.seq, m.sidechain_id, m.role, m.ts, m.text
-                 FROM messages m JOIN sessions s ON s.key = m.session_key
-                 WHERE {like_where}{filter_sql}
-                 ORDER BY m.ts DESC LIMIT ?"
-            );
-            let mut stmt = conn.prepare_cached(&sql)?;
-            let mut all_args = like_args(&segs, 1);
-            all_args.extend(filter_args(f));
-            all_args.push(Box::new(limit));
-            let rows = stmt.query_map(
+            (
+                format!(
+                    "SELECT m.session_key, m.seq, m.sidechain_id, m.role, m.ts, m.text
+                     FROM messages m JOIN sessions s ON s.key = m.session_key
+                     WHERE {}{filter_sql}
+                     ORDER BY m.ts DESC LIMIT ?",
+                    like_where(&["m.text"], segs.len())
+                ),
+                like_args(&segs, 1),
+            )
+        };
+        all_args.extend(filter_args(f));
+        if !degraded {
+            all_args.push(Box::new(now));
+        }
+        all_args.push(Box::new(limit));
+        let raw: Vec<(String, i64, Option<String>, String, Option<i64>, String)> = conn
+            .prepare_cached(&sql)?
+            .query_map(
                 rusqlite::params_from_iter(all_args.iter().map(|b| b.as_ref())),
                 |r| {
+                    let text: String = r.get(5)?;
                     Ok((
                         r.get(0)?,
                         r.get(1)?,
                         r.get(2)?,
                         r.get(3)?,
                         r.get(4)?,
-                        r.get(5)?,
+                        make_snippet(&text, &segs),
                     ))
                 },
-            )?;
-            for r in rows {
-                let (k, seq, sc, role, ts, text): (
-                    String,
-                    i64,
-                    Option<String>,
-                    String,
-                    Option<i64>,
-                    String,
-                ) = r?;
-                raw.push((k, seq, sc, role, ts, make_like_snippet(&text, segs[0])));
-            }
-        }
+            )?
+            .collect::<rusqlite::Result<_>>()?;
 
         // 标题命中:独立的 titles_fts。排在正文命中之前——词出现在标题里是最强的
         // 相关性信号;role 记 "title"、seq 记 0,跳转落到会话开头(标题没有对应的
@@ -2740,7 +2866,7 @@ impl Store {
             )?;
             for r in rows {
                 let (key, title) = r?;
-                title_raw.push((key, make_like_snippet(&title, segs[0])));
+                title_raw.push((key, make_snippet(&title, &segs)));
             }
         }
 
@@ -3117,26 +3243,84 @@ fn tally_wake_lookups(conn: &Connection, since_ms: i64) -> Result<Vec<LookupTall
     Ok(rows)
 }
 
-/// 清掉一条会话在库里的全部派生行:messages 及其 FTS 影子、wake_lookups。写入前
-/// (write_session_tx)与删除时(remove_sessions_recorded)共用;titles_fts 不在这里,
-/// 它随 upsert_session 走(quick 路径也要改标题)。再加一张派生表只改这里和写入侧
+/// 清掉一条会话在库里的全部派生行:messages 及其 FTS 影子、wake_lookups。删除时
+/// (remove_sessions_recorded / delete_session_row)用;写入侧走同一对原语
+/// (`replace_units` + 重写 wake_lookups)。titles_fts 不在这里,它随 upsert_session 走
+/// (quick 路径也要改标题)。再加一张派生表只改这里和写入侧
 fn clear_session_rows(tx: &rusqlite::Transaction<'_>, key: &str) -> Result<()> {
-    // FTS external content 需要显式 delete 旧行
-    let rows: Vec<(i64, String)> = tx
-        .prepare_cached("SELECT id, text FROM messages WHERE session_key = ?1")?
-        .query_map(params![key], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    let mut fts_del = tx.prepare_cached(
-        "INSERT INTO messages_fts(messages_fts, rowid, text) VALUES ('delete', ?1, ?2)",
-    )?;
-    for (id, text) in rows {
-        fts_del.execute(params![id, text])?;
-    }
-    drop(fts_del);
-    tx.prepare_cached("DELETE FROM messages WHERE session_key = ?1")?
-        .execute(params![key])?;
+    replace_units(tx, key, &[])?;
     tx.prepare_cached("DELETE FROM wake_lookups WHERE session_key = ?1")?
         .execute(params![key])?;
+    Ok(())
+}
+
+/// 把一条会话的消息行换成 `units`,只动变了的尾部。活跃会话每追加一行、⌘R 的全量重扫、
+/// `FTS_FORMAT` 换代都会把整条会话重解析一遍;原先一律整段删了重插,每次都给 FTS 留下
+/// 一整份删除标记加新段(本机 661 MB 的库里 557 MB 是这些段)。现在按 id 顺序取出现有行,
+/// 与新单元逐条比,最长的相同前缀原样留着,其后的旧行删掉(FTS 是外部内容表,要拿原文
+/// 显式 delete)、新单元插入:没变的会话零写入,追加只写新行。新行的 id 比留下的都大,
+/// 按 id 排的顺序仍是单元顺序
+fn replace_units(tx: &rusqlite::Transaction<'_>, key: &str, units: &[IndexUnit]) -> Result<()> {
+    type Row = (
+        i64,
+        Option<String>,
+        i64,
+        Option<String>,
+        Option<i64>,
+        String,
+    );
+    let existing: Vec<Row> = tx
+        .prepare_cached(
+            "SELECT id, sidechain_id, seq, role, ts, text FROM messages
+             WHERE session_key = ?1 ORDER BY id",
+        )?
+        .query_map(params![key], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let keep = existing
+        .iter()
+        .zip(units)
+        .take_while(|((_, sidechain, seq, role, ts, text), u)| {
+            *sidechain == u.sidechain_id
+                && *seq == u.seq
+                && role.as_deref() == Some(u.role.as_str())
+                && *ts == u.timestamp
+                && *text == u.text
+        })
+        .count();
+    if let Some((first_stale, ..)) = existing.get(keep) {
+        let mut fts_del = tx.prepare_cached(
+            "INSERT INTO messages_fts(messages_fts, rowid, text) VALUES ('delete', ?1, ?2)",
+        )?;
+        for (id, .., text) in &existing[keep..] {
+            fts_del.execute(params![id, text])?;
+        }
+        tx.prepare_cached("DELETE FROM messages WHERE session_key = ?1 AND id >= ?2")?
+            .execute(params![key, first_stale])?;
+    }
+    let mut ins_msg = tx.prepare_cached(
+        "INSERT INTO messages(session_key, sidechain_id, seq, role, ts, text) VALUES (?1,?2,?3,?4,?5,?6)",
+    )?;
+    let mut ins_fts = tx.prepare_cached("INSERT INTO messages_fts(rowid, text) VALUES (?1, ?2)")?;
+    for u in &units[keep..] {
+        ins_msg.execute(params![
+            key,
+            u.sidechain_id,
+            u.seq,
+            u.role.as_str(),
+            u.timestamp,
+            u.text
+        ])?;
+        ins_fts.execute(params![tx.last_insert_rowid(), u.text])?;
+    }
     Ok(())
 }
 
@@ -3167,27 +3351,13 @@ fn write_session_tx(
     units: &[IndexUnit],
     lookups: &[WakeLookup],
 ) -> Result<()> {
-    clear_session_rows(tx, &meta.key)?;
     upsert_session(tx, meta, file_mtime)?;
-
-    let mut ins_msg = tx.prepare_cached(
-        "INSERT INTO messages(session_key, sidechain_id, seq, role, ts, text) VALUES (?1,?2,?3,?4,?5,?6)",
-    )?;
-    let mut ins_fts = tx.prepare_cached("INSERT INTO messages_fts(rowid, text) VALUES (?1, ?2)")?;
-    for u in units {
-        ins_msg.execute(params![
-            meta.key,
-            u.sidechain_id,
-            u.seq,
-            u.role.as_str(),
-            u.timestamp,
-            u.text
-        ])?;
-        let rowid = tx.last_insert_rowid();
-        ins_fts.execute(params![rowid, u.text])?;
-    }
-    // Wake 调用记录与 messages 同事务、同 key 删插;quick 路径(write_meta_only)
-    // 不经这里,所以不会把记录冲掉。绝大多数会话一次都没有,别为它白取一次语句
+    replace_units(tx, &meta.key, units)?;
+    // Wake 调用记录与 messages 同事务、同 key 删插(行数很少,整份重写);quick 路径
+    // (write_meta_only)不经这里,所以不会把记录冲掉。绝大多数会话一次都没有,别为它
+    // 白取一次插入语句
+    tx.prepare_cached("DELETE FROM wake_lookups WHERE session_key = ?1")?
+        .execute(params![meta.key])?;
     if !lookups.is_empty() {
         let mut ins_lookup = tx.prepare_cached(
             "INSERT INTO wake_lookups(session_key, seq, ts, channel, tool) VALUES (?1,?2,?3,?4,?5)",
@@ -3307,45 +3477,79 @@ fn like_args(segs: &[&str], cols: usize) -> Vec<Box<dyn rusqlite::ToSql>> {
         .collect()
 }
 
-/// LIKE 降级路径的 snippet:不区分大小写找首个词项,前 40 / 后 80 字符开窗并高亮。
+/// 命中片段:以最早出现的检索词为锚,前 40 / 后 80 字符开窗,窗口里每个检索词的每次
+/// 出现都高亮(相邻、重叠的并成一段)。会话正文与记忆的 FTS / LIKE 两条路径、标题的 LIKE
+/// 路径共用这一个(标题的 FTS 路径用 highlight() 给整个标题,标题短,不用开窗):FTS5 的
+/// snippet() 按词元数开窗,trigram 分词下一个词元是三个字符的滑窗,16 个词元只露出十几个
+/// 字,看不出命中在说什么。
+///
 /// 全程按**字符**下标走:逐字符小写并记下每个小写字符来自原文第几个字符——小写
 /// 不保长(Ω→ω、İ→i̇、K→k 字节数与字符数都会变),拿小写串里的字节偏移去切原文正是
 /// 2026-09-21 review 复现的 panic(⌘K 逐字键入 CJK 查询必经此路,后台线程 panic
 /// 直接 abort 整个 app)
-fn make_like_snippet(text: &str, first_seg: &str) -> String {
+fn make_snippet(text: &str, segs: &[&str]) -> String {
+    const BEFORE: usize = 40;
+    const AFTER: usize = 80;
+    // 大小写按字符折叠,正文与词项同一个取法、对齐 FTS 的 trigram:它把 ΟΣΟΣ / οσος / οσοσ
+    // 当成同一个词。整串 to_lowercase 会把词尾的 Σ 变成 ς(希腊文词尾 sigma 规则),逐字符的
+    // 正文那边是 σ,两边就对不上;ς 也并成 σ
+    let fold = |c: char| c.to_lowercase().map(|c| if c == 'ς' { 'σ' } else { c });
     let chars: Vec<char> = text.chars().collect();
-    let needle: Vec<char> = first_seg.to_lowercase().chars().collect();
     let mut lower: Vec<char> = Vec::with_capacity(chars.len());
     let mut origin: Vec<usize> = Vec::with_capacity(chars.len());
-    for (i, c) in chars.iter().enumerate() {
-        for lc in c.to_lowercase() {
+    for (i, &c) in chars.iter().enumerate() {
+        for lc in fold(c) {
             lower.push(lc);
             origin.push(i);
         }
     }
-    let hit = (!needle.is_empty())
-        .then(|| {
-            lower
-                .windows(needle.len())
-                .position(|w| w == needle.as_slice())
-        })
-        .flatten();
-    let Some(pos) = hit else {
-        return chars.iter().take(120).collect();
+    // 每个词项的每次出现,换算成原文的字符区间 [start, end)
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for seg in segs {
+        let needle: Vec<char> = seg.chars().flat_map(fold).collect();
+        if needle.is_empty() {
+            continue;
+        }
+        let mut i = 0;
+        while i + needle.len() <= lower.len() {
+            if lower[i..i + needle.len()] == needle[..] {
+                spans.push((origin[i], origin[i + needle.len() - 1] + 1));
+                i += needle.len();
+            } else {
+                i += 1;
+            }
+        }
+    }
+    spans.sort_unstable();
+    let Some(&(anchor_start, anchor_end)) = spans.first() else {
+        return chars.iter().take(BEFORE + AFTER).collect();
     };
-    let char_idx = origin[pos];
-    let match_end = origin[pos + needle.len() - 1] + 1;
-    let start = char_idx.saturating_sub(40);
-    let end = (match_end + 80).min(chars.len());
+    let start = anchor_start.saturating_sub(BEFORE);
+    let end = (anchor_end + AFTER).min(chars.len());
+    let mut marks: Vec<(usize, usize)> = Vec::new();
+    for &(s, e) in &spans {
+        if s >= end {
+            break;
+        }
+        let e = e.min(end);
+        match marks.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => marks.push((s, e)),
+        }
+    }
     let mut out = String::new();
     if start > 0 {
         out.push('…');
     }
-    out.extend(&chars[start..char_idx]);
-    out.push(HL_OPEN);
-    out.extend(&chars[char_idx..match_end]);
-    out.push(HL_CLOSE);
-    out.extend(&chars[match_end..end]);
+    let mut cursor = start;
+    for (s, e) in marks {
+        out.extend(&chars[cursor..s]);
+        out.push(HL_OPEN);
+        out.extend(&chars[s..e]);
+        out.push(HL_CLOSE);
+        cursor = e;
+    }
+    out.extend(&chars[cursor..end]);
     if end < chars.len() {
         out.push('…');
     }
@@ -3376,6 +3580,19 @@ fn compute_streaks(daily: &[(chrono::NaiveDate, i64)], today: chrono::NaiveDate)
 
 pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+/// 放回识别里"同一份文件"的唯一定义:文件本身的大小与修改时间(废纸篓的移入与放回都是
+/// 改名,两样都不变)。删除前(`cleanup::trash_sessions`)与重新出现时(scanner
+/// `path_tombstoned`)都用它——
+/// 不拿索引里的 file_size / file_mtime:那是 adapter 的变更戳,有的把边车、同根文件数
+/// 算了进去,文件没动它也会变。不是普通文件给 None
+pub fn put_back_fingerprint(path: &Path) -> Option<(i64, i64)> {
+    let meta = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
+    Some((
+        meta.len() as i64,
+        crate::adapters::parse_utils::mtime_ms(&meta),
+    ))
 }
 
 /// `--db` 给了就用它,否则取 GUI 那份。调用点一律**惰性**求值:
@@ -3413,4 +3630,67 @@ pub fn default_db_path() -> std::path::PathBuf {
         }
     }
     db
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 把哨兵换成方括号,断言好写好读
+    fn shown(s: &str) -> String {
+        s.replace(HL_OPEN, "[").replace(HL_CLOSE, "]")
+    }
+
+    #[test]
+    fn snippet_windows_around_the_first_hit_and_marks_every_term() {
+        let text = format!(
+            "{}先说二维码,再说 useEffect( 的挂载,最后又提到二维码。{}",
+            "前文".repeat(40),
+            "后文".repeat(80)
+        );
+        let s = shown(&make_snippet(&text, &["二维码", "useeffect("]));
+        assert!(
+            s.starts_with('…') && s.ends_with('…'),
+            "长文两头都要省略:{s}"
+        );
+        assert!(
+            s.contains("先说[二维码],再说 [useEffect(] 的挂载,最后又提到[二维码]"),
+            "窗口里每个词的每次出现都标上,大小写按原文:{s}"
+        );
+        // 前 40 后 80 字符的窗口,再加两个省略号
+        assert!(s.chars().count() <= 40 + 80 + "二维码".chars().count() + 2 + 6);
+    }
+
+    #[test]
+    fn snippet_merges_overlapping_terms_and_falls_back_to_the_start() {
+        assert_eq!(shown(&make_snippet("xabcdx", &["abc", "bcd"])), "x[abcd]x");
+        let plain = "没有命中的长文本".repeat(30);
+        let s = make_snippet(&plain, &["二维码"]);
+        assert_eq!(s.chars().count(), 120, "找不到词就给开头 120 字");
+        assert!(!s.contains(HL_OPEN));
+    }
+
+    #[test]
+    fn snippet_survives_case_mappings_that_change_length() {
+        // Ω/İ/K 小写后字符数或字节数会变,按原文字符下标切才不会 panic 或错位
+        let s = shown(&make_snippet(
+            "İstanbul Ωmega KELVIN 二维码",
+            &["ωmega", "kelvin"],
+        ));
+        assert_eq!(s, "İstanbul [Ωmega] [KELVIN] 二维码");
+        let s = shown(&make_snippet("İİİ二维码", &["二维码"]));
+        assert_eq!(s, "İİİ[二维码]");
+    }
+
+    /// 希腊文词尾的 sigma:FTS 的 trigram 把 ΟΣΟΣ / οσος / οσοσ 当成同一个词,片段也得认得出——
+    /// 整串小写会把查询词尾的 Σ 变成 ς,逐字符小写的正文那边却是 σ
+    #[test]
+    fn snippet_folds_greek_final_sigma_like_the_index() {
+        let text = format!("{} ΟΣΟΣ τέλος", "α".repeat(200));
+        for query in ["ΟΣΟΣ", "οσος", "οσοσ"] {
+            let s = shown(&make_snippet(&text, &[query]));
+            assert!(s.contains("[ΟΣΟΣ]"), "{query}: {s}");
+        }
+        assert!(shown(&make_snippet("τέλος οσος", &["ΟΣΟΣ"])).contains("[οσος]"));
+    }
 }

@@ -64,6 +64,14 @@ fn consume_image_decode_budget(bytes: usize) -> bool {
 pub fn jsonl_values<R: std::io::BufRead>(
     reader: R,
 ) -> impl Iterator<Item = std::io::Result<Option<Value>>> {
+    jsonl_rows(reader)
+}
+
+/// `jsonl_values` 的窄版:每行只反序列化成 `T`(用不到的字段直接跳过,不建整棵 Value 树),
+/// 读错误规则相同;读不出、不是 JSON、对不上形状的行交 `Ok(None)`
+pub fn jsonl_rows<T: serde::de::DeserializeOwned, R: std::io::BufRead>(
+    reader: R,
+) -> impl Iterator<Item = std::io::Result<Option<T>>> {
     jsonl_lines(reader).filter_map(|line| match line {
         Ok(Some(line)) if line.trim().is_empty() => None,
         Ok(line) => Some(Ok(line.and_then(|line| serde_json::from_str(&line).ok()))),
@@ -104,11 +112,18 @@ impl<R: std::io::BufRead> Iterator for JsonlLines<R> {
 
 /// 文件 mtime → epoch ms(各家 adapter 与 watcher 共用)
 pub fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
-    meta.modified()
+    meta.modified().ok().and_then(system_time_ms).unwrap_or(0)
+}
+
+/// 文件创建时间 → epoch ms;平台或文件系统不记的给 None
+pub fn created_ms(meta: &std::fs::Metadata) -> Option<i64> {
+    meta.created().ok().and_then(system_time_ms)
+}
+
+fn system_time_ms(t: std::time::SystemTime) -> Option<i64> {
+    t.duration_since(std::time::UNIX_EPOCH)
         .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 /// cwd → 项目显示名(路径末段;空/异常 = "Unknown project")
@@ -1148,6 +1163,9 @@ pub fn is_injected_user_content(text: &str) -> bool {
         "## Referenced ChatGPT conversation",
         // Codex 把 AGENTS.md 作为 user 消息注入
         "# AGENTS.md instructions",
+        // Claude Code 的后台任务(子代理、后台命令)结束时以 user 行注入的通知,不是人打的字;
+        // 不认它的话它会当成提问进 Insights、给分支会话起出 "b69tgbuwc toolu_…" 这种标题
+        "<task-notification",
         // Codex 的 subagent / 分支线程:父会话的整段 transcript 被打包成
         // 一条 role=user 消息喂进来,里面含父会话的 assistant 输出。不认它
         // 的话,父会话里 AI 说的话会显示成这个会话里用户发的
@@ -1210,6 +1228,17 @@ pub fn make_preview(input: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Claude Code 后台任务结束的通知是注入内容,不是提问;正文里提到这个词的照算人话
+    #[test]
+    fn task_notifications_are_injected_content() {
+        assert!(is_injected_user_content(
+            "<task-notification>\n<task-id>b69tgbuwc</task-id>\n<status>completed</status>"
+        ));
+        assert!(!is_injected_user_content(
+            "为什么 <task-notification> 会被当成提问?"
+        ));
+    }
 
     #[test]
     fn jsonl_lines_stop_on_a_persistent_read_error() {

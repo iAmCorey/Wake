@@ -64,6 +64,14 @@ pub trait AgentAdapter: Send + Sync {
     fn file_ref(&self, path: &Path) -> Option<SessionFileRef> {
         parse_utils::default_file_ref(self.agent(), path)
     }
+    /// 这份会话文件出现或消失时,还有哪些文件的引用(`file_ref` 的 mtime / size)跟着变——那些
+    /// 文件没动,watcher 收不到它们的事件。默认没有;Claude 分支的引用数着同目录更早的同根
+    /// 文件,原件被删、被放回,同目录的分支要重解析(展开 / 折叠复制来的历史)。watcher 对新
+    /// 出现与消失的路径各问一次,只把引用真变了的交给增量收编;全量扫描本来就逐个重比引用,
+    /// 用不着它。远程装饰器必须转发
+    fn ref_dependents(&self, _path: &Path) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
     /// 快路径:不解析文件直接给出 meta(Codex 走 state DB)。None = 无快路径
     fn quick_meta(
         &self,
@@ -230,6 +238,13 @@ pub trait AgentAdapter: Send + Sync {
     /// 胜出文件"——落选的旧副本里过期的关系不采纳,parent 归别的 location 时边也不丢。
     /// 远程装饰器必须转发
     fn parent_links_in_child(&self) -> bool {
+        false
+    }
+    /// 本家的子会话是不是**分支**——从父会话分出去、自己完整的一段对话(Claude Code 的
+    /// fork),而不是父会话的一部分(子代理、子任务)。是的话删父会话不带上它们:详情页
+    /// 删除只删父会话本身,Clean Up 里分支自成一棵清理树;父会话没了,分支变回顶层会话、
+    /// 露出完整历史。默认 false(随父会话一起删)。远程装饰器必须转发
+    fn children_outlive_parent(&self) -> bool {
         false
     }
     /// 本家会话在**别家**目录里的替身。外壳产品(Craft Agents)跑的是别家的引擎,
@@ -568,6 +583,13 @@ pub fn adapter_for<'a>(
     file_path: &str,
 ) -> Option<&'a dyn AgentAdapter> {
     adapter_ix_for(adapters, agent, file_path).map(|ix| adapters[ix].as_ref())
+}
+
+/// 这条会话所在的家,子会话是不是各自完整的对话(`AgentAdapter::children_outlive_parent`):
+/// 是的话删除与 Clean Up 都不带上它们。详情页删除问根会话、Clean Up 载入索引时问每条子
+/// 会话——关系只连同家会话,两种问法是同一个答案
+pub fn children_outlive_parent(adapters: &[Box<dyn AgentAdapter>], meta: &SessionMeta) -> bool {
+    adapter_for(adapters, meta.agent, &meta.file_path).is_some_and(|a| a.children_outlive_parent())
 }
 
 /// 从解析后的消息派生 FTS 单元(text + tool 名称/输入摘要)。agent 对 Wake 自己的

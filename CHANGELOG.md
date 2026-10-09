@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+- Fix: Search results show the text around each match, with every search term highlighted, instead of a dozen characters
+- Fix: A session you delete in Wake shows up again when you put its file back from the Trash; sessions that live in an agent's own database are now hidden from Wake instead of claiming to go to the Trash
+- Fix: A failed search, star or pin change, or a list that stops loading now says so instead of failing silently
+- Fix: Claude Code sessions branched from an earlier conversation no longer repeat that conversation: the copied part is folded away, the branch is listed under the session it came from, and its title, token count and start time come from what was said after the branch. When the original is deleted, in Wake or by Claude Code's own cleanup, its branches stay and show the whole conversation. Existing indexes are re-read once after upgrading
+- Fix: The notices Claude Code adds when a background task or sub-agent finishes are no longer shown or counted as prompts you typed
+- Update: Wake's search index stays compact: a refresh no longer rewrites conversations that haven't changed, and the index is compacted after refreshes, so searches are faster and it takes far less disk space (one index went from 661 MB to about 160 MB)
+
 ## [0.8.8] — 2026-10-09
 
 - Fix: Grok Build sessions closed before the first message no longer show up as empty Untitled sessions (#55, thanks @yangmingyuan380)

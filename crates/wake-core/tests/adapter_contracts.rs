@@ -510,6 +510,83 @@ fn claude_parse_contract() {
     assert_eq!(s2.meta.message_count, 1);
 }
 
+/// Claude Code 的分支会话(开头原样复制了原对话的一段):复制来的一段折成一条 Meta、分支
+/// 挂到原件下;标题、token、创建时间只算分支自己的行;自定义标题照抄原件的不当标题用。
+/// 列表与 file_ref 的引用都把"更早的同根文件有几份"计进 size,原件没了引用随之变化、
+/// 分支重解析后露出完整历史。在私有临时目录里搭(共用的假 HOME 只读)
+#[test]
+fn claude_branches_fold_the_copied_history_and_nest_under_the_original() {
+    let tmp = tempfile::tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let (dir, a, b) = common::stage_claude_branch(&projects);
+    let adapter = ClaudeAdapter::new().with_custom_root(projects.clone());
+    let path_a = dir.join(format!("{a}.jsonl"));
+    let path_b = dir.join(format!("{b}.jsonl"));
+    let size = |p: &Path| fs::metadata(p).unwrap().len() as i64;
+
+    let listed = adapter.list_session_files().unwrap();
+    let listed_ref = |id: &str| listed.iter().find(|r| r.native_id == id).unwrap().clone();
+    let (ref_a, ref_b) = (listed_ref(&a), listed_ref(&b));
+    assert_eq!(ref_a.size, size(&path_a), "原件之前没有同根文件");
+    assert_eq!(ref_b.size, size(&path_b) + 1, "分支之前有一份同根文件");
+    let watched = adapter.file_ref(&path_b).unwrap();
+    assert_eq!(
+        (watched.mtime_ms, watched.size),
+        (ref_b.mtime_ms, ref_b.size),
+        "watcher 的引用要与列表一致"
+    );
+
+    // 原件不受影响
+    let sa = adapter.parse_session(&ref_a).unwrap();
+    assert_eq!(sa.meta.title, "修复登录超时");
+    assert_eq!(sa.meta.message_count, 4);
+    assert_eq!(sa.meta.tokens_used, Some(350));
+
+    // 分支:复制来的两条折成一条 Meta,自己的一问一答从 seq 1 起
+    let sb = adapter.parse_session(&ref_b).unwrap();
+    let tb = adapter.parse_transcript(&ref_b).unwrap();
+    assert_eq!(
+        roles_kinds(&tb.mainline),
+        vec![
+            (Role::System, MessageKind::Meta),
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+        ]
+    );
+    assert!(tb.mainline[0]
+        .text
+        .contains("2 messages inherited from the parent session"));
+    assert_eq!(tb.mainline[1].text, "换个思路:登录改成异步队列");
+    assert_eq!(
+        sb.units.iter().map(|u| u.seq).collect::<Vec<_>>(),
+        vec![1, 2],
+        "索引的 seq 与详情页一致,复制来的那段不进索引"
+    );
+    assert_eq!(sb.meta.message_count, 2);
+    assert_eq!(sb.meta.title, "换个思路:登录改成异步队列", "照抄的标题不用");
+    assert_eq!(sb.meta.tokens_used, Some(340), "复制来的那次调用不重复计");
+    assert_eq!(sb.meta.created_at, ms("2026-09-02T09:00:10Z"));
+
+    assert_eq!(
+        adapter.parent_links(),
+        Some(vec![(
+            format!("claude-code:{b}"),
+            format!("claude-code:{a}")
+        )])
+    );
+
+    // 原件被删(Claude 的 cleanupPeriodDays):引用变了,分支露出完整历史、自己也不再是子会话
+    fs::remove_file(&path_a).unwrap();
+    let listed = adapter.list_session_files().unwrap();
+    let ref_b = listed.iter().find(|r| r.native_id == b).unwrap().clone();
+    assert_eq!(ref_b.size, size(&path_b));
+    let sb = adapter.parse_session(&ref_b).unwrap();
+    assert_eq!(sb.meta.message_count, 4);
+    assert_eq!(sb.meta.title, "修复登录超时");
+    assert_eq!(sb.meta.tokens_used, Some(460));
+    assert_eq!(adapter.parent_links(), Some(Vec::new()));
+}
+
 #[test]
 fn codex_parse_contract() {
     setup();

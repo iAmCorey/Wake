@@ -205,12 +205,15 @@ macro_rules! trash_copy {
                 ". Space is freed after emptying it."
             ))
         }
-        /// 删除确认框正文首句
+        /// 删除确认框正文(下面接着是文件路径)。找回的方式要说准:从废纸篓放回原处,
+        /// 扫描认出原样回来的文件就重新列出(`Store::release_put_back`)
         pub fn trash_confirm_body() -> &'static str {
             crate::i18n::t(concat!(
-                "The session file will be moved to ",
+                "This file will be moved to ",
                 $body,
-                ". You can restore it anytime:"
+                ". Put it back from ",
+                $body,
+                " and the session shows up again."
             ))
         }
     };

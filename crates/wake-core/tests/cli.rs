@@ -584,7 +584,7 @@ fn refresh_brings_an_existing_index_up_to_date() {
     let path = db.to_str().unwrap();
     Store::open(&db)
         .unwrap()
-        .remove_session(CLAUDE_KEY, false)
+        .remove_session(CLAUDE_KEY)
         .unwrap();
     let (_, _, code) = cli_raw(&["--db", path, "show", CLAUDE_KEY, "--messages", "1"]);
     assert_eq!(code, Some(1), "抠掉的会话按 key 该是读不出来的");

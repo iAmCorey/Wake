@@ -4,11 +4,13 @@
 
 mod common;
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Result};
 use serde_json::json;
+use wake_core::adapters::claude::ClaudeAdapter;
 use wake_core::adapters::codex::CodexAdapter;
 use wake_core::adapters::AgentAdapter;
 use wake_core::db::Store;
@@ -139,6 +141,77 @@ fn codex_spawned_subagents_nest_under_their_parent() {
             .copied(),
         Some(1)
     );
+}
+
+/// Claude Code 分支端到端:全量扫描后分支挂在原件下、顶层只列原件;两份共有的那一轮只在
+/// 原件里搜得到,分支自己的话在分支里;原件删掉后分支变回顶层、拿回完整历史
+#[test]
+fn claude_branches_nest_under_their_original_and_outlive_it() {
+    let home = tempfile::tempdir().unwrap();
+    let projects = home.path().join("projects");
+    let (project, a, b) = common::stage_claude_branch(&projects);
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    let adapters: Vec<Box<dyn AgentAdapter>> =
+        vec![ClaudeAdapter::new().with_custom_root(projects)];
+    run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+
+    let (key_a, key_b) = (format!("claude-code:{a}"), format!("claude-code:{b}"));
+    assert_eq!(
+        store.parent_key_of(&key_b).unwrap().as_deref(),
+        Some(key_a.as_str())
+    );
+    let filter = SessionFilter {
+        roots_only: true,
+        limit: 10,
+        ..Default::default()
+    };
+    let (roots, total) = store.list_sessions(&filter).unwrap();
+    assert_eq!(total, 1, "分支不进顶层列表");
+    assert_eq!(roots[0].key, key_a);
+
+    let keys = |q: &str| -> std::collections::BTreeSet<String> {
+        let (hits, _) = store.search(q, &[], None, 10).unwrap();
+        hits.into_iter().map(|h| h.session.key).collect()
+    };
+    assert_eq!(
+        keys("连接池耗尽"),
+        [key_a.clone()].into(),
+        "共有的一轮只命中一次"
+    );
+    assert_eq!(keys("前端轮询结果"), [key_b.clone()].into());
+    // 长驻的 wake-mcp 一直拿着同一份转录缓存:分支文件没动,原件一没就得换成完整历史
+    let cache = TranscriptCache::default();
+    let read_b = || {
+        tools::invoke(
+            store.as_ref(),
+            &adapters,
+            &cache,
+            tools::GET_SESSION,
+            &json!({ "key": key_b }),
+        )
+        .unwrap()
+    };
+    assert!(
+        !read_b().contains("连接池耗尽"),
+        "原件在时复制来的那一轮折叠掉"
+    );
+
+    // 在 Wake 里删掉原件(文件移走 + 墓碑),分支不跟着删:增量扫描后它变回顶层会话,
+    // 复制来的那一轮也回到它自己名下
+    std::fs::remove_file(project.join(format!("{a}.jsonl"))).unwrap();
+    store
+        .remove_trashed_sessions(&[key_a], &HashMap::new())
+        .unwrap();
+    assert!(
+        read_b().contains("连接池耗尽"),
+        "转录缓存还在交折叠过的旧版本"
+    );
+    run_scan(&adapters, &store, &Recorder::new(), false).unwrap();
+    assert_eq!(store.parent_key_of(&key_b).unwrap(), None);
+    let (roots, total) = store.list_sessions(&filter).unwrap();
+    assert_eq!((total, roots[0].key.as_str()), (1, key_b.as_str()));
+    assert_eq!(keys("连接池耗尽"), [key_b.clone()].into());
 }
 
 #[test]
@@ -1195,12 +1268,86 @@ fn tombstoned_session_does_not_resurrect_on_rescan() {
         "首扫应写入"
     );
 
-    store.remove_session("codex:ghost", true).unwrap();
+    store
+        .remove_trashed_sessions(&["codex:ghost".to_string()], &HashMap::new())
+        .unwrap();
     run_scan(&adapters, &store, &rec, true).unwrap();
     assert!(
         store.get_session("codex:ghost").unwrap().is_none(),
         "tombstoned 会话重扫后复活 = 不变量 3 破坏"
     );
+}
+
+/// 单条删除把文件移进废纸篓后:文件不在、或同一路径冒出另一份内容(agent 重新写出)→
+/// 照旧压着;用户原样放回(文件本身的大小与修改时间对得上,`put_back_fingerprint`)→
+/// 全量与增量两条路都撤掉墓碑、会话回来——确认框说"放回原处就会重新出现"靠的就是这个。
+/// 只在 Wake 里隐藏的库存型会话(没记指纹)永远不会被当成放回。比的是文件本身而不是
+/// 索引里的变更戳:seed 的引用戳与磁盘上的文件毫无关系,照样认得出
+#[test]
+fn put_back_from_trash_brings_a_deleted_session_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    let rec = Recorder::new();
+    let file = dir.path().join("a.jsonl");
+    let trash = dir.path().join("trashed-a.jsonl");
+    std::fs::write(&file, "{\"the original\": 1}\n").unwrap();
+    let path = file.to_string_lossy().to_string();
+    let roster = || -> Vec<Box<dyn AgentAdapter>> {
+        vec![Box::new(seed(
+            AgentId::Codex,
+            &dir.path().to_string_lossy(),
+            &path,
+            "a",
+            10,
+        ))]
+    };
+    let present = |store: &Store| store.get_session("codex:a").unwrap().is_some();
+    // 删除:先记指纹,再"移进废纸篓"(改名走开,与真废纸篓一样保留修改时间)
+    let delete = |store: &Store| {
+        let print = wake_core::db::put_back_fingerprint(&file).expect("fingerprint");
+        std::fs::rename(&file, &trash).unwrap();
+        store
+            .remove_trashed_sessions(
+                &["codex:a".to_string()],
+                &HashMap::from([(path.clone(), print)]),
+            )
+            .unwrap();
+    };
+    let put_back = || std::fs::rename(&trash, &file).unwrap();
+
+    run_scan(&roster(), &store, &rec, true).unwrap();
+    assert!(present(&store));
+
+    // 全量路径
+    delete(&store);
+    run_scan(&roster(), &store, &rec, true).unwrap();
+    assert!(!present(&store), "文件还在废纸篓里");
+    std::fs::write(&file, "{\"rewritten by the agent\": 2}\n").unwrap();
+    run_scan(&roster(), &store, &rec, true).unwrap();
+    assert!(!present(&store), "同一路径的另一份文件不得解开删除");
+    std::fs::remove_file(&file).unwrap();
+    put_back();
+    run_scan(&roster(), &store, &rec, true).unwrap();
+    assert!(present(&store), "原样放回的文件要重新入库");
+
+    // 增量路径(watcher 收到放回事件)
+    delete(&store);
+    put_back();
+    scan_files(&roster(), &store, &rec, vec![roster_ref(&roster())]);
+    assert!(present(&store), "watcher 收到放回事件也要认出来");
+
+    // 只隐藏:没记指纹,文件原样在也不放行
+    store
+        .remove_trashed_sessions(&["codex:a".to_string()], &HashMap::new())
+        .unwrap();
+    run_scan(&roster(), &store, &rec, true).unwrap();
+    scan_files(&roster(), &store, &rec, vec![roster_ref(&roster())]);
+    assert!(!present(&store), "只在 Wake 里隐藏的会话不得自己回来");
+}
+
+/// 单实例 seed roster 枚举出的那条引用(watcher 增量直接拿它喂 scan_files)
+fn roster_ref(roster: &[Box<dyn AgentAdapter>]) -> SessionFileRef {
+    roster[0].list_session_files().unwrap().remove(0)
 }
 
 /// 同 agent 双根下的同 ID 会话:mtime 新者胜且跨轮稳定。旧行为是"后写者胜",
@@ -2032,7 +2179,9 @@ fn tombstone_blocks_all_copies() {
     assert!(store.get_session("codex:dup").unwrap().is_some());
 
     // UI 删除:trash 胜者文件 + 墓碑(key 一并入墓)
-    store.remove_session("codex:dup", true).unwrap();
+    store
+        .remove_trashed_sessions(&["codex:dup".to_string()], &HashMap::new())
+        .unwrap();
     run_scan(&adapters, &store, &rec, true).unwrap();
     assert!(
         store.get_session("codex:dup").unwrap().is_none(),
@@ -2062,7 +2211,9 @@ fn quick_meta_respects_key_tombstone() {
         "quick 改名 key 应入库"
     );
 
-    store.remove_session("codex:thread-1", true).unwrap();
+    store
+        .remove_trashed_sessions(&["codex:thread-1".to_string()], &HashMap::new())
+        .unwrap();
     run_scan(&adapters, &store, &rec, true).unwrap();
     assert!(
         store.get_session("codex:thread-1").unwrap().is_none(),

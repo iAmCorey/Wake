@@ -1,6 +1,7 @@
 //! Store 写入/搜索/删除语义的往返测试(临时库,不碰真实索引)。
 //! 覆盖 CLAUDE.md 不变量 3:tombstone 防复活、user_data 独立表重建不丢。
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use wake_core::db::{self, IndexLock, Ownership, Store, Wait};
@@ -76,6 +77,215 @@ fn search_roundtrip_hits_correct_seq() {
     assert_eq!(hits.len(), 1);
 }
 
+/// messages_fts 的段数据行数:FTS 每写一次都长新段,原样重写与压缩看的都是它
+fn fts_data_rows(raw: &rusqlite::Connection) -> i64 {
+    raw.query_row("SELECT count(*) FROM messages_fts_data", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// FTS 压缩:会话反复整段重写攒下的段与删除标记被合并掉,搜索结果一字不变;压过之后
+/// 一天内不再到期;`FTS_FORMAT` 换代重开库会让它重新到期(换代的全量重写收尾必须压)
+#[test]
+fn fts_compaction_drops_rewrite_garbage_and_keeps_results() {
+    let (dir, store) = temp_store();
+    let path = dir.path().join("test.db");
+    let m = meta("claude-code:compact", "压缩测试");
+    // 每轮每条都改(轮次写进正文):尾部比对从第一条起就不同、整段换新,FTS 攒下旧段与删除标记
+    for round in 0..40 {
+        let units: Vec<IndexUnit> = (0..30)
+            .map(|i| {
+                let role = if i % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                };
+                unit(
+                    i,
+                    role,
+                    &format!("第 {round} 轮第 {i} 条:二维码扫描 useEffect( 挂载"),
+                )
+            })
+            .collect();
+        store
+            .write_session(&m, m.updated_at + round, &units)
+            .unwrap();
+    }
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    let fts_rows = || fts_data_rows(&raw);
+    let hits = |q: &str| -> Vec<(String, i64, String)> {
+        let (hits, _) = store.search(q, &[], None, 100).unwrap();
+        hits.into_iter()
+            .map(|h| (h.session.key, h.seq, h.snippet))
+            .collect()
+    };
+    let before = (hits("二维码"), hits("useEffect("), hits("第 39 轮第 7 条"));
+    let rows_before = fts_rows();
+
+    let now = db::now_ms();
+    assert!(store.fts_compaction_due(now), "从没压过就算到期");
+    store.compact_fts(now).unwrap();
+    assert!(
+        fts_rows() < rows_before / 2,
+        "合并后段数据应大幅减少:{rows_before} → {}",
+        fts_rows()
+    );
+    assert_eq!(
+        (hits("二维码"), hits("useEffect("), hits("第 39 轮第 7 条")),
+        before,
+        "压缩不得改变任何搜索结果"
+    );
+    assert!(
+        !store.fts_compaction_due(now + 3_600_000),
+        "一小时后还不到期"
+    );
+    assert!(store.fts_compaction_due(now + 25 * 3_600_000), "一天后到期");
+
+    // 换代:库里记的派生版本对不上 → 重开时挂 fts_reindex,压缩记录一并清掉
+    raw.execute(
+        "UPDATE schema_meta SET value = '0' WHERE key = 'fts_format'",
+        [],
+    )
+    .unwrap();
+    drop(store);
+    let reopened = Store::open(&path).unwrap();
+    assert!(reopened.needs_fts_reindex());
+    assert!(
+        reopened.fts_compaction_due(now + 60_000),
+        "换代的全量重写收尾必须再压一次"
+    );
+}
+
+/// 关系没变就不写(每批 watcher 事件都会对账一遍);子会话重解析后自己的项目盖回来了,
+/// 关系虽然没变也要再写一遍,把父会话的项目铺回去
+#[test]
+fn unchanged_parent_links_skip_the_write_but_inherited_projects_are_restored() {
+    let (_dir, store) = temp_store();
+    let parent = meta("claude-code:orig", "原件");
+    let mut child = meta("claude-code:branch", "分支");
+    child.project_path = "/tmp/elsewhere".into();
+    child.project_name = "elsewhere".into();
+    child.file_path = "/tmp/fixtures/branch.jsonl".into();
+    store
+        .write_meta_only(&[(parent.clone(), 1), (child.clone(), 1)])
+        .unwrap();
+    let links = [(child.key.clone(), parent.key.clone())];
+    assert!(store
+        .replace_parent_links(AgentId::ClaudeCode, &links)
+        .unwrap());
+    assert_eq!(
+        store.get_session(&child.key).unwrap().unwrap().project_path,
+        parent.project_path,
+        "挂上去就继承父会话的项目"
+    );
+    assert!(
+        !store
+            .replace_parent_links(AgentId::ClaudeCode, &links)
+            .unwrap(),
+        "什么都没变"
+    );
+
+    // 子会话重解析:upsert 把它自己的项目写回来,关系列不动
+    store.write_meta_only(&[(child.clone(), 2)]).unwrap();
+    assert_eq!(
+        store.get_session(&child.key).unwrap().unwrap().project_path,
+        "/tmp/elsewhere"
+    );
+    store
+        .replace_parent_links(AgentId::ClaudeCode, &links)
+        .unwrap();
+    assert_eq!(
+        store.get_session(&child.key).unwrap().unwrap().project_path,
+        parent.project_path,
+        "关系没变也要把父会话的项目铺回去"
+    );
+    assert_eq!(
+        store.parent_key_of(&child.key).unwrap().as_deref(),
+        Some(parent.key.as_str())
+    );
+}
+
+/// 会话重写只动变了的尾部:原样重写不碰任何行(id 不变、FTS 不长新段),追加只插新行,
+/// 中间改了从那条起换掉,变短了删掉多出的——搜索结果始终与最后一次写入一致
+#[test]
+fn rewriting_a_session_only_touches_the_changed_tail() {
+    let (dir, store) = temp_store();
+    let m = meta("claude-code:tail", "尾部重写");
+    let raw = rusqlite::Connection::open(dir.path().join("test.db")).unwrap();
+    let ids = || -> Vec<i64> {
+        raw.prepare("SELECT id FROM messages WHERE session_key = 'claude-code:tail' ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let fts_rows = || fts_data_rows(&raw);
+    let found = |q: &str| -> Vec<i64> {
+        let (hits, _) = store.search(q, &[], None, 10).unwrap();
+        hits.into_iter().map(|h| h.seq).collect()
+    };
+    let a = unit(0, Role::User, "第一问:二维码扫描怎么做");
+    let b = unit(1, Role::Assistant, "第一答:用 useEffect( 挂载");
+    let c = unit(2, Role::User, "第二问:相机权限被拒");
+
+    store
+        .write_session(&m, 1, &[a.clone(), b.clone(), c.clone()])
+        .unwrap();
+    let first = ids();
+    let segments = fts_rows();
+
+    store
+        .write_session(&m, 2, &[a.clone(), b.clone(), c.clone()])
+        .unwrap();
+    assert_eq!(ids(), first, "原样重写不换行");
+    assert_eq!(fts_rows(), segments, "原样重写不给 FTS 添任何东西");
+
+    let d = unit(3, Role::Assistant, "第二答:引导去系统设置开权限");
+    store
+        .write_session(&m, 3, &[a.clone(), b.clone(), c.clone(), d.clone()])
+        .unwrap();
+    let appended = ids();
+    assert_eq!(appended[..3], first[..], "追加不动已有的行");
+    assert!(appended[3] > first[2]);
+    assert_eq!(found("系统设置"), vec![3]);
+
+    let b2 = unit(1, Role::Assistant, "第一答:改用 zxing 库解码");
+    store
+        .write_session(&m, 4, &[a.clone(), b2, c.clone(), d.clone()])
+        .unwrap();
+    assert_eq!(ids()[0], first[0], "改动之前的行留着");
+    assert!(found("useEffect(").is_empty(), "被换掉的旧文本搜不到");
+    assert_eq!(found("zxing"), vec![1]);
+    assert_eq!(found("系统设置"), vec![3], "改动之后的行换成新行,内容照旧");
+
+    store.write_session(&m, 5, &[a]).unwrap();
+    assert_eq!(ids(), vec![first[0]], "变短了删掉多出的");
+    assert!(found("相机权限").is_empty());
+}
+
+/// 老库的墓碑表没有指纹列:开库时补上,已有的墓碑指纹是 NULL、永远不会被当成放回
+#[test]
+fn old_tombstones_are_never_mistaken_for_a_put_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.db");
+    {
+        let conn = create_legacy_db(&path);
+        conn.execute_batch(
+            "CREATE TABLE tombstones (file_path TEXT PRIMARY KEY, key TEXT, deleted_at INTEGER);
+             INSERT INTO tombstones VALUES ('/tmp/old.jsonl', 'claude-code:old', 1);",
+        )
+        .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    assert!(store.is_tombstoned("/tmp/old.jsonl").unwrap());
+    assert!(!store.release_put_back("/tmp/old.jsonl", (0, 0)).unwrap());
+    assert!(store.is_tombstoned("/tmp/old.jsonl").unwrap());
+    drop(store);
+    // 再开一次:列已在,不得重复 ALTER(重复加列会让开库失败、被当坏库重建)
+    let store = Store::open(&path).unwrap();
+    assert!(store.is_key_tombstoned("claude-code:old"));
+}
+
 #[test]
 fn tombstone_primitives() {
     let (_dir, store) = temp_store();
@@ -83,13 +293,15 @@ fn tombstone_primitives() {
     store.write_session(&m, m.updated_at, &[]).unwrap();
     assert!(store.get_session("codex:s2").unwrap().is_some());
 
-    // remove_session(tombstone=true) 后按 file_path 记墓碑。
+    // remove_trashed_sessions 后按 file_path 记墓碑。
     // 注意分层:write_meta_only 是纯写入原语、不查墓碑——防复活由
     // scanner 两条路径先过 is_tombstoned 保证(端到端见 scanner_finale.rs)
-    store.remove_session("codex:s2", true).unwrap();
+    store
+        .remove_trashed_sessions(&["codex:s2".to_string()], &HashMap::new())
+        .unwrap();
     assert!(store.get_session("codex:s2").unwrap().is_none());
-    assert!(store.is_tombstoned(&m.file_path));
-    assert!(!store.is_tombstoned("/tmp/other.jsonl"));
+    assert!(store.is_tombstoned(&m.file_path).unwrap());
+    assert!(!store.is_tombstoned("/tmp/other.jsonl").unwrap());
 }
 
 #[test]
@@ -105,7 +317,9 @@ fn user_data_survives_rebuild() {
     store
         .write_session(&removed, removed.updated_at, &[])
         .unwrap();
-    store.remove_session("claude-code:removed", true).unwrap();
+    store
+        .remove_trashed_sessions(&["claude-code:removed".to_string()], &HashMap::new())
+        .unwrap();
     store.add_custom_root("codex", "/tmp/codex-copy").unwrap();
     store.add_removed_default("gemini").unwrap();
     store
@@ -406,14 +620,14 @@ fn removing_a_session_tree_writes_every_tombstone_atomically() {
     assert_eq!(store.all_descendants(&parent.key).unwrap().len(), 1);
 
     store
-        .remove_sessions(&[parent.key.clone(), child.key.clone()], true)
+        .remove_trashed_sessions(&[parent.key.clone(), child.key.clone()], &HashMap::new())
         .unwrap();
     assert!(store.get_session(&parent.key).unwrap().is_none());
     assert!(store.get_session(&child.key).unwrap().is_none());
     assert!(store.is_key_tombstoned(&parent.key));
     assert!(store.is_key_tombstoned(&child.key));
-    assert!(store.is_tombstoned(&parent.file_path));
-    assert!(store.is_tombstoned(&child.file_path));
+    assert!(store.is_tombstoned(&parent.file_path).unwrap());
+    assert!(store.is_tombstoned(&child.file_path).unwrap());
 }
 
 /// 最老的 sessions schema(无 parent_key、无 host):迁移类测试共用,
@@ -724,9 +938,7 @@ fn wake_lookups_follow_the_session_and_reach_insights() {
         tally("claude-code", 0, 1),
         "重解析整体替换旧记录"
     );
-    store
-        .remove_sessions(&["claude-code:a".to_string()], false)
-        .unwrap();
+    store.remove_session("claude-code:a").unwrap();
     assert_eq!(tallies(), vec![tally("codex", 0, 1)], "删会话一并删记录");
 }
 
@@ -1156,7 +1368,7 @@ fn titles_are_searchable_and_tracked_with_the_session() {
     );
 
     // 删除与重建都带走标题索引
-    store.remove_session(&m.key, false).unwrap();
+    store.remove_session(&m.key).unwrap();
     assert!(store
         .search("数据库迁移", &[], None, 10)
         .unwrap()

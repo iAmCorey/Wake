@@ -459,9 +459,10 @@ pub(crate) fn validate_trash_path(path: &Path) -> anyhow::Result<()> {
 
 /// 删除会话文件到系统回收站(可恢复)。虚拟路径 `<db>#<id>` 与已消失的
 /// 文件在此过滤(不变量 3:SQLite 型只 tombstone),平台原语只收真实路径。
+/// 返回真被移进回收站的那些路径(一个都没有 = 全是库存型会话,只是从 Wake 隐藏)。
 /// 部分失败语义:平台实现可能删到一半报错(macOS 逐文件、Linux/Windows
 /// 批量),调用方按"整批可疑"处理即可——已进回收站的文件可恢复,无害。
-pub fn trash_paths(paths: &[String]) -> anyhow::Result<()> {
+pub fn trash_paths(paths: &[String]) -> anyhow::Result<Vec<String>> {
     let existing: Vec<&str> = paths
         .iter()
         .map(|s| s.as_str())
@@ -472,10 +473,10 @@ pub fn trash_paths(paths: &[String]) -> anyhow::Result<()> {
     for path in &existing {
         validate_trash_path(Path::new(path))?;
     }
-    if existing.is_empty() {
-        return Ok(());
+    if !existing.is_empty() {
+        platform::trash_existing(&existing)?;
     }
-    platform::trash_existing(&existing)
+    Ok(existing.into_iter().map(String::from).collect())
 }
 
 /// Open the system trash for the user to inspect the reviewed batch. Never

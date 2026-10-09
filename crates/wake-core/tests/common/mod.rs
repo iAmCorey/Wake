@@ -1259,3 +1259,119 @@ pub fn lock_as(db: &Path, kind: &str) -> IndexLock {
         }
     }
 }
+
+/// Claude Code 的分支会话:原件 A 问了两轮;B 是从 A 第一轮之后分出来的——Claude 把 A 到
+/// 分叉点为止的行**原样**复制进 B 的开头(uuid、message.id、时间戳都不变,只改 sessionId),
+/// 头几行(custom-title 照抄 A 的标题、queue-operation)是复制那一刻写的,时间晚于 A 的开头。
+/// 之后 B 问了自己的一轮。返回 (项目目录, A 的 id, B 的 id)。adapter_contracts 与
+/// scanner_finale 共用
+pub fn stage_claude_branch(projects: &Path) -> (PathBuf, String, String) {
+    let dir = projects.join("-Users-tester-Github-branchfx");
+    fs::create_dir_all(&dir).unwrap();
+    let a = "c1a0de00-0000-4000-8000-0000000000a1".to_string();
+    let b = "c1a0de00-0000-4000-8000-0000000000b2".to_string();
+    let row = |session: &str,
+               typ: &str,
+               uuid: &str,
+               parent: Option<&str>,
+               ts: &str,
+               message: serde_json::Value| {
+        serde_json::json!({
+            "parentUuid": parent,
+            "isSidechain": false,
+            "cwd": "/Users/tester/Github/branchfx",
+            "sessionId": session,
+            "type": typ,
+            "message": message,
+            "uuid": uuid,
+            "timestamp": ts,
+        })
+    };
+    let user = |text: &str| serde_json::json!({ "role": "user", "content": text });
+    let reply = |id: &str, text: &str, input: i64, output: i64| {
+        serde_json::json!({
+            "id": id,
+            "role": "assistant",
+            "model": "claude-opus-5-5",
+            "content": [{ "type": "text", "text": text }],
+            "usage": { "input_tokens": input, "output_tokens": output },
+        })
+    };
+    let header = |session: &str, ts: &str| {
+        vec![
+            serde_json::json!({ "type": "custom-title", "customTitle": "修复登录超时", "sessionId": session }),
+            serde_json::json!({ "type": "queue-operation", "operation": "enqueue", "timestamp": ts, "sessionId": session }),
+        ]
+    };
+    // 两份共有的第一轮:B 里的是原样复制(只有 sessionId 不同)
+    let shared = |session: &str| {
+        vec![
+            row(
+                session,
+                "user",
+                "c1a0de00-1111-4000-8000-000000000001",
+                None,
+                "2026-09-01T08:00:01.000Z",
+                user("登录接口偶发超时,先看看日志"),
+            ),
+            row(
+                session,
+                "assistant",
+                "c1a0de00-1111-4000-8000-000000000002",
+                Some("c1a0de00-1111-4000-8000-000000000001"),
+                "2026-09-01T08:00:05.000Z",
+                reply(
+                    "msg_shared_01",
+                    "日志里连接池耗尽了,把上限从 10 调到 50。",
+                    100,
+                    20,
+                ),
+            ),
+        ]
+    };
+    let mut lines_a = header(&a, "2026-09-01T08:00:00.000Z");
+    lines_a.extend(shared(&a));
+    lines_a.push(row(
+        &a,
+        "user",
+        "c1a0de00-1111-4000-8000-000000000003",
+        Some("c1a0de00-1111-4000-8000-000000000002"),
+        "2026-09-01T08:10:00.000Z",
+        user("调了,还是超时"),
+    ));
+    lines_a.push(row(
+        &a,
+        "assistant",
+        "c1a0de00-1111-4000-8000-000000000004",
+        Some("c1a0de00-1111-4000-8000-000000000003"),
+        "2026-09-01T08:10:05.000Z",
+        reply("msg_a_02", "那再加个指数退避的重试。", 200, 30),
+    ));
+
+    let mut lines_b = header(&b, "2026-09-02T09:00:00.000Z");
+    lines_b.extend(shared(&b));
+    lines_b.push(row(
+        &b,
+        "user",
+        "c1a0de00-2222-4000-8000-000000000003",
+        Some("c1a0de00-1111-4000-8000-000000000002"),
+        "2026-09-02T09:00:10.000Z",
+        user("换个思路:登录改成异步队列"),
+    ));
+    lines_b.push(row(
+        &b,
+        "assistant",
+        "c1a0de00-2222-4000-8000-000000000004",
+        Some("c1a0de00-2222-4000-8000-000000000003"),
+        "2026-09-02T09:00:15.000Z",
+        reply("msg_b_02", "好,登录请求进后台队列,前端轮询结果。", 300, 40),
+    ));
+
+    let write = |id: &str, lines: &[serde_json::Value]| {
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        fs::write(dir.join(format!("{id}.jsonl")), text).unwrap();
+    };
+    write(&a, &lines_a);
+    write(&b, &lines_b);
+    (dir, a, b)
+}

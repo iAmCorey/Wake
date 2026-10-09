@@ -1,8 +1,8 @@
 //! Local session cleanup: immutable review plans, conservative ownership checks,
 //! per-target Trash results and a durable journal. No source database writes.
 use crate::{
-    adapters::{adapter_for, AgentAdapter},
-    db::Store,
+    adapters::{adapter_for, children_outlive_parent, AgentAdapter},
+    db::{put_back_fingerprint, Store},
     models::*,
     services::terminal,
 };
@@ -423,6 +423,19 @@ struct CleanupPlan {
     targets: Vec<CleanupTarget>,
 }
 
+/// 清理用的会话索引。分支——所在的家声明子会话是自己完整的对话(`children_outlive_parent`,
+/// Claude Code 的 fork)——在这里就摘掉父会话:它自成一棵清理树,单独列、单独清,也不随父
+/// 会话一起清;子代理、子任务照旧是父会话树的一部分
+fn cleanup_index(store: &Store, adapters: &[Box<dyn AgentAdapter>]) -> Result<Vec<IndexedSession>> {
+    let mut index = store.cleanup_index()?;
+    for s in &mut index {
+        if !s.parent.is_empty() && children_outlive_parent(adapters, &s.meta) {
+            s.parent.clear();
+        }
+    }
+    Ok(index)
+}
+
 fn build_plan(
     root: &IndexedSession,
     index: &[IndexedSession],
@@ -545,7 +558,7 @@ fn inventory_candidate(
 }
 
 pub fn inventory(store: &Store, adapters: &[Box<dyn AgentAdapter>]) -> Result<CleanupInventory> {
-    let index = store.cleanup_index()?;
+    let index = cleanup_index(store, adapters)?;
     let prompt_counts = store.cleanup_prompt_counts()?;
     let ownership = ownership(&index, adapters);
     let mut result = CleanupInventory::default();
@@ -655,7 +668,7 @@ pub fn revalidate(
     adapters: &[Box<dyn AgentAdapter>],
     old: &CleanupCandidate,
 ) -> Result<()> {
-    let index = store.cleanup_index()?;
+    let index = cleanup_index(store, adapters)?;
     let root = index
         .iter()
         .find(|s| s.meta.key == old.root.key)
@@ -695,7 +708,7 @@ pub fn revalidate(
     for old in &new.targets {
         ensure!(target(&old.path)? == *old, "Source changed while checking");
     }
-    let index = store.cleanup_index()?;
+    let index = cleanup_index(store, adapters)?;
     let root = index
         .iter()
         .find(|s| s.meta.key == old.root.key)
@@ -807,6 +820,23 @@ pub fn retry_index_updates(store: &Store, batch: &mut CleanupBatch) -> Result<us
     }
     Ok(count)
 }
+/// 详情页的删除:移动**之前**先给每份会话文件记放回指纹(`put_back_fingerprint`),再把磁盘
+/// 目标移进废纸篓、出库并记墓碑(`Store::remove_trashed_sessions`)——用户从废纸篓放回原处,
+/// 扫描认出同一份文件就撤掉墓碑。返回 true = 一个文件都没移:会话只在别家自己的库里(虚拟
+/// 路径),Wake 只是不再列出它
+pub fn trash_sessions(store: &Store, sessions: &[SessionMeta], targets: &[String]) -> Result<bool> {
+    let prints: HashMap<String, (i64, i64)> = sessions
+        .iter()
+        .filter_map(|s| {
+            put_back_fingerprint(Path::new(&s.file_path)).map(|print| (s.file_path.clone(), print))
+        })
+        .collect();
+    let moved = terminal::trash_paths(targets)?;
+    let keys: Vec<String> = sessions.iter().map(|s| s.key.clone()).collect();
+    store.remove_trashed_sessions(&keys, &prints)?;
+    Ok(moved.is_empty())
+}
+
 pub fn execute(
     store: &Store,
     adapters: &[Box<dyn AgentAdapter>],
@@ -815,7 +845,7 @@ pub fn execute(
     progress: impl Fn(usize),
 ) -> Result<()> {
     execute_with(store, adapters, batch, cancel, progress, |path| {
-        terminal::trash_paths(&[path.to_string_lossy().into_owned()])
+        terminal::trash_paths(&[path.to_string_lossy().into_owned()]).map(drop)
     })
 }
 fn execute_with(
@@ -1051,6 +1081,8 @@ mod tests {
     struct FilesAdapter {
         root: PathBuf,
         supported: bool,
+        /// 子会话是不是分支(`children_outlive_parent`)
+        branches: bool,
     }
     impl AgentAdapter for FilesAdapter {
         fn agent(&self) -> AgentId {
@@ -1063,6 +1095,7 @@ mod tests {
             Box::new(Self {
                 root,
                 supported: self.supported,
+                branches: self.branches,
             })
         }
         fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
@@ -1096,6 +1129,9 @@ mod tests {
         }
         fn cleanup_paths(&self, m: &SessionMeta) -> Option<Vec<String>> {
             self.supported.then(|| self.session_paths(m))
+        }
+        fn children_outlive_parent(&self) -> bool {
+            self.branches
         }
     }
     fn now() -> i64 {
@@ -1161,6 +1197,7 @@ mod tests {
         let adapters: Vec<Box<dyn AgentAdapter>> = vec![Box::new(FilesAdapter {
             root: root.clone(),
             supported: true,
+            branches: false,
         })];
         (temp, store, adapters, root)
     }
@@ -1182,6 +1219,43 @@ mod tests {
             )
             .unwrap();
         m
+    }
+    /// 分支(所在的家声明子会话是自己完整的对话)自成一棵清理树:原件的清理计划不带上它,
+    /// 它自己也是一个候选、过得了复核;默认(子代理一类)照旧随父会话
+    #[test]
+    fn branches_are_their_own_cleanup_trees() {
+        let (_temp, store, adapters, root) = setup();
+        let original = insert(&store, &root, "original", 100);
+        let branch = insert(&store, &root, "branch", 100);
+        store
+            .replace_parent_links(
+                AgentId::ClaudeCode,
+                &[(branch.key.clone(), original.key.clone())],
+            )
+            .unwrap();
+        let trees = |adapters: &[Box<dyn AgentAdapter>]| {
+            let mut trees: Vec<(String, usize)> = inventory(&store, adapters)
+                .unwrap()
+                .candidates
+                .iter()
+                .map(|c| (c.root.key.clone(), c.sessions.len()))
+                .collect();
+            trees.sort();
+            trees
+        };
+        assert_eq!(trees(&adapters), vec![(original.key.clone(), 2)]);
+        let branching: Vec<Box<dyn AgentAdapter>> = vec![Box::new(FilesAdapter {
+            root: root.clone(),
+            supported: true,
+            branches: true,
+        })];
+        assert_eq!(
+            trees(&branching),
+            vec![(branch.key.clone(), 1), (original.key.clone(), 1)]
+        );
+        for c in inventory(&store, &branching).unwrap().candidates {
+            revalidate(&store, &branching, &c).unwrap();
+        }
     }
     #[test]
     fn unavailable_entries_follow_date_source_and_tree_flag_filters() {
@@ -1712,7 +1786,7 @@ mod tests {
         let original = child.file_path.clone();
         child.file_path = root.join("a/child.jsonl").to_string_lossy().into_owned();
         fs::rename(original, &child.file_path).unwrap();
-        store.remove_session(&child.key, false).unwrap();
+        store.remove_session(&child.key).unwrap();
         store.write_session(&child, child.updated_at, &[]).unwrap();
         age(&root.join("a"));
         assert!(inventory(&store, &adapters)
@@ -1814,6 +1888,7 @@ mod tests {
         let unsupported: Vec<Box<dyn AgentAdapter>> = vec![Box::new(FilesAdapter {
             root: root.clone(),
             supported: false,
+            branches: false,
         })];
         assert!(inventory(&store, &unsupported)
             .unwrap()
@@ -1945,6 +2020,7 @@ mod tests {
         let adapters: Vec<Box<dyn AgentAdapter>> = vec![Box::new(FilesAdapter {
             root: root.clone(),
             supported: true,
+            branches: false,
         })];
         insert(&store, &root, "ordinary-path", 100);
         let inv = inventory(&store, &adapters).unwrap();
@@ -2037,6 +2113,7 @@ mod tests {
             inner: FilesAdapter {
                 root,
                 supported: true,
+                branches: false,
             },
             store: store.clone(),
             owner,
@@ -2104,14 +2181,14 @@ mod tests {
             |_| {},
             |p| {
                 fs::rename(p, &dest)?;
-                store.remove_session(&m.key, false)?;
+                store.remove_session(&m.key)?;
                 Ok(())
             },
         )
         .unwrap();
         assert!(batch.records[0].indexed);
         assert!(store.is_key_tombstoned(&m.key));
-        assert!(store.is_tombstoned(&m.file_path));
+        assert!(store.is_tombstoned(&m.file_path).unwrap());
         assert!(restore(&store, &adapters, &mut batch).is_err());
         fs::rename(dest, &m.file_path).unwrap();
         store
@@ -2175,7 +2252,7 @@ mod tests {
         fs::rename(dest, &m.file_path).unwrap();
         assert_eq!(restore(&store, &adapters, &mut batch).unwrap(), 1);
         assert!(!store.is_key_tombstoned(&m.key));
-        assert!(!store.is_tombstoned(&m.file_path));
+        assert!(!store.is_tombstoned(&m.file_path).unwrap());
         assert!(history(&store).unwrap()[0].records[0].restored);
     }
 

@@ -268,7 +268,7 @@ pub fn run_scan(
     events: &dyn ScanEvents,
     full: bool,
 ) -> Result<()> {
-    let _gate = SCAN_GATE
+    let gate = SCAN_GATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut fin = ScanFinale {
@@ -287,7 +287,58 @@ pub fn run_scan(
         fin.progress.error = Some(e.to_string());
     }
     fin.graceful = true;
+    // 终态先发、扫描门先放:索引维护是后台杂务,不该让刷新的转圈多转几秒,也不该让
+    // 维护期间按下的 ⌘R / 记忆刷新干等(合并分块进行,与写入照常交错)
+    drop(fin);
+    drop(gate);
+    if result.is_ok() {
+        maintain_index(store);
+    }
     result
+}
+
+/// 这条路径还压在墓碑下吗。用户从废纸篓放回的文件(磁盘上这份的指纹与删除前记下的对得上,
+/// 比较在 `Store::release_put_back` 里)当场撤掉墓碑放行,放回去的会话在下一轮扫描或 watcher
+/// 收到放回事件时就重新入库。压着墓碑的路径才去 stat。全量枚举与增量两处共用
+fn path_tombstoned(store: &Store, r: &SessionFileRef) -> bool {
+    match store.is_tombstoned(&r.file_path) {
+        Ok(false) => false,
+        Ok(true) => {
+            !crate::db::put_back_fingerprint(Path::new(&r.file_path)).is_some_and(|print| {
+                store
+                    .release_put_back(&r.file_path, print)
+                    .unwrap_or_else(|e| {
+                        eprintln!("[scanner] put-back release failed {}: {e:#}", r.file_path);
+                        false
+                    })
+            })
+        }
+        Err(e) => {
+            eprintln!("[scanner] tombstone check failed {}: {e:#}", r.file_path);
+            true
+        }
+    }
+}
+
+/// 扫描收尾的索引维护:到期才压缩 FTS(见 `Store::compact_fts`),压完有大块空闲再
+/// VACUUM。在扫描门外跑,自己一把门:前一次维护还没完就跳过,下一轮扫描照样到期再来。
+/// 失败只记日志——维护做不成不影响这一轮扫描的结果
+fn maintain_index(store: &Store) {
+    static MAINTENANCE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let Ok(_maintaining) = MAINTENANCE.try_lock() else {
+        return;
+    };
+    let now = crate::db::now_ms();
+    if !store.fts_compaction_due(now) {
+        return;
+    }
+    if let Err(e) = store.compact_fts(now) {
+        eprintln!("wake: compacting the search index failed: {e:#}");
+        return;
+    }
+    if let Err(e) = store.reclaim_free_pages() {
+        eprintln!("wake: reclaiming index space failed: {e:#}");
+    }
 }
 
 /// 只同步记忆、不碰会话:Memory 页的 Refresh 与 Settings → Memory locations 变更的
@@ -391,9 +442,7 @@ fn run_scan_inner(
             // 删除只 trash 了胜者文件,别的 location 里的副本不得复活它
             //(2026-08-24 Codex review P1)。key 按实例 host 构造(远程三段)
             // ——阶段 1 远程禁删故无远程墓碑,但格式先写对,放开时不欠债
-            .filter(|r| {
-                !store.is_tombstoned(&r.file_path) && !store.is_key_tombstoned(&key_of(ix, r))
-            })
+            .filter(|r| !path_tombstoned(store, r) && !store.is_key_tombstoned(&key_of(ix, r)))
             // 被外壳产品认领的替身(Craft 的 Claude 后端在 ~/.claude 落的那份)不索引:
             // 不在 seen_paths 里,库里若还有它的行,下面的删除检测一并清掉
             .filter(|r| !claimed.contains(&key_of(ix, r)))
@@ -447,7 +496,7 @@ fn run_scan_inner(
         for r in refs {
             if let Some((_, _, key)) = known.get(&r.file_path) {
                 if key.split(':').next() != Some(r.agent.as_str()) {
-                    let _ = store.remove_session(key, false);
+                    let _ = store.remove_session(key);
                     owner_changed.insert(r.file_path.clone());
                 }
             }
@@ -526,7 +575,7 @@ fn run_scan_inner(
     let mut pruned = false;
     for (path, (_, _, key)) in &known {
         if !seen_paths.contains(path) && !owner_of(path).is_some_and(|ix| frozen.contains(&ix)) {
-            let _ = store.remove_session(key, false);
+            let _ = store.remove_session(key);
             pruned = true;
         }
     }
@@ -1115,7 +1164,7 @@ pub fn scan_files(
     let mut by_adapter: std::collections::HashMap<usize, Vec<SessionFileRef>> =
         std::collections::HashMap::new();
     for r in refs {
-        if store.is_tombstoned(&r.file_path) {
+        if path_tombstoned(store, &r) {
             continue;
         }
         let Some(ix) = crate::adapters::adapter_ix_for(adapters, r.agent, &r.file_path) else {
@@ -1147,7 +1196,7 @@ pub fn scan_files(
                     // 写入撞 file_path UNIQUE,会话永远停在旧家(Codex review P1)
                     if let Ok(Some(old_key)) = store.key_for_path(&r.file_path) {
                         if old_key.split(':').next() != Some(meta.agent.as_str()) {
-                            let _ = store.remove_session(&old_key, false);
+                            let _ = store.remove_session(&old_key);
                         }
                     }
                     // 副本裁决在写事务内(write_session_guarded):先查后写与

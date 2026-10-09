@@ -161,6 +161,33 @@ pub(crate) fn process_batch(
         }
     }
 
+    // 新出现(还没入库)与消失的会话文件可能改变同实例别的文件的引用(`ref_dependents`:
+    // Claude 的分支数着同目录更早的同根文件)。那些文件没动、没有事件,这里按引用与索引
+    // 重比,变了的跟本批一起收编——Wake 里删原件、从废纸篓放回、Claude 自己清理旧会话,
+    // 留下的分支都当场展开 / 折叠,不用等下一次全量扫描
+    let appeared = present
+        .iter()
+        .filter(|(path, _)| matches!(store.file_stamp(&path.to_string_lossy()), Ok(None)))
+        .map(|(path, ix)| (path, *ix));
+    let vanished = gone
+        .iter()
+        .filter_map(|path| resolve_watch_agent(roots, path).map(|ix| (path, ix)));
+    let dependents: Vec<SessionFileRef> = appeared
+        .chain(vanished)
+        .flat_map(|(path, ix)| {
+            let adapter = &adapters[ix];
+            adapter
+                .ref_dependents(path)
+                .into_iter()
+                .filter_map(|dependent| adapter.file_ref(&dependent))
+        })
+        .filter(|r| {
+            store
+                .file_stamp(&r.file_path)
+                .is_ok_and(|stamp| stamp.is_some_and(|stamp| stamp != (r.mtime_ms, r.size)))
+        })
+        .collect();
+
     let removed_keys: Vec<String> = gone
         .iter()
         .filter_map(|path| store.remove_by_path(&path.to_string_lossy()).ok().flatten())
@@ -185,6 +212,7 @@ pub(crate) fn process_batch(
     let refs: Vec<SessionFileRef> = present
         .into_iter()
         .filter_map(|(path, ix)| adapters.get(ix).and_then(|a| a.file_ref(&path)))
+        .chain(dependents)
         .filter(|r| seen.insert(r.file_path.clone()))
         .collect();
     let scanned_agents: HashSet<AgentId> = refs.iter().map(|reference| reference.agent).collect();
@@ -371,6 +399,94 @@ mod tests {
         fx.batch(EventKind::Remove(RemoveKind::File), &fx.file);
         let claimed = fx.store.claimed_keys().unwrap();
         assert!(!claimed.contains("claude-code:sdk-1"), "{claimed:?}");
+    }
+
+    /// Claude Code 的分支 B 开头原样复制了原件 A 的第一轮。A 在 Wake 之外消失(Claude 按
+    /// cleanupPeriodDays 清掉、在 Finder 里删掉)或者被放回时,B 的文件没动、没有它的事件——
+    /// watcher 经 `ref_dependents` 把它补进同一批:A 没了,B 展开完整历史、变回顶层;
+    /// A 回来,B 重新折叠、挂回 A 下面
+    #[test]
+    fn claude_branches_follow_their_original_coming_and_going() {
+        use crate::adapters::claude::ClaudeAdapter;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("projects");
+        let dir = root.join("-w");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (id_a, id_b) = (
+            "c1a0de00-0000-4000-8000-0000000000a1",
+            "c1a0de00-0000-4000-8000-0000000000b2",
+        );
+        let row = |session: &str, uuid: &str, ts: &str, message: serde_json::Value| {
+            serde_json::json!({
+                "parentUuid": null, "isSidechain": false, "cwd": "/w", "sessionId": session,
+                "type": message["role"], "message": message, "uuid": uuid, "timestamp": ts,
+            })
+            .to_string()
+        };
+        let user = |text: &str| serde_json::json!({ "role": "user", "content": text });
+        let file = |session: &str, opened: &str, own: &str| {
+            let queued = serde_json::json!({
+                "type": "queue-operation", "operation": "enqueue",
+                "timestamp": opened, "sessionId": session,
+            });
+            let reply = serde_json::json!({
+                "id": "msg_shared", "role": "assistant", "model": "claude-opus-5-5",
+                "content": [{ "type": "text", "text": "The connection pool is exhausted." }],
+            });
+            [
+                queued.to_string(),
+                row(
+                    session,
+                    "u1",
+                    "2026-09-01T08:00:01.000Z",
+                    user("Why does login time out?"),
+                ),
+                row(session, "u2", "2026-09-01T08:00:05.000Z", reply),
+                row(session, own, "2026-09-02T09:00:10.000Z", user(own)),
+            ]
+            .join("\n")
+        };
+        let a = dir.join(format!("{id_a}.jsonl"));
+        let b = dir.join(format!("{id_b}.jsonl"));
+        let original = file(id_a, "2026-09-01T08:00:00.000Z", "add exponential backoff");
+        std::fs::write(&a, &original).unwrap();
+        std::fs::write(
+            &b,
+            file(id_b, "2026-09-02T09:00:00.000Z", "move login to a queue"),
+        )
+        .unwrap();
+
+        let store = Arc::new(Store::open(&tmp.path().join("wake.db")).unwrap());
+        let adapters: Vec<Box<dyn AgentAdapter>> =
+            vec![ClaudeAdapter::new().with_custom_root(root.clone())];
+        let roots = vec![(root, 0)];
+        crate::scanner::run_scan(&adapters, &store, &NullEvents, true).unwrap();
+        let (key_a, key_b) = (format!("claude-code:{id_a}"), format!("claude-code:{id_b}"));
+        let shared_turn = || -> Vec<String> {
+            let (hits, _) = store.search("connection pool", &[], None, 10).unwrap();
+            hits.into_iter().map(|h| h.session.key).collect()
+        };
+        let parent_of_b = || store.parent_key_of(&key_b).unwrap();
+        let event = |kind: EventKind| {
+            let batch = vec![Ok(notify::Event::new(kind).add_path(a.clone()))];
+            process_batch(&adapters, &store, &NullEvents, &roots, batch);
+        };
+        assert_eq!(shared_turn(), vec![key_a.clone()]);
+        assert_eq!(parent_of_b(), Some(key_a.clone()));
+
+        std::fs::remove_file(&a).unwrap();
+        event(EventKind::Remove(RemoveKind::File));
+        assert_eq!(
+            shared_turn(),
+            vec![key_b.clone()],
+            "共有的那一轮回到分支名下"
+        );
+        assert_eq!(parent_of_b(), None);
+
+        std::fs::write(&a, &original).unwrap();
+        event(EventKind::Create(CreateKind::File));
+        assert_eq!(shared_turn(), vec![key_a.clone()]);
+        assert_eq!(parent_of_b(), Some(key_a));
     }
 
     #[test]

@@ -47,8 +47,8 @@ use gpui_component::{
 };
 
 use wake_core::adapters::{
-    adapter_for, create_adapter_roster_for, path_owns, session_source_path, AdapterLocation,
-    AgentAdapter,
+    adapter_for, children_outlive_parent, create_adapter_roster_for, path_owns,
+    session_source_path, AdapterLocation, AgentAdapter,
 };
 use wake_core::db::Store;
 use wake_core::models::Role as MessageRole;
@@ -940,7 +940,7 @@ impl ListDelegate for SessionsDelegate {
         let query = cx.background_spawn(async move { store.list_sessions(&filter) });
         cx.spawn_in(window, async move |this, cx| {
             let result = query.await;
-            this.update(cx, |state, cx| {
+            this.update_in(cx, |state, window, cx| {
                 let delegate = state.delegate_mut();
                 let Some(current) = delegate.pagination.as_mut() else {
                     return;
@@ -965,7 +965,18 @@ impl ListDelegate for SessionsDelegate {
                             current.next_offset.max(next_offset).min(current.total);
                         delegate.append_sessions(sessions);
                     }
-                    Err(_) => current.failed = true,
+                    // 停住等用户刷新(防触底重试风暴),但要说出来——否则列表只是
+                    // 无声地到底了,看起来像会话就这么多
+                    Err(e) => {
+                        current.failed = true;
+                        window.push_notification(
+                            Notification::error(crate::tf!(
+                                "Couldn't load more sessions. Refresh to try again: {}",
+                                e
+                            )),
+                            cx,
+                        );
+                    }
                 }
                 cx.notify();
             })
@@ -1393,6 +1404,9 @@ mod session_group_tests {
 pub struct SearchDelegate {
     pub hits: Vec<SearchHit>,
     pub degraded: bool,
+    /// 查询本身失败(库读不出、FTS 表达式报错)。与"没有结果"分开显示,
+    /// 否则用户会以为真的没讨论过
+    error: Option<String>,
     store: Arc<Store>,
     last_query: String,
 }
@@ -1495,19 +1509,19 @@ impl ListDelegate for SearchDelegate {
         let store = self.store.clone();
         let bg = cx.background_spawn(async move {
             if q.trim().is_empty() {
-                (Vec::new(), false)
+                Ok((Vec::new(), false))
             } else {
                 store
                     .search(&q, &[], None, 60)
-                    .unwrap_or((Vec::new(), false))
+                    .map_err(|e| format!("{e:#}"))
             }
         });
         cx.spawn_in(window, async move |this, cx| {
-            let (hits, degraded) = bg.await;
+            let result = bg.await;
             this.update(cx, |state, cx| {
                 let d = state.delegate_mut();
-                d.hits = hits;
-                d.degraded = degraded;
+                d.error = result.as_ref().err().cloned();
+                (d.hits, d.degraded) = result.unwrap_or_default();
                 cx.notify();
             })
             .ok();
@@ -1522,19 +1536,24 @@ impl ListDelegate for SearchDelegate {
         cx: &mut Context<ListState<Self>>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        if self.last_query.trim().is_empty() {
+        // 还没输入给提示,查询失败说失败(与"没有结果"分开,否则用户以为真的没讨论过)
+        let card = if self.last_query.trim().is_empty() {
+            Some((
+                "icons/search.svg",
+                t("Search full conversation text"),
+                SharedString::from(t("Matches natural language and code, like \"useEffect(\".")),
+            ))
+        } else {
+            self.error
+                .as_ref()
+                .map(|error| ("icons/info.svg", t("Search failed"), error.clone().into()))
+        };
+        if let Some((glyph, title, caption)) = card {
             return v_flex()
                 .h(zpx(250.))
                 .w_full()
                 .justify_center()
-                .child(empty_state(
-                    "icons/search.svg",
-                    zpx(48.),
-                    zpx(22.),
-                    t("Search full conversation text"),
-                    t("Matches natural language and code, like \"useEffect(\"."),
-                    cx,
-                ));
+                .child(empty_state(glyph, zpx(48.), zpx(22.), title, caption, cx));
         }
         v_flex()
             .h(zpx(250.))
@@ -2539,6 +2558,7 @@ impl Workbench {
                 SearchDelegate {
                     hits: Vec::new(),
                     degraded: false,
+                    error: None,
                     store: store.clone(),
                     last_query: String::new(),
                 },
@@ -5284,28 +5304,37 @@ impl Workbench {
         });
     }
 
-    fn toggle_favorite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(detail) = &mut self.detail {
-            let key = detail.meta.key.clone();
-            let v = !detail.meta.favorite;
-            let _ = self.store.set_user_data(&detail.meta.key, Some(v), None);
-            detail.meta.favorite = v;
-            self.refresh(cx);
-            self.select_list_key(&key, false, window, cx);
-            self.refresh_cleanup_flags(&key, window, cx);
+    /// 收藏(`pin` = false)/ 置顶(`pin` = true)切换。写库失败就不翻界面上的状态:先前
+    /// 吞掉错误照样翻,重启后收藏 / 置顶悄悄没了
+    fn toggle_flag(&mut self, pin: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(detail) = &mut self.detail else {
+            return;
+        };
+        let key = detail.meta.key.clone();
+        let flag = if pin {
+            &mut detail.meta.pinned
+        } else {
+            &mut detail.meta.favorite
+        };
+        let value = !*flag;
+        let (favorite, pinned) = if pin {
+            (None, Some(value))
+        } else {
+            (Some(value), None)
+        };
+        if let Err(e) = self.store.set_user_data(&key, favorite, pinned) {
+            let message = if pin {
+                crate::tf!("Couldn't update the pin: {}", e)
+            } else {
+                crate::tf!("Couldn't update the star: {}", e)
+            };
+            window.push_notification(Notification::error(message), cx);
+            return;
         }
-    }
-
-    fn toggle_pinned(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(detail) = &mut self.detail {
-            let key = detail.meta.key.clone();
-            let v = !detail.meta.pinned;
-            let _ = self.store.set_user_data(&detail.meta.key, None, Some(v));
-            detail.meta.pinned = v;
-            self.refresh(cx);
-            self.select_list_key(&key, true, window, cx);
-            self.refresh_cleanup_flags(&key, window, cx);
-        }
+        *flag = value;
+        self.refresh(cx);
+        self.select_list_key(&key, pin, window, cx);
+        self.refresh_cleanup_flags(&key, window, cx);
     }
 
     /// 导出:系统"另存为"选路径(issue #25,此前直接写进 Downloads),后台解析写文件;
@@ -5337,24 +5366,23 @@ impl Workbench {
     /// 否则界面在授权框弹出的整段时间里完全冻结。
     fn do_delete(
         &mut self,
-        keys: Vec<String>,
+        sessions: Vec<SessionMeta>,
         targets: Vec<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let store = self.store.clone();
-        let trash_keys = keys.clone();
+        let keys: Vec<String> = sessions.iter().map(|session| session.key.clone()).collect();
         let count = keys.len();
         let lock = self.index_lock.clone();
         let task = cx.background_spawn(async move {
             let _lock = lock;
-            terminal::trash_paths(&targets)?;
-            store.remove_sessions(&trash_keys, true)
+            wake_core::cleanup::trash_sessions(&store, &sessions, &targets)
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             this.update_in(cx, |this, window, cx| match result {
-                Ok(()) => {
+                Ok(hidden) => {
                     // 等待期间用户可能已翻到别的会话，只在仍停在被删子树时清空。
                     if this
                         .detail
@@ -5363,12 +5391,16 @@ impl Workbench {
                     {
                         this.detail = None;
                     }
-                    let message = crate::i18n::tp(
-                        crate::ui::session_trashed_key(),
-                        crate::ui::sessions_trashed_key(),
-                        count as i64,
-                        &[&count],
-                    );
+                    let message = if hidden {
+                        crate::tp!("Session hidden", "{} sessions hidden", count)
+                    } else {
+                        crate::i18n::tp(
+                            crate::ui::session_trashed_key(),
+                            crate::ui::sessions_trashed_key(),
+                            count as i64,
+                            &[&count],
+                        )
+                    };
                     window.push_notification(Notification::success(message), cx);
                     // 立刻把它从列表摘掉,不等 watcher 那 800ms 去抖
                     this.refresh(cx);
@@ -5395,10 +5427,25 @@ impl Workbench {
             return;
         }
         let meta = detail.meta.clone();
+        // 子会话查不出来就别删:只删根会把子代理一类留成孤儿
+        let descendants = match self.store.all_descendants(&meta.key) {
+            Ok(descendants) => descendants,
+            Err(e) => {
+                window
+                    .push_notification(Notification::error(crate::tf!("Delete failed: {}", e)), cx);
+                return;
+            }
+        };
+        // 分支(Claude Code 的 fork)是自己完整的对话,不随原件一起删:原件没了它们变回顶层
+        // 会话,watcher 随即把它们重解析出完整历史(`ref_dependents`)
         let mut sessions = vec![meta.clone()];
-        sessions.extend(self.store.all_descendants(&meta.key).unwrap_or_default());
+        let kept_branches = if children_outlive_parent(&self.adapters, &meta) {
+            descendants.len()
+        } else {
+            sessions.extend(descendants);
+            0
+        };
         let nested_count = sessions.len().saturating_sub(1);
-        let keys: Vec<String> = sessions.iter().map(|session| session.key.clone()).collect();
         // 每个子会话按自己的胜出 file_path 找 adapter；多 location 下不能沿用
         // 根会话所属实例。磁盘目标保持稳定顺序并去重。
         let mut seen_targets = HashSet::new();
@@ -5413,23 +5460,58 @@ impl Workbench {
                 }
             }
         }
+        // 没有一个目标真在磁盘上 = 会话只活在 agent 自己的库里(OpenCode、Copilot、
+        // Cursor IDE…的虚拟路径 `<db>#<id>`):Wake 不改别家的库,能做的只是不再列出它。
+        // 先前这里照样说"移到废纸篓、随时可还原",两句都不成立
+        let hide_only = !targets
+            .iter()
+            .any(|path| std::path::Path::new(path).exists());
         let entity = cx.entity();
         open_alert(window, cx, 440., move |dialog, _, cx| {
             let meta = meta.clone();
-            let keys = keys.clone();
+            let sessions = sessions.clone();
             let targets = targets.clone();
             let entity = entity.clone();
             let theme = cx.theme();
+            // 文件型:说清怎么找回——从废纸篓放回原处,扫描认出它就重新列出
+            // (`Store::release_put_back`);库存型:不动任何文件,只是不再列出
+            let (title, body) = match (hide_only, nested_count > 0) {
+                (true, true) => (
+                    t("Hide this session tree?"),
+                    crate::tp!(
+                        "This session and {} nested session are stored in {1}'s own database, which Wake never changes, so no files are moved. Wake just stops listing them.",
+                        "This session and {} nested sessions are stored in {1}'s own database, which Wake never changes, so no files are moved. Wake just stops listing them.",
+                        nested_count,
+                        meta.agent.display_name()
+                    ),
+                ),
+                (true, false) => (
+                    t("Hide this session?"),
+                    crate::tf!(
+                        "This session is stored in {}'s own database, which Wake never changes, so no files are moved. Wake just stops listing it.",
+                        meta.agent.display_name()
+                    ),
+                ),
+                (false, true) => (
+                    t("Delete this session tree?"),
+                    crate::tp!(
+                        "This session and {} nested session will be moved to {1}. Put them back from {1} and they show up again.",
+                        "This session and {} nested sessions will be moved to {1}. Put them back from {1} and they show up again.",
+                        nested_count,
+                        crate::ui::trash_body()
+                    ),
+                ),
+                (false, false) => (
+                    t("Delete this session?"),
+                    trash_confirm_body().to_string(),
+                ),
+            };
             dialog
                 .title(
                     div()
                         .text_size(FONT_HEADING)
                         .font_semibold()
-                        .child(if nested_count > 0 {
-                            t("Delete this session tree?")
-                        } else {
-                            t("Delete this session?")
-                        }),
+                        .child(title),
                 )
                 // 破坏性确认:主按钮点名动作并用 danger 形态,不留裸 "OK"。
                 // .confirm() 必须显式调用——Dialog 只在设了 footer 时才渲染
@@ -5437,36 +5519,30 @@ impl Workbench {
                 .confirm()
                 .button_props(
                     gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text(move_to_trash())
+                        .ok_text(if hide_only { t("Hide") } else { move_to_trash() })
                         .ok_variant(gpui_component::button::ButtonVariant::Danger),
                 )
                 .child(
                     v_flex()
                         .gap(SPACE_SM)
                         .text_size(FONT_BODY)
-                        .child(if nested_count > 0 {
-                            crate::tp!(
-                                "This session and {} nested session will be moved to {}. You can restore them anytime:",
-                                "This session and {} nested sessions will be moved to {}. You can restore them anytime:",
-                                nested_count,
-                                crate::ui::trash_body()
+                        .child(body)
+                        // 库存型的 file_path 是虚拟路径,没有可移动的文件,不展示
+                        .when(!hide_only, |this| {
+                            this.child(
+                                div()
+                                    .px(SPACE_SM)
+                                    .py(SPACE_XS)
+                                    .rounded(theme.radius)
+                                    .bg(theme.muted)
+                                    .text_size(FONT_CAPTION)
+                                    // 等宽走主题 token(Menlo 只有 macOS 有;
+                                    // Windows 上找不到会静默回落到比例字体的
+                                    // 系统 UI 字体,与其他路径 chip 不一致)
+                                    .font_family(theme.mono_font_family.clone())
+                                    .child(meta.file_path.clone()),
                             )
-                        } else {
-                            trash_confirm_body().to_string()
                         })
-                        .child(
-                            div()
-                                .px(SPACE_SM)
-                                .py(SPACE_XS)
-                                .rounded(theme.radius)
-                                .bg(theme.muted)
-                                .text_size(FONT_CAPTION)
-                                // 等宽走主题 token(Menlo 只有 macOS 有;
-                                // Windows 上找不到会静默回落到比例字体的
-                                // 系统 UI 字体,与其他路径 chip 不一致)
-                                .font_family(theme.mono_font_family.clone())
-                                .child(meta.file_path.clone()),
-                        )
                         .when(meta.agent == AgentId::Codex, |this| {
                             this.child(
                                 div()
@@ -5474,11 +5550,23 @@ impl Workbench {
                                     .text_color(theme.muted_foreground)
                                     .child(t("Only the local file is removed — Codex's own records stay intact.")),
                             )
+                        })
+                        .when(kept_branches > 0, |this| {
+                            this.child(
+                                div()
+                                    .text_size(FONT_CAPTION)
+                                    .text_color(theme.muted_foreground)
+                                    .child(crate::tp!(
+                                        "Its branch stays and shows the whole conversation.",
+                                        "Its {} branches stay and show the whole conversation.",
+                                        kept_branches
+                                    )),
+                            )
                         }),
                 )
                 .on_ok(move |_, window, cx| {
                     entity.update(cx, |this, cx| {
-                        this.do_delete(keys.clone(), targets.clone(), window, cx);
+                        this.do_delete(sessions.clone(), targets.clone(), window, cx);
                     });
                     true
                 })
@@ -7365,7 +7453,7 @@ impl Workbench {
                     t("Star")
                 },
                 meta.favorite,
-                cx.listener(|this, _, window, cx| this.toggle_favorite(window, cx)),
+                cx.listener(|this, _, window, cx| this.toggle_flag(false, window, cx)),
             )
             .into_any_element(),
             tool_btn(
@@ -7375,7 +7463,7 @@ impl Workbench {
                 theme.primary,
                 if meta.pinned { t("Unpin") } else { t("Pin") },
                 meta.pinned,
-                cx.listener(|this, _, window, cx| this.toggle_pinned(window, cx)),
+                cx.listener(|this, _, window, cx| this.toggle_flag(true, window, cx)),
             )
             .into_any_element(),
             copy_path.into_any_element(),

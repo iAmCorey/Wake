@@ -93,6 +93,10 @@ impl AgentAdapter for RemoteAdapter {
         self.inner.file_ref(path)
     }
 
+    fn ref_dependents(&self, path: &Path) -> Vec<std::path::PathBuf> {
+        self.inner.ref_dependents(path)
+    }
+
     fn quick_meta(
         &self,
         refs: &[SessionFileRef],
@@ -224,6 +228,10 @@ impl AgentAdapter for RemoteAdapter {
 
     fn parent_links_in_child(&self) -> bool {
         self.inner.parent_links_in_child()
+    }
+
+    fn children_outlive_parent(&self) -> bool {
+        self.inner.children_outlive_parent()
     }
 
     fn manages_claims(&self) -> bool {
