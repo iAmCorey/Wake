@@ -14,7 +14,7 @@ interface Props {
 const { lang } = Astro.props;
 const t = COPY[lang].docs;
 
-// Builds run from site/; the bundled page no longer sits next to its source.
+// Builds run from web/; the bundled page no longer sits next to its source.
 const raw = await readFile(path.resolve(process.cwd(), '../CHANGELOG.md'), 'utf8');
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);

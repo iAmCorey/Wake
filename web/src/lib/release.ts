@@ -19,7 +19,7 @@ export interface Release {
 }
 
 async function gh(endpoint: string): Promise<any | null> {
-  const headers: Record<string, string> = { Accept: 'application/vnd.github+json', 'User-Agent': 'wake-site' };
+  const headers: Record<string, string> = { Accept: 'application/vnd.github+json', 'User-Agent': 'wake-web' };
   if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
   try {
     const res = await fetch(`https://api.github.com/repos/${REPO}${endpoint}`, { headers, signal: AbortSignal.timeout(8000) });
@@ -30,7 +30,7 @@ async function gh(endpoint: string): Promise<any | null> {
 }
 
 async function workspaceVersion(): Promise<string> {
-  // Builds run from site/ (the bundled module no longer sits next to its source).
+  // Builds run from web/ (the bundled module no longer sits next to its source).
   const toml = await readFile(path.resolve(process.cwd(), '../Cargo.toml'), 'utf8');
   const m = toml.match(/^version\s*=\s*"([^"]+)"/m);
   if (!m) throw new Error('No version in Cargo.toml');

@@ -19,6 +19,6 @@ pnpm build      # static site in dist/
 
 ## Deploying
 
-The Vercel project's Root Directory is `site`, and "Include files outside the root directory" must stay on (the build reads `../docs`, `../CHANGELOG.md`, `../Cargo.toml` and `../crates/wake/assets`). Pushes to `main` deploy automatically.
+The Vercel project's Root Directory is `web`, and "Include files outside the root directory" must stay on (the build reads `../docs`, `../CHANGELOG.md`, `../Cargo.toml` and `../crates/wake/assets`). Pushes to `main` deploy automatically.
 
-After a release, the `site` job at the end of `.github/workflows/release.yml` calls a Vercel deploy hook once all packages are uploaded, so the download buttons switch to the new version. Create the hook in Vercel (Settings → Git → Deploy Hooks, branch `main`) and store its URL as the `VERCEL_DEPLOY_HOOK` repository secret. The same hook is called once a day by `.github/workflows/site-refresh.yml`, so the GitHub star count in the header is never more than a day old.
+After a release, the `web` job at the end of `.github/workflows/release.yml` calls a Vercel deploy hook once all packages are uploaded, so the download buttons switch to the new version. Create the hook in Vercel (Settings → Git → Deploy Hooks, branch `main`) and store its URL as the `VERCEL_DEPLOY_HOOK` repository secret. The same hook is called once a day by `.github/workflows/web-refresh.yml`, so the GitHub star count in the header is never more than a day old.

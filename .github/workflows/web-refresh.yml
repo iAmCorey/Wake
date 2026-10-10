@@ -1,4 +1,4 @@
-# 官网(site/,托管在 Vercel)的 GitHub 星数与下载链接是构建时取的,两次构建之间不变。
+# 官网(web/,托管在 Vercel)的 GitHub 星数与下载链接是构建时取的,两次构建之间不变。
 # 每天让 Vercel 重新构建一次,数字最多晚一天;没配 VERCEL_DEPLOY_HOOK 这个 secret 时
 # 什么都不做。也可以在 Actions 页手动点 Run workflow。
 name: Refresh wake.cool
