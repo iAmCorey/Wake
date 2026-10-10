@@ -297,7 +297,7 @@ last question and reply — so "continue from yesterday" or "pick up what Codex 
 needs no explaining, and it adds Wake's MCP tools so Claude can open any of them with
 `wake_get_session`. Underneath it is a session-start hook that runs
 [`wake-cli context`](#context), which prints nothing in a project without recent history.
-It needs Wake 0.8.9 or later and covers macOS and Linux. Settings → Connect shows the
+It needs Wake 0.9.0 or later and covers macOS and Linux. Settings → Connect shows the
 command with a copy button.
 
 ```bash
@@ -357,7 +357,7 @@ Codex runs a hook you added only after you approve it: start Codex and open `/ho
 Wake's tools in Codex, add the MCP server as [docs/mcp.md](mcp.md#codex) shows. There is no
 Codex plugin: Codex runs a plugin's hooks only when the plugin was installed by hand in its
 desktop app, and a plugin's MCP server has to be a remote one, so a plugin could not do this
-from the command line. Like the Claude Code plugin, this needs Wake 0.8.9 or later and covers
+from the command line. Like the Claude Code plugin, this needs Wake 0.9.0 or later and covers
 macOS and Linux.
 
 For both:
