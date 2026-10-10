@@ -1,0 +1,51 @@
+{
+  "name": "wake",
+  "version": "0.9.0",
+  "description": "Every new session starts knowing where your coding agents left off in this project, and Wake's MCP tools let Codex search and read any earlier session from any agent. Read-only; needs the Wake app.",
+  "author": {
+    "name": "Corey Chiu",
+    "url": "https://github.com/iAmCorey"
+  },
+  "homepage": "https://github.com/iAmCorey/Wake",
+  "repository": "https://github.com/iAmCorey/Wake",
+  "license": "MIT",
+  "keywords": [
+    "sessions",
+    "history",
+    "memory",
+    "context",
+    "mcp"
+  ],
+  "mcpServers": {
+    "wake": {
+      "command": "sh",
+      "args": [
+        "./scripts/wake",
+        "wake-mcp"
+      ],
+      "cwd": ".",
+      "env_vars": [
+        "WAKE_BIN_DIR"
+      ]
+    }
+  },
+  "interface": {
+    "displayName": "Wake",
+    "shortDescription": "Pick up where your other coding agents left off",
+    "longDescription": "Wake indexes every coding-agent session on this machine — Claude Code, Codex, Cursor and the rest. With this plugin, each new Codex session starts with where your agents left off in the project, each recent session with its last question and reply, and Codex can search and read any earlier session through Wake's read-only MCP tools. Needs the Wake app.",
+    "developerName": "Corey Chiu",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read"
+    ],
+    "websiteURL": "https://github.com/iAmCorey/Wake",
+    "defaultPrompt": [
+      "What was I working on in this project?",
+      "Did we discuss this error in an earlier session?",
+      "Continue where Claude Code left off"
+    ],
+    "brandColor": "#1F3C63",
+    "composerIcon": "./assets/logo.png",
+    "logo": "./assets/logo.png"
+  }
+}

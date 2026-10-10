@@ -882,41 +882,90 @@ fn context_shows_where_each_agent_left_off_or_nothing() {
 }
 
 /// 插件只是一层壳:清单、钩子、MCP 配置都指向仓库里真实存在的脚本,钩子调的是 `wake-cli
-/// context`,启动脚本找的正是各平台打包落下二进制的地方。`claude plugin validate` 不在 CI
-/// 里跑,这里卡住最容易漂的几处
+/// context`,启动脚本找的正是各平台打包落下二进制的地方。Claude Code 与 Codex 共用一个插件
+/// 目录,各读各的清单与市场文件。`claude plugin validate` 与 Codex 都不在 CI 里跑,这里卡住
+/// 最容易漂的几处
 #[test]
-fn the_claude_code_plugin_points_at_real_files() {
+fn the_plugins_point_at_real_files() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let json = |path: PathBuf| -> Value {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     };
+    // 安装命令最后一段 `<插件>@<市场>` 与市场文件对得上
+    let install_id = |market: &Value| {
+        format!(
+            "{}@{}",
+            market["plugins"][0]["name"].as_str().unwrap(),
+            market["name"].as_str().unwrap()
+        )
+    };
     let market = json(repo.join(".claude-plugin/marketplace.json"));
     let entry = &market["plugins"][0];
-    let id = format!(
-        "{}@{}",
-        entry["name"].as_str().unwrap(),
-        market["name"].as_str().unwrap()
-    );
-    assert!(cli::CLAUDE_PLUGIN_INSTALL.ends_with(&id), "{id}");
+    assert!(cli::CLAUDE_PLUGIN_INSTALL.ends_with(&install_id(&market)));
     let plugin = repo.join(entry["source"].as_str().unwrap());
     let manifest = json(plugin.join(".claude-plugin/plugin.json"));
     assert_eq!(manifest["name"], entry["name"]);
 
-    let hooks = json(plugin.join("hooks/hooks.json"));
-    let command = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-        .as_str()
-        .unwrap();
-    assert!(
-        command.contains("${CLAUDE_PLUGIN_ROOT}/scripts/session-start"),
-        "{command}"
+    // 钩子两家共用,整份钉死:Codex 按这份定义(matcher、命令、超时)认信任,改一个字所有
+    // Codex 用户的钩子就停了、要去 /hooks 重新信任——行为上的改动放进 scripts/session-start
+    assert_eq!(
+        json(plugin.join("hooks/hooks.json")),
+        json!({ "hooks": { "SessionStart": [{
+            "matcher": "startup|clear",
+            "hooks": [{
+                "type": "command",
+                "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/session-start\"",
+                "timeout": 30
+            }]
+        }]}})
     );
     let start = std::fs::read_to_string(plugin.join("scripts/session-start")).unwrap();
     assert!(start.contains("wake-cli context"), "{start}");
 
+    // MCP 两家各写一份:Claude Code 的 stdio 配置没有 cwd、插件路径靠 ${CLAUDE_PLUGIN_ROOT};
+    // Codex 不展开 MCP 参数里的变量(只展开钩子命令),写相对路径 + cwd "."(插件根,Codex
+    // 自带的插件也这么写),直接放在清单里。Codex 只给 MCP 子进程几个默认环境变量(PATH、
+    // HOME 这些),启动脚本认的 WAKE_BIN_DIR 要点名放行,不然 Wake 装在别处的人钩子能用、
+    // MCP 却找不到 wake-mcp
     let mcp = json(plugin.join(".mcp.json"));
     let args = &mcp["mcpServers"]["wake"]["args"];
     assert_eq!(args[0], "${CLAUDE_PLUGIN_ROOT}/scripts/wake");
     assert_eq!(args[1], "wake-mcp");
+    let codex_market = json(repo.join(".agents/plugins/marketplace.json"));
+    let codex_entry = &codex_market["plugins"][0];
+    assert!(cli::CODEX_PLUGIN_INSTALL.ends_with(&install_id(&codex_market)));
+    assert_eq!(
+        codex_entry["source"]["path"], entry["source"],
+        "同一个插件目录"
+    );
+    let codex_manifest = json(plugin.join(".codex-plugin/plugin.json"));
+    assert_eq!(codex_manifest["name"], codex_entry["name"]);
+    // Codex 按版本缓存装好的插件,版本不变就不重装:跟 Wake 一起走,发版改 Cargo.toml 时一并改
+    assert_eq!(codex_manifest["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        codex_manifest["mcpServers"]["wake"],
+        json!({
+            "command": "sh",
+            "args": ["./scripts/wake", "wake-mcp"],
+            "cwd": ".",
+            "env_vars": ["WAKE_BIN_DIR"]
+        })
+    );
+    for field in ["logo", "composerIcon"] {
+        let asset = codex_manifest["interface"][field].as_str().unwrap();
+        assert!(plugin.join(asset).is_file(), "{field}: {asset}");
+    }
+    // 文档里的安装命令就是 Connect 页复制的那条
+    for doc in ["README.md", "docs/cli.md", "docs/mcp.md"] {
+        let text = std::fs::read_to_string(repo.join(doc)).unwrap();
+        for command in [cli::CLAUDE_PLUGIN_INSTALL, cli::CODEX_PLUGIN_INSTALL] {
+            assert!(
+                text.contains(command),
+                "{doc} 里的安装命令过时了: {command}"
+            );
+        }
+    }
+
     let launcher = std::fs::read_to_string(plugin.join("scripts/wake")).unwrap();
     assert!(launcher.contains("/Applications/Wake.app/Contents/MacOS"));
     // tar 包装进 ~/.local/bin、deb 装进 /usr/bin

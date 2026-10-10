@@ -651,12 +651,11 @@ mod tests {
     /// 这里直接问那个 API,改了名就在这里红,而不是变成一条静默的死译文。开场上下文的两块
     /// 在 Windows 上不显示,但片段函数不分平台、语言包也不分平台,所以这里照列
     fn from_wake_core(key: &str) -> bool {
-        let x = std::path::Path::new("x");
-        wake_core::mcp::setup_snippets(x)
+        wake_core::mcp::setup_snippets(std::path::Path::new("x"))
             .into_iter()
             .chain([
                 wake_core::cli::claude_plugin_snippet(),
-                wake_core::cli::codex_hooks_snippet(x),
+                wake_core::cli::codex_plugin_snippet(),
             ])
             .any(|s| s.hint == key || s.copy_label == key)
     }

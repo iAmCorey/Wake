@@ -146,7 +146,7 @@ Wake: recent sessions in this project, across your coding agents (5 of 9 from th
 Read one with the wake_get_session tool, or run `wake-cli show <key>`.
 ```
 
-It is what the [Claude Code plugin](#claude-code-plugin) and the [Codex hooks](#codex-hooks) setup run: whatever the hook
+It is what the [Claude Code plugin](#claude-code-plugin) and the [Codex plugin](#codex-plugin) run: whatever the hook
 prints lands in the new session's context, where a "no sessions" reply or a list of other
 projects would only be noise. A subfolder counts as its project, as with `--project
 "$PWD"`. Your home folder and the filesystem root never count as the project a folder
@@ -272,7 +272,7 @@ Two things to know:
 
 Two ways to teach it, same content. To hand every new session this project's recent
 sessions before the agent even asks, see [Claude Code plugin](#claude-code-plugin) and
-[Codex hooks](#codex-hooks).
+[Codex plugin](#codex-plugin).
 
 **A skill, once, for every project** — the repository ships one at `skills/wake/`:
 
@@ -301,16 +301,16 @@ It needs Wake 0.9.0 or later and covers macOS and Linux. Settings → Connect sh
 command with a copy button.
 
 ```bash
-claude plugin marketplace add iAmCorey/Wake && claude plugin install wake@wake
+claude plugin marketplace add iAmCorey/Wake --sparse .claude-plugin plugins/wake && claude plugin install wake@wake
 ```
 
-Inside a session, `/plugin marketplace add iAmCorey/Wake` and then `/plugin install
-wake@wake` do the same. The plugin carries no binaries of its own: it runs the `wake-cli`
-and `wake-mcp` inside your installed Wake (set `WAKE_BIN_DIR` to their folder if Wake
-lives somewhere other than the usual place). If you added the `wake` MCP server by hand
-earlier, remove it with `claude mcp remove wake` so the tools are not listed twice.
-`claude plugin update wake@wake` updates it, or turn on auto-update for the `wake`
-marketplace in `/plugin`.
+`--sparse` checks out only the plugin's folders instead of the whole repository. Inside a
+session, `/plugin marketplace add iAmCorey/Wake` and then `/plugin install wake@wake` do the
+same. The plugin carries no binaries of its own: it runs the `wake-cli` and `wake-mcp`
+inside your installed Wake (set `WAKE_BIN_DIR` to their folder if Wake lives somewhere
+other than the usual place). If you added the `wake` MCP server by hand earlier, remove it
+with `claude mcp remove wake` so the tools are not listed twice. `claude plugin update
+wake@wake` updates it, or turn on auto-update for the `wake` marketplace in `/plugin`.
 
 **Without the plugin**, the same hook goes in `~/.claude/settings.json` (every project) or
 in a project's `.claude/settings.json`; add the MCP server as [docs/mcp.md](mcp.md#claude-code)
@@ -337,11 +337,27 @@ shows:
 
 Use `wake-cli`'s full path if it is not on your `PATH` (see *Where it lives*).
 
-## Codex hooks
+## Codex plugin
 
-Codex gets the same start through its own [hooks](https://developers.openai.com/codex/hooks).
-Add this to `~/.codex/config.toml` — Settings → Connect shows it with your path to
-`wake-cli` filled in:
+The same plugin works in Codex, in the CLI and in the Codex app: every new session starts
+knowing where your agents left off in the project, and Codex gets Wake's MCP tools to read
+those sessions. It needs Wake 0.9.0 or later and covers macOS and Linux. Settings → Connect
+shows the command with a copy button.
+
+```bash
+codex plugin marketplace add iAmCorey/Wake --sparse .agents/plugins --sparse plugins/wake && codex plugin add wake@wake
+```
+
+Codex runs a plugin's hook only after you trust it: start Codex, open `/hooks` and trust
+Wake's session-start hook. Codex asks again whenever the hook changes. As with Claude Code,
+the plugin carries no binaries and runs the `wake-cli` and `wake-mcp` inside your installed
+Wake. If you added the `wake` MCP server to `~/.codex/config.toml` by hand earlier, remove
+that entry so the tools are not listed twice; likewise, if you pasted Wake's
+`[[hooks.SessionStart]]` block there from Wake 0.9.0's Settings → Connect, remove it, or
+every new session gets the context twice.
+
+**Without the plugin**, add the hook to `~/.codex/config.toml` yourself, approve it in
+`/hooks`, and add the MCP server as [docs/mcp.md](mcp.md#codex) shows:
 
 ```toml
 [[hooks.SessionStart]]
@@ -353,24 +369,17 @@ command = "/Applications/Wake.app/Contents/MacOS/wake-cli context 2>/dev/null ||
 timeout = 30
 ```
 
-Codex runs a hook you added only after you approve it: start Codex and open `/hooks`. For
-Wake's tools in Codex, add the MCP server as [docs/mcp.md](mcp.md#codex) shows. There is no
-Codex plugin: Codex runs a plugin's hooks only when the plugin was installed by hand in its
-desktop app, and a plugin's MCP server has to be a remote one, so a plugin could not do this
-from the command line. Like the Claude Code plugin, this needs Wake 0.9.0 or later and covers
-macOS and Linux.
-
 For both:
 
-- What gets injected is titles, keys, dates and models for up to five sessions — not
-  transcripts. The agent reads one with `wake_get_session` or `wake-cli show` when it needs
-  the details.
+- What gets injected is up to five recent sessions, each with its agent, title, key, last
+  question and the first line of its last reply — not transcripts. The agent reads one with
+  `wake_get_session` or `wake-cli show` when it needs the details.
 - `startup|clear` covers new sessions and `/clear`. A resumed or compacted session keeps
   its own history, so the hook stays out of those.
 - A lookup made by the hook is not the agent asking Wake, so it does not show up in
   Insights under *Agents asking Wake*; the lookups the agent then makes on its own do.
-- None of this edits another tool's configuration: Claude Code installs its own plugin,
-  and the hook settings are yours to paste.
+- None of this edits another tool's configuration: Claude Code and Codex install the plugin
+  themselves, and the hook settings are yours to paste.
 - On Windows, use the skill and the MCP server for now.
 
 ## When

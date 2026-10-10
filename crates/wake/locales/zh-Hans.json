@@ -493,9 +493,9 @@
   "Theme": "主题",
   "Its branch stays and shows the whole conversation.": "它的分支会留下,显示完整的对话。",
   "Its {} branches stay and show the whole conversation.": "它的 {} 个分支会留下,显示完整的对话。",
-  "Add to ~/.codex/config.toml, then approve it in /hooks": "加进 ~/.codex/config.toml，再在 Codex 的 /hooks 里批准",
   "Claude Code plugin": "Claude Code 插件",
-  "Codex hooks": "Codex Hooks",
   "Run in a terminal to install the Wake plugin": "在终端里运行，安装 Wake 插件",
-  "Copy the command that adds wake-cli to PATH": "拷贝把 wake-cli 加进 PATH 的命令"
+  "Copy the command that adds wake-cli to PATH": "拷贝把 wake-cli 加进 PATH 的命令",
+  "Codex plugin": "Codex 插件",
+  "Run in a terminal, then trust its hook in Codex's /hooks": "在终端里运行，再在 Codex 的 /hooks 里信任它的钩子"
 }

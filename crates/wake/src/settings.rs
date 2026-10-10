@@ -33,10 +33,10 @@ const SETTINGS_PAGE_TOP: Zpx = Zpx(38.);
 /// Connect 页两条 Setup guide 的去处:MCP 面与命令行面各自的完整文档
 const CONNECT_GUIDE_URL: &str = "https://github.com/iAmCorey/Wake/blob/main/docs/mcp.md";
 const CONNECT_CLI_GUIDE_URL: &str = "https://github.com/iAmCorey/Wake/blob/main/docs/cli.md";
-const CONNECT_PLUGIN_GUIDE_URL: &str =
+const CONNECT_CLAUDE_PLUGIN_GUIDE_URL: &str =
     "https://github.com/iAmCorey/Wake/blob/main/docs/cli.md#claude-code-plugin";
-const CONNECT_CODEX_HOOKS_GUIDE_URL: &str =
-    "https://github.com/iAmCorey/Wake/blob/main/docs/cli.md#codex-hooks";
+const CONNECT_CODEX_PLUGIN_GUIDE_URL: &str =
+    "https://github.com/iAmCorey/Wake/blob/main/docs/cli.md#codex-plugin";
 
 fn icon(path: &'static str) -> Icon {
     Icon::empty().path(path)
@@ -234,10 +234,10 @@ struct ConnectInfo {
     /// MCP clients 卡的三行:文案与片段来自 wake-core,与 `wake-mcp setup`
     /// 同源;GUI 只展示与复制,不代写别家配置
     snippets: Vec<wake_core::mcp::SetupSnippet>,
-    /// Claude Code plugin 与 Codex hooks 两块各一行,与 `wake-cli setup` 同源;这个平台不给
-    /// (`cli::SESSION_START_HOOKS` 为假,即 Windows)时是 None,两块都不画
+    /// Claude Code plugin 与 Codex plugin 两块各一行,与 `wake-cli setup` 同源;这个平台不给
+    /// (`cli::AGENT_PLUGINS` 为假,即 Windows)时是 None,两块都不画
     claude_plugin: Option<wake_core::mcp::SetupSnippet>,
-    codex_hooks: Option<wake_core::mcp::SetupSnippet>,
+    codex_plugin: Option<wake_core::mcp::SetupSnippet>,
 }
 
 impl ConnectInfo {
@@ -246,10 +246,9 @@ impl ConnectInfo {
         let cli = BinaryFacts::probe("wake-cli");
         Self {
             snippets: wake_core::mcp::setup_snippets(std::path::Path::new(&mcp.path)),
-            claude_plugin: wake_core::cli::SESSION_START_HOOKS
+            claude_plugin: wake_core::cli::AGENT_PLUGINS
                 .then(wake_core::cli::claude_plugin_snippet),
-            codex_hooks: wake_core::cli::SESSION_START_HOOKS
-                .then(|| wake_core::cli::codex_hooks_snippet(std::path::Path::new(&cli.path))),
+            codex_plugin: wake_core::cli::AGENT_PLUGINS.then(wake_core::cli::codex_plugin_snippet),
             cli_path_command: wake_core::cli::path_command(std::path::Path::new(&cli.path)),
             mcp,
             cli,
@@ -1107,28 +1106,31 @@ impl SettingsView {
 
         // 区块同一种写法:(标题, 文档链接, 卡),有没有链接、有没有这块都写在数据里,
         // 间距一律"不是第一块就加",不靠各块自己记。链接的规则一句话:**每个面的第一个
-        // 区块挂自己的文档**——Claude Code plugin、Codex hooks 各是一面,MCP 面 = MCP server
-        // + MCP clients,命令行面 = Command line + Skill。两家的开场上下文放最前:插件一条
-        // 命令就把 MCP 与开场上下文一起装好,是最省事的那条路。标题用各家的正名(用户
-        // 2026-10-09 定:不自己起名字;Codex 那个是它官方的 hooks,不是插件);这两块
-        // Windows 上没有(片段给 None)
+        // 区块挂自己的文档**——Claude Code plugin、Codex plugin 各是一面,MCP 面 = MCP server
+        // + MCP clients,命令行面 = Command line + Skill。两家的插件放最前:一条命令就把 MCP
+        // 与开场交接一起装好,是最省事的那条路。标题用各家的正名(用户 2026-10-09 定:不自己
+        // 起名字;Codex 那块原先是它官方的 hooks 配置,2026-10-10 有了真正的 Codex 插件才改名);
+        // 这两块 Windows 上没有(片段给 None)
         let sections = [
             (
                 t("Claude Code plugin"),
-                Some(("connect-plugin-setup-guide", CONNECT_PLUGIN_GUIDE_URL)),
+                Some((
+                    "connect-claude-plugin-setup-guide",
+                    CONNECT_CLAUDE_PLUGIN_GUIDE_URL,
+                )),
                 info.claude_plugin
                     .as_ref()
-                    .map(|s| one_line_card(s, "connect-copy-plugin")),
+                    .map(|s| one_line_card(s, "connect-copy-claude-plugin")),
             ),
             (
-                t("Codex hooks"),
+                t("Codex plugin"),
                 Some((
-                    "connect-codex-hooks-setup-guide",
-                    CONNECT_CODEX_HOOKS_GUIDE_URL,
+                    "connect-codex-plugin-setup-guide",
+                    CONNECT_CODEX_PLUGIN_GUIDE_URL,
                 )),
-                info.codex_hooks
+                info.codex_plugin
                     .as_ref()
-                    .map(|s| one_line_card(s, "connect-copy-codex-hooks")),
+                    .map(|s| one_line_card(s, "connect-copy-codex-plugin")),
             ),
             (
                 t("MCP server"),

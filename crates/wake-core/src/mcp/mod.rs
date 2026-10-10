@@ -266,16 +266,11 @@ pub struct SetupSnippet {
     pub text: String,
 }
 
-/// 接入片段里的字符串字面量:带引号、按 JSON 转义——TOML basic string 与 JSON 的转义
-/// 子集兼容,一个写法同时给 TOML 与 JSON 两种配置用,Windows 的反斜杠与含空格路径都安全
-pub(crate) fn json_quote(s: &str) -> String {
-    serde_json::to_string(s).unwrap_or_default()
-}
-
-/// 三家客户端的接入片段(UI 的 Connect 页与 `wake-mcp setup` 同源)。路径一律
-/// 经 `json_quote`
+/// 三家客户端的接入片段(UI 的 Connect 页与 `wake-mcp setup` 同源)。路径一律按 JSON 字符串
+/// 引好——TOML basic string 与 JSON 的转义子集兼容,一个写法同时给 TOML 与 JSON 两种配置用,
+/// Windows 的反斜杠与含空格路径都安全
 pub fn setup_snippets(bin: &Path) -> Vec<SetupSnippet> {
-    let quoted = json_quote(&bin.to_string_lossy());
+    let quoted = serde_json::to_string(&bin.to_string_lossy()).unwrap_or_default();
     vec![
         SetupSnippet {
             client: "Claude Code",

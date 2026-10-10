@@ -23,9 +23,14 @@ claude mcp add --scope user wake -- "/Applications/Wake.app/Contents/MacOS/wake-
 ```
 
 Or install the Wake plugin instead, which adds this server and starts every new session
-knowing where your agents left off in the project — `claude plugin marketplace add iAmCorey/Wake && claude plugin
-install wake@wake` (see [Claude Code plugin](cli.md#claude-code-plugin)). Use one or the other, not
-both, or the tools are listed twice.
+knowing where your agents left off in the project (see
+[Claude Code plugin](cli.md#claude-code-plugin)):
+
+```bash
+claude plugin marketplace add iAmCorey/Wake --sparse .claude-plugin plugins/wake && claude plugin install wake@wake
+```
+
+Use one or the other, not both, or the tools are listed twice.
 
 ### Codex
 
@@ -35,6 +40,15 @@ Add to `~/.codex/config.toml`:
 [mcp_servers.wake]
 command = "/Applications/Wake.app/Contents/MacOS/wake-mcp"
 ```
+
+Or install the Wake plugin instead, which adds this server and starts every new session
+knowing where your agents left off in the project (see [Codex plugin](cli.md#codex-plugin)):
+
+```bash
+codex plugin marketplace add iAmCorey/Wake --sparse .agents/plugins --sparse plugins/wake && codex plugin add wake@wake
+```
+
+Use one or the other, not both, or the tools are listed twice.
 
 ### Cursor
 
@@ -93,8 +107,8 @@ wake_list_sessions with the current directory, then wake_get_session for the rel
 Claude Code and Codex can also be told where your agents left off in the project when a
 session starts — each recent session with its last question and reply — through a hook
 that runs `wake-cli context`; see
-[Claude Code plugin](cli.md#claude-code-plugin) and [Codex hooks](cli.md#codex-hooks) in the
-command-line guide. The Claude Code plugin brings this MCP server along.
+[Claude Code plugin](cli.md#claude-code-plugin) and [Codex plugin](cli.md#codex-plugin) in the
+command-line guide. Both plugins bring this MCP server along.
 
 ### A worked example
 

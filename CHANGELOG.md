@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- New: Codex gets the Wake plugin too: one command adds it to the Codex CLI and the Codex app, and every new Codex session then starts knowing where your agents left off in the project, with Wake's MCP tools to read earlier sessions. Settings → Connect shows it in place of the Codex hooks setup; if you added that hook to ~/.codex/config.toml, remove it so new sessions don't get the context twice
+
 ## [0.9.0] — 2026-10-10
 
 - New: New Claude Code and Codex sessions can start knowing where your agents left off in the project — the latest sessions from Claude Code, Codex, Cursor and the rest, each with its last question and reply. For Claude Code, install the Wake plugin with one command (it adds Wake's MCP tools too); Codex gets it through Codex hooks. Both are in Settings → Connect
