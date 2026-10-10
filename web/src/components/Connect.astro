@@ -11,12 +11,12 @@ const setups = [
   {
     id: 'claude',
     label: 'Claude Code',
-    code: 'claude mcp add --scope user wake -- "/Applications/Wake.app/Contents/MacOS/wake-mcp"',
+    code: 'claude plugin marketplace add iAmCorey/Wake \\\n  --sparse .claude-plugin plugins/wake\nclaude plugin install wake@wake',
   },
   {
     id: 'codex',
     label: 'Codex',
-    code: '# ~/.codex/config.toml\n[mcp_servers.wake]\ncommand = "/Applications/Wake.app/Contents/MacOS/wake-mcp"',
+    code: 'codex plugin marketplace add iAmCorey/Wake \\\n  --sparse .agents/plugins \\\n  --sparse plugins/wake\ncodex plugin add wake@wake',
   },
   {
     id: 'shell',

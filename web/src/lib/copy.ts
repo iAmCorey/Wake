@@ -37,7 +37,7 @@ const en = {
   agents: {
     title: 'Reads each agent’s history right where it lives',
     lede:
-      'No export, no plugin inside each agent, no account. Wake reads the files and databases every agent already writes, and never changes a byte.',
+      'No export and no account. Wake reads the files and databases every agent already writes, and never changes a byte.',
     missing:
       'Not supported yet: Windsurf and Trae encrypt their local data; Amp, Factory and Warp keep sessions in the cloud.',
   },
@@ -204,7 +204,7 @@ const zh: Copy = {
   },
   agents: {
     title: '直接读各家 agent 自己存的记录',
-    lede: '不用导出，不用在每个 agent 里装插件，也不用注册账号。各家 agent 本来就会把对话存进自己的文件和数据库，Wake 直接去读，原文件一个字节都不改。',
+    lede: '不用导出，也不用注册账号。各家 agent 本来就会把对话存进自己的文件和数据库，Wake 直接去读，原文件一个字节都不改。',
     missing: '暂不支持：Windsurf 和 Trae 的本地数据是加密的；Amp、Factory 和 Warp 的会话只存在云端。',
   },
   resume: {
