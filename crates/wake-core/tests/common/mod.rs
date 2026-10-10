@@ -36,6 +36,17 @@ pub fn meta(key: &str, title: &str) -> SessionMeta {
     }
 }
 
+/// 目录的真实路径,与子进程看到的工作目录同一种写法:macOS 的临时目录在符号链接后面
+/// (/var → /private/var),子进程的 cwd 是解开后的;Windows 的 canonicalize 会加 `\\?\`
+/// 前缀,子进程的 cwd 没有它——直接拿 canonicalize 的结果去比,Windows 上一条都对不上
+pub fn real_dir(path: &Path) -> PathBuf {
+    let real = fs::canonicalize(path).unwrap();
+    match real.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) => PathBuf::from(rest),
+        None => real,
+    }
+}
+
 /// 一个索引单元(主线、时间戳随 seq 递增);IndexUnit 同样没有 Default
 pub fn unit(seq: i64, role: Role, text: &str) -> IndexUnit {
     IndexUnit {

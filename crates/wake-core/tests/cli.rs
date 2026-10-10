@@ -766,7 +766,7 @@ fn refresh_refuses_when_only_remote_memories_would_be_lost() {
 #[test]
 fn context_shows_where_each_agent_left_off_or_nothing() {
     let tmp = tempfile::tempdir().unwrap();
-    let home = std::fs::canonicalize(tmp.path()).unwrap();
+    let home = common::real_dir(tmp.path());
     let project = home.join("app");
     let fresh = home.join("fresh");
     std::fs::create_dir_all(project.join("src")).unwrap();
