@@ -1,8 +1,9 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.1] — 2026-10-10
 
 - New: Codex gets the Wake plugin too: one command adds it to the Codex CLI and the Codex app, and every new Codex session then starts knowing where your agents left off in the project, with Wake's MCP tools to read earlier sessions. Settings → Connect shows it in place of the Codex hooks setup; if you added that hook to ~/.codex/config.toml, remove it so new sessions don't get the context twice
+- Update: The Claude Code plugin's install command in Settings → Connect downloads only the plugin, not all of Wake's source
 
 ## [0.9.0] — 2026-10-10
 

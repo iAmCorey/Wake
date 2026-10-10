@@ -1,6 +1,6 @@
 {
   "name": "wake",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Every new session starts knowing where your coding agents left off in this project, and Wake's MCP tools let Codex search and read any earlier session from any agent. Read-only; needs the Wake app.",
   "author": {
     "name": "Corey Chiu",
