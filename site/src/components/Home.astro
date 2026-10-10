@@ -1,0 +1,32 @@
+---
+import Base from '../layouts/Base.astro';
+import Hero from './Hero.astro';
+import Agents from './Agents.astro';
+import Resume from './Resume.astro';
+import Connect from './Connect.astro';
+import Insights from './Insights.astro';
+import More from './More.astro';
+import Principles from './Principles.astro';
+import Faq from './Faq.astro';
+import Download from './Download.astro';
+import type { Lang } from '../lib/copy';
+
+interface Props {
+  lang: Lang;
+}
+const { lang } = Astro.props;
+---
+
+<Base lang={lang} alternate={lang === 'en' ? '/zh/' : '/'}>
+  <main>
+    <Hero lang={lang} />
+    <Agents lang={lang} />
+    <Resume lang={lang} />
+    <Connect lang={lang} />
+    <Insights lang={lang} />
+    <More lang={lang} />
+    <Principles lang={lang} />
+    <Faq lang={lang} />
+    <Download lang={lang} />
+  </main>
+</Base>

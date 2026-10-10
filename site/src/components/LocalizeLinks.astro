@@ -1,0 +1,14 @@
+---
+// The docs are rendered from the repo's Markdown, whose links between pages point at
+// the English routes. On a Chinese page those links should stay in Chinese.
+import { localePath, type Lang } from '../lib/copy';
+
+interface Props {
+  lang: Lang;
+}
+const { lang } = Astro.props;
+const html = await Astro.slots.render('default');
+const out = lang === 'en' ? html : html.replace(/href="(\/(?:docs\/[^"]*|changelog[^"]*))"/g, (_, path) => `href="${localePath(lang, path)}"`);
+---
+
+<Fragment set:html={out} />

@@ -1,0 +1,66 @@
+---
+import Icon from './Icon.astro';
+import LangSwitch from './LangSwitch.astro';
+import { COPY, localePath, type Lang } from '../lib/copy';
+import { getRelease, REPO_URL } from '../lib/release';
+
+interface Props {
+  lang: Lang;
+  alternate?: string;
+}
+const { lang, alternate } = Astro.props;
+const t = COPY[lang];
+const home = lang === 'zh' ? '/zh/' : '/';
+const { stars } = await getRelease();
+// Which section this page belongs to, read from the path with the /zh prefix removed.
+const section = Astro.url.pathname.replace(/^\/zh(?=\/|$)/, '') || '/';
+const links = [
+  { href: home, label: t.nav.home, current: section === '/' },
+  { href: localePath(lang, '/docs/mcp'), label: t.nav.docs, current: section.startsWith('/docs') },
+  { href: localePath(lang, '/changelog'), label: t.nav.changelog, current: section.startsWith('/changelog') },
+];
+const starLabel = stars === null ? null : stars >= 1000 ? `${(stars / 1000).toFixed(1).replace(/\.0$/, '')}k` : String(stars);
+---
+
+<header class="nav" data-nav>
+  <div class="wrap nav-inner">
+    <a class="brand" href={home}>
+      <img src="/favicon.svg" alt="" width="30" height="30" />
+      Wake
+    </a>
+    <nav class="nav-primary" aria-label="Main">
+      {
+        links.map((l) => (
+          <a href={l.href} aria-current={l.current ? 'page' : undefined}>
+            {l.label}
+          </a>
+        ))
+      }
+    </nav>
+    <div class="nav-actions">
+      <LangSwitch lang={lang} alternate={alternate} />
+      <a class="btn btn-sun" href={`${home}#download`}>{t.nav.download}</a>
+      <a class="btn btn-ghost gh-star" href={REPO_URL} aria-label={starLabel ? `${t.nav.star} (${stars})` : t.nav.github}>
+        <Icon name="github" class="gh-mark" />
+        <span class="gh-word">{starLabel ? 'Star' : t.nav.github}</span>
+        {
+          starLabel && (
+            <span class="gh-count">
+              <Icon name="star" class="gh-star-ico" />
+              {starLabel}
+            </span>
+          )
+        }
+      </a>
+    </div>
+  </div>
+</header>
+
+<script>
+  const nav = document.querySelector<HTMLElement>('[data-nav]');
+  if (nav) {
+    const update = () => nav.classList.toggle('is-scrolled', window.scrollY > 24);
+    update();
+    window.addEventListener('scroll', update, { passive: true });
+  }
+</script>

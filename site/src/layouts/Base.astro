@@ -1,0 +1,57 @@
+---
+import '@fontsource-variable/bricolage-grotesque/standard.css';
+import '@fontsource-variable/jetbrains-mono';
+import '../styles/global.css';
+import Nav from '../components/Nav.astro';
+import Footer from '../components/Footer.astro';
+import { COPY, type Lang } from '../lib/copy';
+
+interface Props {
+  lang: Lang;
+  title?: string;
+  description?: string;
+  /** Path of this page in the other language, when there is one. */
+  alternate?: string;
+}
+
+const { lang, title, description, alternate } = Astro.props;
+const t = COPY[lang];
+const pageTitle = title ?? t.title;
+const pageDescription = description ?? t.description;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+const ogImage = new URL('/og.png', Astro.site);
+---
+
+<!doctype html>
+<html lang={t.htmlLang}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{pageTitle}</title>
+    <meta name="description" content={pageDescription} />
+    <meta name="theme-color" content="#0b1730" />
+    <link rel="canonical" href={canonical} />
+    {
+      alternate && (
+        <>
+          <link rel="alternate" hreflang={lang === 'en' ? 'zh-Hans' : 'en'} href={new URL(alternate, Astro.site)} />
+          <link rel="alternate" hreflang={t.htmlLang} href={canonical} />
+        </>
+      )
+    }
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icon-180.png" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Wake" />
+    <meta property="og:title" content={pageTitle} />
+    <meta property="og:description" content={pageDescription} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={ogImage} />
+    <meta name="twitter:card" content="summary_large_image" />
+  </head>
+  <body>
+    <Nav lang={lang} alternate={alternate} />
+    <slot />
+    <Footer lang={lang} />
+  </body>
+</html>

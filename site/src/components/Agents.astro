@@ -1,0 +1,30 @@
+---
+import { COPY, type Lang } from '../lib/copy';
+import { AGENTS, brandSrc } from '../lib/agents';
+
+interface Props {
+  lang: Lang;
+}
+const t = COPY[Astro.props.lang].agents;
+---
+
+<section class="section" id="agents">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>{t.title}</h2>
+      <p>{t.lede}</p>
+    </div>
+    <ul class="manifest">
+      {
+        AGENTS.map((a) => (
+          <li>
+            <img src={brandSrc(a)} alt="" width="24" height="24" />
+            <span class="name">{a.name}</span>
+            <code>{a.where}</code>
+          </li>
+        ))
+      }
+    </ul>
+    <p class="footnote">{t.missing}</p>
+  </div>
+</section>

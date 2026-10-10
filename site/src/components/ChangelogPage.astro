@@ -1,0 +1,119 @@
+---
+// CHANGELOG.md has one shape (see the repo's release rules): "## [x.y.z] — date" and
+// one-line "- New: / Fix: / Update:" entries. Parsed here rather than rendered as
+// Markdown so each kind can be marked, and so [Unreleased] stays off the site.
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import Base from '../layouts/Base.astro';
+import { COPY, localePath, type Lang } from '../lib/copy';
+import { REPO_URL } from '../lib/release';
+
+interface Props {
+  lang: Lang;
+}
+const { lang } = Astro.props;
+const t = COPY[lang].docs;
+
+// Builds run from site/; the bundled page no longer sits next to its source.
+const raw = await readFile(path.resolve(process.cwd(), '../CHANGELOG.md'), 'utf8');
+
+const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
+function inline(text: string): string {
+  return esc(text)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2">$1</a>')
+    .replace(/\(#(\d+)/g, `(<a href="${REPO_URL}/issues/$1">#$1</a>`)
+    .replace(/, thanks @([\w-]+)/g, ', thanks <a href="https://github.com/$1">@$1</a>');
+}
+
+interface Entry {
+  kind: 'new' | 'fix' | 'update' | null;
+  html: string;
+}
+interface Version {
+  version: string;
+  date: string;
+  entries: Entry[];
+}
+
+const versions: Version[] = [];
+for (const line of raw.split('\n')) {
+  const head = line.match(/^## \[([^\]]+)\](?:\s*[—-]\s*(.+))?/);
+  if (head) {
+    versions.push({ version: head[1], date: head[2]?.trim() ?? '', entries: [] });
+    continue;
+  }
+  const item = line.match(/^- (?:(New|Fix|Update):\s*)?(.*)$/);
+  if (item && versions.length) {
+    versions.at(-1)!.entries.push({ kind: (item[1]?.toLowerCase() as Entry['kind']) ?? null, html: inline(item[2]) });
+  }
+}
+const released = versions.filter((v) => !/unreleased/i.test(v.version));
+---
+
+<Base
+  lang={lang}
+  title={`${t.changelog} — Wake`}
+  description="Every Wake release and what changed in it."
+  alternate={localePath(lang === 'en' ? 'zh' : 'en', '/changelog')}
+>
+  <main class="doc-page">
+    <div class="wrap doc-layout">
+      <aside class="doc-toc">
+        <p>{t.label}</p>
+        <a href={localePath(lang, '/docs/mcp')}>{t.mcp}</a>
+        <a href={localePath(lang, '/docs/cli')}>{t.cli}</a>
+        <a href={localePath(lang, '/changelog')} aria-current="page">{t.changelog}</a>
+        <hr />
+        {released.slice(0, 24).map((v) => <a class="sub" href={`#v${v.version}`}>{v.version}</a>)}
+      </aside>
+      <article class="prose changelog">
+        <h1>{t.changelog}</h1>
+        {t.changelogEnglishOnly && <p class="lang-note">{t.changelogEnglishOnly}</p>}
+        {
+          released.map((v) => (
+            <section>
+              <h2 id={`v${v.version}`}>
+                <a href={`${REPO_URL}/releases/tag/v${v.version}`}>{v.version}</a>
+                {v.date && <span class="date">{v.date}</span>}
+              </h2>
+              <ul>
+                {v.entries.map((e) => (
+                  <li>
+                    <span class:list={['tag', e.kind && `tag-${e.kind}`]}>{e.kind ? t.tags[e.kind] : ''}</span>
+                    <span set:html={e.html} lang="en" />
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ))
+        }
+      </article>
+    </div>
+  </main>
+</Base>
+
+<style>
+  .changelog h2 a {
+    text-decoration: none;
+  }
+  .changelog .date {
+    margin-left: 14px;
+    font: 400 14px var(--body);
+    color: var(--dim);
+  }
+  .changelog ul {
+    padding-left: 0;
+    list-style: none;
+  }
+  .changelog li {
+    display: grid;
+    grid-template-columns: 4.4rem minmax(0, 1fr);
+    gap: 12px;
+    align-items: baseline;
+  }
+  .changelog .tag {
+    margin: 0;
+  }
+</style>

@@ -1,0 +1,146 @@
+---
+import Icon from './Icon.astro';
+import { COPY, type Lang } from '../lib/copy';
+import { AGENT_BY_ID } from '../lib/agents';
+import { SESSIONS, DEMO_QUERIES } from '../lib/demo-data';
+
+interface Props {
+  lang: Lang;
+}
+const { lang } = Astro.props;
+const t = COPY[lang].demo;
+
+const units = lang === 'zh' ? { m: ' 分钟', h: ' 小时', d: ' 天', w: ' 周' } : { m: 'm', h: 'h', d: 'd', w: 'w' };
+const age = (m: number) =>
+  m < 60 ? `${m}${units.m}` : m < 1440 ? `${Math.round(m / 60)}${units.h}` : m < 10080 ? `${Math.round(m / 1440)}${units.d}` : `${Math.round(m / 10080)}${units.w}`;
+
+const sessions = [...SESSIONS].sort((a, b) => a.age - b.age);
+const count = (key: 'agent' | 'project') =>
+  Object.entries(
+    sessions.reduce<Record<string, number>>((acc, s) => ((acc[s[key]] = (acc[s[key]] ?? 0) + 1), acc), {}),
+  ).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+const agentCounts = count('agent').slice(0, 8);
+const projectCounts = count('project');
+
+const used = Object.fromEntries(
+  [...new Set(sessions.map((s) => s.agent))].map((id) => [id, { name: AGENT_BY_ID[id].name, icon: AGENT_BY_ID[id].icon }]),
+);
+const first = sessions[0];
+const payload = JSON.stringify({
+  sessions,
+  agents: used,
+  queries: DEMO_QUERIES,
+  labels: { messages: t.messages, none: t.none, units },
+}).replace(/</g, '\\u003c');
+const shortcut = '⌘K';
+---
+
+<div class="demo wrap" data-demo>
+  <div class="window" role="group" aria-label="Wake">
+    <aside class="win-sidebar">
+      <div class="lights" aria-hidden="true"><i></i><i></i><i></i></div>
+      <div class="win-title">Wake</div>
+      <button type="button" class="win-search" data-open>
+        <Icon name="search" />
+        {t.sidebarSearch}
+        <kbd>{shortcut}</kbd>
+      </button>
+      <div class="side-row is-current">
+        <span>{t.allSessions}</span><span class="count">{sessions.length}</span>
+      </div>
+      <div class="side-group">{t.agents}</div>
+      {
+        agentCounts.map(([id, n]) => (
+          <div class="side-row">
+            <img src={`/brands/${AGENT_BY_ID[id].icon}.webp`} alt="" width="16" height="16" />
+            <span>{AGENT_BY_ID[id].name}</span>
+            <span class="count">{n}</span>
+          </div>
+        ))
+      }
+      <div class="side-group">{t.projects}</div>
+      {
+        projectCounts.map(([p, n]) => (
+          <div class="side-row">
+            <span>{p}</span>
+            <span class="count">{n}</span>
+          </div>
+        ))
+      }
+    </aside>
+
+    <section class="win-list" aria-label={t.allSessions}>
+      <div class="list-head"><strong>{t.allSessions}</strong><span>{t.sort}</span></div>
+      <div class="list-rows" data-list>
+        {
+          sessions.map((s) => (
+            <button type="button" class:list={['list-row', s.id === first.id && 'is-current']} data-id={s.id}>
+              <span class="t">{s.title}</span>
+              <span class="row-meta">
+                <img src={`/brands/${AGENT_BY_ID[s.agent].icon}.webp`} alt="" width="14" height="14" />
+                <span class="proj">{s.project}</span>
+                <span class="age">{age(s.age)}</span>
+              </span>
+            </button>
+          ))
+        }
+      </div>
+    </section>
+
+    <section class="win-detail" aria-live="polite">
+      <div class="detail-head">
+        <div class="detail-ctx" data-ctx>
+          <img src={`/brands/${AGENT_BY_ID[first.agent].icon}.webp`} alt="" width="15" height="15" />
+          <span>{AGENT_BY_ID[first.agent].name}</span>
+          <span class="proj">{first.project}</span>
+          {first.branch && <span>⑂ {first.branch}</span>}
+        </div>
+        <div class="detail-title" data-title>{first.title}</div>
+        <div class="detail-meta" data-meta>
+          {first.model && <span class="model-badge">{first.model}</span>}
+          <span>{first.messages.length} {t.messages}</span>
+          <span>{age(first.age)}</span>
+        </div>
+      </div>
+      <div class="detail-body" data-body>
+        <div class="msgs" data-msgs>
+          {first.messages.map((m) => <div class={`msg msg-${m.role}`}>{m.text}</div>)}
+        </div>
+      </div>
+    </section>
+
+    <div class="palette-layer" data-layer>
+      <div class="palette" role="dialog" aria-label={t.placeholder}>
+        <label class="palette-input">
+          <Icon name="search" />
+          <input data-input type="search" placeholder={t.placeholder} aria-label={t.placeholder} autocomplete="off" spellcheck="false" />
+        </label>
+        <div class="palette-results" data-results role="listbox"></div>
+        <div class="palette-foot">
+          <span>{t.scope}</span>
+          <span>↑↓ {t.navigate}</span>
+          <span>↩ {t.open}</span>
+          <span>esc {t.close}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="demo-try">
+    <span>{t.try}</span>
+    {
+      DEMO_QUERIES.map((q) => (
+        <button type="button" data-q={q}>
+          {/[(){}]/.test(q) ? <code>{q}</code> : q}
+        </button>
+      ))
+    }
+  </div>
+
+  <script type="application/json" set:html={payload} />
+</div>
+
+<script>
+  import { startDemo } from '../scripts/demo';
+  document.querySelectorAll<HTMLElement>('[data-demo]').forEach(startDemo);
+</script>

@@ -1,0 +1,34 @@
+---
+import { COPY, type Lang } from '../lib/copy';
+
+interface Props {
+  lang: Lang;
+}
+const t = COPY[Astro.props.lang].more;
+---
+
+<section class="section" id="more">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>{t.title}</h2>
+    </div>
+    <div class="more">
+      {
+        t.items.map((item) => (
+          <div class="more-item">
+            <h3>{item.name}</h3>
+            <p>{item.body}</p>
+            {'chips' in item && item.chips && (
+              <p class="chips">
+                {item.chips.map((c) => (
+                  <span class:list={['chip', 'mono' in item && item.mono && 'mono']}>{c}</span>
+                ))}
+              </p>
+            )}
+          </div>
+        ))
+      }
+    </div>
+  </div>
+</section>
+

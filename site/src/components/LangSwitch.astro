@@ -1,0 +1,175 @@
+---
+// The usual language menu: a globe and the current language; the menu lists every
+// language in its own name, with the current one checked.
+import Icon from './Icon.astro';
+import { COPY, type Lang } from '../lib/copy';
+
+interface Props {
+  lang: Lang;
+  /** This page in the other language; pages without a translation fall back to that language's home. */
+  alternate?: string;
+}
+const { lang, alternate } = Astro.props;
+const here = Astro.url.pathname;
+
+const LANGS: { lang: Lang; name: string; short: string; hreflang: string; home: string }[] = [
+  { lang: 'en', name: 'English', short: 'EN', hreflang: 'en', home: '/' },
+  { lang: 'zh', name: '简体中文', short: '中', hreflang: 'zh-Hans', home: '/zh/' },
+];
+const items = LANGS.map((l) => ({ ...l, href: l.lang === lang ? here : (alternate ?? l.home), current: l.lang === lang }));
+const current = items.find((i) => i.current)!;
+---
+
+<div class="lang" data-lang>
+  <button
+    type="button"
+    class="lang-btn"
+    aria-haspopup="menu"
+    aria-expanded="false"
+    aria-controls="lang-menu"
+    aria-label={`${COPY[lang].nav.language}${lang === 'zh' ? '：' : ': '}${current.name}`}
+  >
+    <Icon name="globe" class="lang-globe" />
+    <span class="lang-name">{current.short}</span>
+    <Icon name="chevron" class="lang-chevron" />
+  </button>
+  <div class="lang-menu" id="lang-menu" role="menu" hidden>
+    {
+      items.map((i) => (
+        <a
+          role="menuitemradio"
+          aria-checked={i.current ? 'true' : 'false'}
+          href={i.href}
+          hreflang={i.hreflang}
+          lang={i.hreflang}
+        >
+          <span>{i.name}</span>
+          {i.current && <Icon name="check" class="lang-check" />}
+        </a>
+      ))
+    }
+  </div>
+</div>
+
+<style>
+  .lang {
+    position: relative;
+  }
+
+  .lang-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 36px;
+    padding: 0 10px;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: none;
+    color: var(--mist);
+    font: 500 14px var(--body);
+    cursor: pointer;
+    transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .lang-btn:hover,
+  .lang-btn[aria-expanded='true'] {
+    color: var(--foam);
+    background: rgb(163 179 203 / 0.08);
+    border-color: var(--line);
+  }
+
+  .lang-btn :global(.lang-globe) {
+    width: 16px;
+    height: 16px;
+  }
+
+  .lang-btn :global(.lang-chevron) {
+    width: 14px;
+    height: 14px;
+    transition: transform 0.15s ease;
+  }
+
+  .lang-btn[aria-expanded='true'] :global(.lang-chevron) {
+    transform: rotate(180deg);
+  }
+
+  .lang-menu {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    z-index: 60;
+    min-width: 168px;
+    padding: 6px;
+    border: 1px solid var(--line-strong);
+    border-radius: 12px;
+    background: var(--night-raised);
+    box-shadow: 0 18px 48px -12px rgb(0 0 0 / 0.6);
+  }
+
+  .lang-menu a {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    color: var(--foam);
+    font-size: 15px;
+    text-decoration: none;
+  }
+
+  .lang-menu a:hover,
+  .lang-menu a:focus-visible {
+    background: rgb(163 179 203 / 0.1);
+    outline: none;
+  }
+
+  .lang-menu :global(.lang-check) {
+    width: 16px;
+    height: 16px;
+    color: var(--gold);
+  }
+
+</style>
+
+<script>
+  document.querySelectorAll<HTMLElement>('[data-lang]').forEach((root) => {
+    const btn = root.querySelector<HTMLButtonElement>('.lang-btn')!;
+    const menu = root.querySelector<HTMLElement>('.lang-menu')!;
+    const links = [...menu.querySelectorAll<HTMLAnchorElement>('a')];
+
+    const open = (focusFirst = false) => {
+      menu.hidden = false;
+      btn.setAttribute('aria-expanded', 'true');
+      if (focusFirst) (links.find((l) => l.getAttribute('aria-checked') === 'true') ?? links[0]).focus();
+    };
+    const close = (refocus = false) => {
+      menu.hidden = true;
+      btn.setAttribute('aria-expanded', 'false');
+      if (refocus) btn.focus();
+    };
+
+    btn.addEventListener('click', () => (menu.hidden ? open() : close()));
+    btn.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        open(true);
+      }
+    });
+    menu.addEventListener('keydown', (e) => {
+      const i = links.indexOf(document.activeElement as HTMLAnchorElement);
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        close(true);
+      } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        links[(i + (e.key === 'ArrowDown' ? 1 : links.length - 1)) % links.length].focus();
+      } else if (e.key === 'Tab') {
+        close();
+      }
+    });
+    document.addEventListener('click', (e) => {
+      if (!root.contains(e.target as Node)) close();
+    });
+  });
+</script>

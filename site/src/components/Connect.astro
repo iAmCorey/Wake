@@ -1,0 +1,124 @@
+---
+import { COPY, localePath, type Lang } from '../lib/copy';
+
+interface Props {
+  lang: Lang;
+}
+const { lang } = Astro.props;
+const t = COPY[lang].connect;
+
+const setups = [
+  {
+    id: 'claude',
+    label: 'Claude Code',
+    code: 'claude mcp add --scope user wake -- "/Applications/Wake.app/Contents/MacOS/wake-mcp"',
+  },
+  {
+    id: 'codex',
+    label: 'Codex',
+    code: '# ~/.codex/config.toml\n[mcp_servers.wake]\ncommand = "/Applications/Wake.app/Contents/MacOS/wake-mcp"',
+  },
+  {
+    id: 'shell',
+    label: 'Shell',
+    code: 'wake-cli sessions --project "$PWD" --limit 5\nwake-cli search "rate limiter" --project "$PWD"',
+  },
+  { id: 'skill', label: 'Skill', code: 'npx skills add iAmCorey/Wake' },
+];
+---
+
+<section class="section" id="connect">
+  <div class="wrap split reverse">
+    <div>
+      <div class="section-head">
+        <h2>{t.title}</h2>
+        <p>{t.lede}</p>
+      </div>
+      <div class="setup" data-setup>
+        <div class="tabs" role="tablist" aria-label={t.setup}>
+          {
+            setups.map((s, i) => (
+              <button type="button" role="tab" id={`tab-${s.id}`} aria-controls={`pane-${s.id}`} aria-selected={i === 0 ? 'true' : 'false'}>
+                {s.label}
+              </button>
+            ))
+          }
+        </div>
+        {
+          setups.map((s, i) => (
+            <div class="snippet" role="tabpanel" id={`pane-${s.id}`} aria-labelledby={`tab-${s.id}`} hidden={i !== 0}>
+              <pre><code>{s.code}</code></pre>
+              <button type="button" class="copy-btn" data-copy data-label={t.copy} data-done={t.copied}>
+                {t.copy}
+              </button>
+            </div>
+          ))
+        }
+        <div class="setup-links">
+          <a href={localePath(lang, '/docs/mcp')}>{t.docs}</a>
+          <a href={localePath(lang, '/docs/cli')}>{t.cliDocs}</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="resume-head">
+        <img src="/brands/codex.webp" alt="" width="16" height="16" />
+        <span class="t">Codex</span>
+      </div>
+      <div class="chat">
+        <div class="ask">{t.ask}</div>
+        <div class="call">
+          <span><b>wake_search</b> {'{'}"query": "healthz rate limiter", "project": "~/Github/acme-web"{'}'}</span>
+          <span>2 sessions match</span>
+          <span class="ref">wake://session/codex:019a3c…#2</span>
+        </div>
+        <div class="call">
+          <span><b>wake_get_session</b> {'{'}"key": "codex:019a3c…", "from_seq": 0{'}'}</span>
+        </div>
+        <div>{t.answer}</div>
+        <div class="from">
+          <img src="/brands/codex.webp" alt="" width="14" height="14" />
+          <span>Health checks get 429 after the rate limiter change</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+  document.querySelectorAll<HTMLElement>('[data-setup]').forEach((root) => {
+    const tabs = [...root.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+    const select = (tab: HTMLButtonElement) => {
+      tabs.forEach((t) => {
+        const on = t === tab;
+        t.setAttribute('aria-selected', String(on));
+        t.tabIndex = on ? 0 : -1;
+        document.getElementById(t.getAttribute('aria-controls')!)!.hidden = !on;
+      });
+    };
+    tabs.forEach((tab, i) => {
+      tab.tabIndex = i === 0 ? 0 : -1;
+      tab.addEventListener('click', () => select(tab));
+      tab.addEventListener('keydown', (e) => {
+        if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+        const next = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+        select(next);
+        next.focus();
+      });
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('[data-copy]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const code = btn.parentElement?.querySelector('code')?.textContent ?? '';
+      try {
+        await navigator.clipboard.writeText(code);
+        btn.textContent = btn.dataset.done!;
+        setTimeout(() => (btn.textContent = btn.dataset.label!), 1600);
+      } catch {
+        // Clipboard blocked: leave the text selectable.
+      }
+    });
+  });
+</script>

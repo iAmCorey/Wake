@@ -1,0 +1,41 @@
+---
+import Icon from './Icon.astro';
+import Demo from './Demo.astro';
+import { COPY, localePath, type Lang } from '../lib/copy';
+
+interface Props {
+  lang: Lang;
+}
+const { lang } = Astro.props;
+const t = COPY[lang].hero;
+---
+
+<section class="hero" data-hero>
+  <canvas class="hero-canvas" aria-hidden="true" data-dawn></canvas>
+  <div class="wrap">
+    <h1>{t.title.split('\n').map((line, i) => (i ? [<br />, line] : line))}</h1>
+    <p class="lede">{t.lede}</p>
+    <div class="hero-actions">
+      <a class="btn btn-sun" href="#download">
+        <Icon name="download" />
+        {t.cta}
+      </a>
+      <a class="btn btn-ghost" href={localePath(lang, '/docs/mcp')}>{t.docs}</a>
+    </div>
+    <ul class="hero-meta">
+      <li>{t.free}</li>
+      <li>{t.platforms}</li>
+    </ul>
+  </div>
+  <div class="horizon" data-horizon></div>
+  <Demo lang={lang} />
+</section>
+
+<script>
+  import { startDawn } from '../scripts/dawn';
+
+  const hero = document.querySelector<HTMLElement>('[data-hero]');
+  const canvas = document.querySelector<HTMLCanvasElement>('[data-dawn]');
+  const marker = document.querySelector<HTMLElement>('[data-horizon]');
+  if (hero && canvas && marker) startDawn(canvas, hero, marker);
+</script>

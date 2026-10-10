@@ -1,0 +1,26 @@
+---
+import { COPY, type Lang } from '../lib/copy';
+
+interface Props {
+  lang: Lang;
+}
+const t = COPY[Astro.props.lang].principles;
+---
+
+<section class="section" id="principles">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>{t.title}</h2>
+    </div>
+    <dl class="principles">
+      {
+        t.items.map((item) => (
+          <div>
+            <dt>{item.name}</dt>
+            <dd>{item.body}</dd>
+          </div>
+        ))
+      }
+    </dl>
+  </div>
+</section>

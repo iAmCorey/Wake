@@ -179,3 +179,22 @@ jobs:
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }
           }
+
+  # 官网(site/,托管在 Vercel)的下载按钮在构建时从 GitHub 读最新的完整 Release
+  # (六个产物齐了才算)。三端都传完后触发一次重新部署,新版本的下载链接才会
+  # 在发版当下就换上;没配 VERCEL_DEPLOY_HOOK 这个 secret 时什么都不做。
+  site:
+    name: Refresh wake.cool
+    needs: [macos, linux, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Trigger Vercel deploy hook
+        env:
+          HOOK: ${{ secrets.VERCEL_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "VERCEL_DEPLOY_HOOK not set; skipping"
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK" > /dev/null
+          echo "deploy triggered"

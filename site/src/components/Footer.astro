@@ -1,0 +1,34 @@
+---
+import { COPY, localePath, type Lang } from '../lib/copy';
+import { REPO_URL } from '../lib/release';
+
+interface Props {
+  lang: Lang;
+}
+const { lang } = Astro.props;
+const t = COPY[lang];
+const year = new Date().getFullYear();
+const [before, after] = t.footer.credit.replace('{year}', String(year)).split('{author}');
+---
+
+<footer class="footer">
+  <div class="wrap footer-inner">
+    <div>
+      <a class="brand" href={lang === 'zh' ? '/zh/' : '/'}>
+        <img src="/favicon.svg" alt="" width="24" height="24" />
+        Wake
+      </a>
+      <p>
+        {before}<a href="https://coreychiu.com/?utm_source=wake.cool">Corey Chiu</a>{after}
+      </p>
+    </div>
+    <nav aria-label="Footer">
+      <a href={`${REPO_URL}/releases`}>{t.footer.releases}</a>
+      <a href={localePath(lang, '/changelog')}>{t.nav.changelog}</a>
+      <a href={localePath(lang, '/docs/mcp')}>MCP</a>
+      <a href={localePath(lang, '/docs/cli')}>CLI</a>
+      <a href={REPO_URL}>GitHub</a>
+      <a href={`${REPO_URL}/issues`}>{t.footer.issues}</a>
+    </nav>
+  </div>
+</footer>

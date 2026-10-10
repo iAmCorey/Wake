@@ -1,0 +1,27 @@
+# 官网(site/,托管在 Vercel)的 GitHub 星数与下载链接是构建时取的,两次构建之间不变。
+# 每天让 Vercel 重新构建一次,数字最多晚一天;没配 VERCEL_DEPLOY_HOOK 这个 secret 时
+# 什么都不做。也可以在 Actions 页手动点 Run workflow。
+name: Refresh wake.cool
+
+on:
+  schedule:
+    - cron: '17 1 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  refresh:
+    name: Trigger Vercel deploy hook
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Rebuild the site
+        env:
+          HOOK: ${{ secrets.VERCEL_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "VERCEL_DEPLOY_HOOK not set; skipping"
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK" > /dev/null
+          echo "deploy triggered"

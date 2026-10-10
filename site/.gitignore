@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.astro/
+.vercel/
+# Generated from crates/wake/assets by scripts/sync-assets.mjs
+public/brands/
+public/icon-*.png
+public/favicon.svg

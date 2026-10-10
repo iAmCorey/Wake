@@ -1,0 +1,386 @@
+---
+// The app's Insights page, rebuilt in HTML on made-up data (see DESIGN.md "Insights"):
+// overview, last 7 days, the 53-week heatmap with the weekly chart under it, the
+// distribution chart and the three leaderboards, each with its ‹ › switch.
+import { COPY, type Lang } from '../lib/copy';
+import { makeInsights } from '../lib/insights-data';
+
+interface Props {
+  lang: Lang;
+}
+const { lang } = Astro.props;
+const c = COPY[lang].insights;
+const u = c.ui;
+const data = makeInsights();
+
+const fill = (tpl: string, ...args: (string | number)[]) => args.reduce<string>((s, a) => s.replace('{}', String(a)), tpl);
+const num = (n: number) => n.toLocaleString(u.locale);
+const date = (d: string, opts: Intl.DateTimeFormatOptions) =>
+  new Intl.DateTimeFormat(u.locale, { timeZone: 'UTC', ...opts }).format(new Date(`${d}T00:00:00Z`));
+
+// Overview, in the app's order
+const overview = [
+  [u.sessions, num(data.totals.sessions)],
+  [u.tokens, num(data.totals.tokens)],
+  [u.prompts, num(data.totals.prompts)],
+  [u.agents, num(data.totals.agents)],
+  [u.projects, num(data.totals.projects)],
+  [u.activeDays, num(data.totals.activeDays)],
+];
+const delta = ([now, before]: [number, number]) => {
+  if (now === before) return { text: u.same, up: false };
+  const pct = Math.round(((now - before) / Math.max(1, before)) * 100);
+  return { text: fill(u.vsLastWeek, `${pct > 0 ? '+' : ''}${pct}`), up: pct > 0 };
+};
+const week = [
+  [u.sessions, data.last7.sessions],
+  [u.prompts, data.last7.prompts],
+  [u.activeDays, data.last7.activeDays],
+] as const;
+
+// Heatmap: four steps by share of the busiest day
+const peakDay = Math.max(...data.days.map((d) => d?.prompts ?? 0));
+const level = (p: number) => (p === 0 ? 0 : p <= peakDay * 0.25 ? 1 : p <= peakDay * 0.5 ? 2 : p <= peakDay * 0.75 ? 3 : 4);
+const monthMarks: { col: number; label: string }[] = [];
+data.weeks.forEach((_, i) => {
+  const first = data.days[i * 7];
+  if (!first) return;
+  const m = first.date.slice(0, 7);
+  const prev = i > 0 ? data.days[(i - 1) * 7]?.date.slice(0, 7) : null;
+  if (m !== prev && i < 51) monthMarks.push({ col: i, label: date(first.date, { month: 'short' }) });
+});
+
+// Weekly chart: five agents in brand colours, the rest as Other
+const peakWeek = Math.max(...data.weeks.map((w) => w.total));
+const lastWeek = data.weeks[data.weeks.length - 1];
+const leader = data.series.reduce((a, b) => ((lastWeek.byAgent[b.id] ?? 0) > (lastWeek.byAgent[a.id] ?? 0) ? b : a));
+const stack = [...data.series, { id: 'other', name: u.other, color: '' }];
+
+// Distribution labels
+const hourLabel = (h: number) =>
+  lang === 'zh' ? `${h}:00` : `${h % 12 === 0 ? 12 : h % 12} ${h < 12 ? 'AM' : 'PM'}`;
+const months = Array.from({ length: 12 }, (_, m) => date(`2026-${String(m + 1).padStart(2, '0')}-15`, { month: 'short' }));
+const monthsLong = Array.from({ length: 12 }, (_, m) =>
+  lang === 'zh' ? `${m + 1} 月` : date(`2026-${String(m + 1).padStart(2, '0')}-15`, { month: 'long' }),
+);
+const peakOf = (xs: number[]) => xs.indexOf(Math.max(...xs));
+const dist = [
+  {
+    title: u.byHour,
+    caption: fill(u.mostAround, hourLabel(peakOf(data.hour))),
+    values: data.hour,
+    labels: data.hour.map((_, h) => (h % 6 === 0 ? hourLabel(h) : '')),
+    sparse: true,
+  },
+  {
+    title: u.byWeekday,
+    caption: fill(u.mostOn, u.weekdaysLong[peakOf(data.weekday)]),
+    values: data.weekday,
+    labels: u.weekdays,
+    sparse: false,
+  },
+  {
+    title: u.byMonth,
+    caption: fill(u.mostIn, monthsLong[peakOf(data.month)]),
+    values: data.month,
+    labels: months,
+    sparse: false,
+  },
+];
+
+const boards = [
+  { key: 'agents', title: u.agents, rows: data.boards.agents, limit: 9 },
+  { key: 'projects', title: u.projects, rows: data.boards.projects, limit: 6 },
+  { key: 'models', title: u.models, rows: data.boards.models, limit: 6 },
+];
+const metrics = [
+  { key: 'sessions', label: u.sessions },
+  { key: 'tokens', label: u.tokens },
+  { key: 'prompts', label: u.prompts },
+];
+const payload = JSON.stringify({
+  dist,
+  boards: boards.map((b) => ({ key: b.key, rows: b.rows, limit: b.limit })),
+  metrics,
+  locale: u.locale,
+}).replace(/</g, '\\u003c');
+const firstBoard = (rows: (typeof boards)[number]['rows'], limit: number) => {
+  const sorted = [...rows].sort((a, b) => b.sessions - a.sessions).slice(0, limit);
+  const peak = Math.max(...sorted.map((r) => r.sessions));
+  return sorted.map((r) => ({ ...r, value: num(r.sessions), pct: (r.sessions / peak) * 100 }));
+};
+---
+
+<section class="section" id="insights">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>{c.title}</h2>
+      <p>{c.lede}</p>
+    </div>
+
+    <div class="ins panel" data-insights>
+      <div class="ins-head">
+        <div class="lights" aria-hidden="true"><i></i><i></i><i></i></div>
+        <div>
+          <div class="ins-title">{u.insights}</div>
+          <div class="ins-sub">{fill(u.since, date(data.since, { month: 'short', year: 'numeric' }))}</div>
+        </div>
+      </div>
+
+      <dl class="ins-overview">
+        {
+          overview.map(([label, value]) => (
+            <div>
+              <dd>{value}</dd>
+              <dt>{label}</dt>
+            </div>
+          ))
+        }
+      </dl>
+
+      <div class="ins-block">
+        <h3>{u.last7}</h3>
+        <dl class="ins-week">
+          {
+            week.map(([label, pair]) => {
+              const d = delta(pair as [number, number]);
+              return (
+                <div>
+                  <dd>{num(pair[0])}</dd>
+                  <dt>{label}</dt>
+                  <span class:list={['ins-delta', d.up && 'is-up']}>{d.text}</span>
+                </div>
+              );
+            })
+          }
+        </dl>
+      </div>
+
+      <div class="ins-row">
+        <div class="ins-main">
+          <div class="ins-block">
+            <h3>{u.activity}</h3>
+            <div class="ins-scroll" data-scroll-end>
+              <div class="ins-heat">
+                <div class="ins-months" aria-hidden="true">
+                  {monthMarks.map((m) => <span style={`left: calc(26px + ${m.col} * 12px)`}>{m.label}</span>)}
+                </div>
+                <div class="ins-heat-body">
+                  <div class="ins-dows" aria-hidden="true">
+                    <span></span><span>{u.weekdays[0]}</span><span></span><span>{u.weekdays[2]}</span><span></span><span>{u.weekdays[4]}</span><span></span>
+                  </div>
+                  <div class="ins-cells">
+                    {
+                      data.days.map((d) =>
+                        d ? <i data-l={level(d.prompts)} title={`${num(d.prompts)} ${u.prompts.toLowerCase()} · ${date(d.date, { dateStyle: 'medium' })}`} /> : <i class="is-future" />,
+                      )
+                    }
+                  </div>
+                </div>
+                <div class="ins-heat-foot">
+                  <span>
+                    {fill(u.streak, data.streak.current)} · {fill(u.longest, data.streak.longest)} ·{' '}
+                    {fill(u.busiest, date(data.busiest.date, { month: 'short', day: 'numeric' }), num(data.busiest.prompts))}
+                  </span>
+                  <span class="ins-legend-scale">
+                    {u.less}
+                    <i data-l="0" />
+                    <i data-l="1" />
+                    <i data-l="2" />
+                    <i data-l="3" />
+                    <i data-l="4" />
+                    {u.more}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="ins-block">
+            <h3>{u.overTime}</h3>
+            <p class="ins-caption">{fill(u.perWeek, leader.name)}</p>
+            <div class="ins-scroll" data-scroll-end>
+              <div class="ins-bars">
+                {
+                  data.weeks.map((w) => (
+                    <span class="ins-bar" title={`${date(w.start, { month: 'short', day: 'numeric' })} · ${num(w.total)} ${u.prompts.toLowerCase()}`}>
+                      {w.total === 0 ? (
+                        <i class="is-zero" />
+                      ) : (
+                        stack.map((s) => {
+                          const n = w.byAgent[s.id] ?? 0;
+                          return n > 0 ? <i style={`height: ${(n / peakWeek) * 76}px; ${s.color ? `background: ${s.color}` : ''}`} class:list={[!s.color && 'is-other']} /> : null;
+                        })
+                      )}
+                    </span>
+                  ))
+                }
+              </div>
+            </div>
+            <ul class="ins-series">
+              {
+                stack.map((s) => (
+                  <li>
+                    <i class:list={[!s.color && 'is-other']} style={s.color ? `background: ${s.color}` : ''} />
+                    {s.name}
+                  </li>
+                ))
+              }
+            </ul>
+          </div>
+        </div>
+
+        <div class="ins-side">
+          <div class="ins-block" data-dist>
+            <div class="ins-block-head">
+              <div>
+                <h3 data-dist-title>{dist[0].title}</h3>
+                <p class="ins-caption" data-dist-caption>{dist[0].caption}</p>
+              </div>
+              <div class="ins-switch">
+                <button type="button" data-dist-step="-1" aria-label={u.previous}>‹</button>
+                <button type="button" data-dist-step="1" aria-label={u.next}>›</button>
+              </div>
+            </div>
+            <div class="ins-dist" data-dist-bars data-n={dist[0].values.length}>
+              {
+                dist[0].values.map((v) => {
+                  const peak = Math.max(...dist[0].values);
+                  return (
+                    <span>
+                      <i class:list={[v === peak && 'is-peak', v === 0 && 'is-zero']} style={v ? `height: ${(v / peak) * 100}%` : ''} />
+                    </span>
+                  );
+                })
+              }
+            </div>
+            <div class="ins-dist-labels" data-dist-labels data-sparse={String(dist[0].sparse)}>
+              {dist[0].labels.map((l) => <span>{l}</span>)}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="ins-boards">
+        {
+          boards.map((b) => (
+            <div class="ins-block" data-board={b.key}>
+              <div class="ins-block-head is-board">
+                <h3>{b.title}</h3>
+                <div class="ins-switch">
+                  <button type="button" data-board-step="-1" aria-label={u.previous}>‹</button>
+                  <span data-board-metric>{metrics[0].label}</span>
+                  <button type="button" data-board-step="1" aria-label={u.next}>›</button>
+                </div>
+              </div>
+              <ol class="ins-rank" data-board-rows>
+                {firstBoard(b.rows, b.limit).map((r) => (
+                  <li>
+                    {b.key === 'agents' && r.icon ? (
+                      <img src={`/brands/${r.icon}.webp`} alt="" width="15" height="15" />
+                    ) : b.key === 'projects' ? (
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                      </svg>
+                    ) : null}
+                    <span class="ins-name">{r.name}</span>
+                    <span class="ins-track">
+                      <i style={`width: ${r.pct}%`} />
+                    </span>
+                    <span class="ins-val">{r.value}</span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+    <script type="application/json" data-insights-data set:html={payload} />
+  </div>
+</section>
+
+<script>
+  interface Row {
+    name: string;
+    icon?: string;
+    sessions: number;
+    tokens: number | null;
+    prompts: number;
+  }
+  const root = document.querySelector<HTMLElement>('[data-insights]');
+  const raw = document.querySelector('[data-insights-data]')?.textContent;
+  if (root && raw) {
+    const data = JSON.parse(raw) as {
+      dist: { title: string; caption: string; values: number[]; labels: string[]; sparse: boolean }[];
+      boards: { key: string; rows: Row[]; limit: number }[];
+      metrics: { key: 'sessions' | 'tokens' | 'prompts'; label: string }[];
+      locale: string;
+    };
+
+    // Show the latest weeks first when the charts have to scroll sideways.
+    root.querySelectorAll<HTMLElement>('[data-scroll-end]').forEach((el) => (el.scrollLeft = el.scrollWidth));
+
+    // Distribution: hour → weekday → month
+    let di = 0;
+    const distEl = root.querySelector<HTMLElement>('[data-dist]')!;
+    const renderDist = () => {
+      const d = data.dist[di];
+      const peak = Math.max(...d.values);
+      distEl.querySelector('[data-dist-title]')!.textContent = d.title;
+      distEl.querySelector('[data-dist-caption]')!.textContent = d.caption;
+      const bars = distEl.querySelector<HTMLElement>('[data-dist-bars]')!;
+      bars.dataset.n = String(d.values.length);
+      bars.innerHTML = d.values
+        .map((v) => `<span><i class="${v === peak ? 'is-peak' : ''}${v === 0 ? ' is-zero' : ''}" style="${v ? `height:${(v / peak) * 100}%` : ''}"></i></span>`)
+        .join('');
+      const labels = distEl.querySelector<HTMLElement>('[data-dist-labels]')!;
+      labels.dataset.sparse = String(d.sparse);
+      labels.innerHTML = d.labels.map((l) => `<span>${l}</span>`).join('');
+    };
+    distEl.querySelectorAll<HTMLButtonElement>('[data-dist-step]').forEach((b) =>
+      b.addEventListener('click', () => {
+        di = (di + Number(b.dataset.distStep) + data.dist.length) % data.dist.length;
+        renderDist();
+      }),
+    );
+
+    // Leaderboards: sessions → tokens → prompts, each board on its own
+    const compact = (n: number) =>
+      n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e8 ? 0 : 1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(n >= 1e5 ? 0 : 1)}K` : String(n);
+    const folder =
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+    for (const board of data.boards) {
+      const el = root.querySelector<HTMLElement>(`[data-board="${board.key}"]`)!;
+      let mi = 0;
+      const render = () => {
+        const m = data.metrics[mi].key;
+        const rows = board.rows
+          .filter((r) => r[m] !== null)
+          .sort((a, b) => (b[m] as number) - (a[m] as number))
+          .slice(0, board.limit);
+        const peak = Math.max(...rows.map((r) => r[m] as number));
+        el.querySelector('[data-board-metric]')!.textContent = data.metrics[mi].label;
+        el.querySelector('[data-board-rows]')!.innerHTML = rows
+          .map((r) => {
+            const v = r[m] as number;
+            const lead =
+              board.key === 'agents' && r.icon
+                ? `<img src="/brands/${r.icon}.webp" alt="" width="15" height="15">`
+                : board.key === 'projects'
+                  ? folder
+                  : '';
+            const value = m === 'tokens' ? compact(v) : v.toLocaleString(data.locale);
+            return `<li>${lead}<span class="ins-name">${r.name}</span><span class="ins-track"><i style="width:${(v / peak) * 100}%"></i></span><span class="ins-val">${value}</span></li>`;
+          })
+          .join('');
+      };
+      el.querySelectorAll<HTMLButtonElement>('[data-board-step]').forEach((b) =>
+        b.addEventListener('click', () => {
+          mi = (mi + Number(b.dataset.boardStep) + data.metrics.length) % data.metrics.length;
+          render();
+        }),
+      );
+    }
+  }
+</script>

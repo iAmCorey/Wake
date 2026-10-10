@@ -1,0 +1,27 @@
+{
+  "name": "wake-site",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "sync-assets": "node scripts/sync-assets.mjs",
+    "dev": "node scripts/sync-assets.mjs && astro dev",
+    "build": "node scripts/sync-assets.mjs && astro build",
+    "preview": "astro preview",
+    "check": "astro check"
+  },
+  "dependencies": {
+    "@astrojs/markdown-remark": "^7.3.2",
+    "@astrojs/sitemap": "^3.7.4",
+    "@fontsource-variable/bricolage-grotesque": "^5.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "astro": "^7.3.8",
+    "sharp": "^0.35.5"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.10",
+    "typescript": "^6.0.3"
+  }
+}

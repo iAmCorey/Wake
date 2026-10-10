@@ -1,0 +1,87 @@
+---
+import Icon from './Icon.astro';
+import { COPY, type Lang } from '../lib/copy';
+
+interface Props {
+  lang: Lang;
+}
+const t = COPY[Astro.props.lang].resume;
+const terminals = ['Terminal', 'iTerm2', 'Ghostty', 'Kooky'];
+---
+
+<section class="section" id="resume">
+  <div class="wrap split">
+    <div class="section-head">
+      <h2>{t.title}</h2>
+      <p>{t.lede}</p>
+    </div>
+    <div class="panel" data-resume>
+      <div class="resume-head">
+        <img src="/brands/claude-code.webp" alt="" width="16" height="16" />
+        <span class="t">Add a rate limiter to the public API</span>
+        <div class="open-in">
+          <span class="open-in-btn"><Icon name="terminal" class="ico" />{t.openIn}<Icon name="chevron" class="ico" /></span>
+          <div class="open-in-menu" aria-hidden="true" data-menu>
+            {terminals.map((name, i) => <div class:list={[i === 2 && 'is-current']}>{name}</div>)}
+            <hr />
+            <div>{t.copySsh}</div>
+          </div>
+        </div>
+      </div>
+      <pre class="term" data-term aria-label="Terminal"><span class="c">Last login: Thu Oct  9 09:41 on ttys004</span>
+<span class="p">~/Github/acme-web</span> $ <span data-typed>claude --resume 7f3a9c1e-4b2d-4f8a-9e61-0c5d2b8a7e14</span><span class="cursor"></span></pre>
+    </div>
+  </div>
+</section>
+
+<style>
+  .open-in-btn :global(.ico) {
+    width: 14px;
+    height: 14px;
+  }
+  /* The menu only shows during the little story the script plays */
+  .open-in-menu {
+    opacity: 0;
+    transform: translateY(-4px);
+    transition: opacity 0.18s ease, transform 0.18s ease;
+    pointer-events: none;
+  }
+  .open-in-menu.is-open {
+    opacity: 1;
+    transform: none;
+  }
+</style>
+
+<script>
+  // Once the panel scrolls into view: open the menu, pick Ghostty, close it, type the
+  // resume command, then show the agent picking the conversation back up.
+  const term = document.querySelector<HTMLElement>('[data-term]');
+  const menu = document.querySelector<HTMLElement>('[data-menu]');
+  const typed = term?.querySelector<HTMLElement>('[data-typed]');
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (term && typed && !reduced) {
+    const full = typed.textContent ?? '';
+    typed.textContent = '';
+    const io = new IntersectionObserver(
+      async ([entry]) => {
+        if (!entry.isIntersecting) return;
+        io.disconnect();
+        menu?.classList.add('is-open');
+        await new Promise((r) => setTimeout(r, 1400));
+        menu?.classList.remove('is-open');
+        await new Promise((r) => setTimeout(r, 350));
+        for (let i = 1; i <= full.length; i++) {
+          typed.textContent = full.slice(0, i);
+          await new Promise((r) => setTimeout(r, i < 15 ? 55 : 14));
+        }
+        await new Promise((r) => setTimeout(r, 450));
+        const out = document.createElement('span');
+        out.innerHTML =
+          '\n\n<span class="c">&gt; One client is hammering the public API. Add a rate limiter…</span>\n<span class="ok">⏺</span> Requests over the limit now get a 429 with a Retry-After header. Added tests for the burst and the refill.\n\n&gt; ';
+        term.querySelector('.cursor')?.before(out);
+      },
+      { threshold: 0.6 },
+    );
+    io.observe(term);
+  }
+</script>

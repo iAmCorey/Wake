@@ -1,0 +1,53 @@
+---
+import { render, type CollectionEntry } from 'astro:content';
+import Base from '../layouts/Base.astro';
+import LocalizeLinks from './LocalizeLinks.astro';
+import { COPY, localePath, type Lang } from '../lib/copy';
+import { REPO_URL } from '../lib/release';
+
+interface Props {
+  lang: Lang;
+  entry: CollectionEntry<'docs'>;
+}
+const { lang, entry } = Astro.props;
+const t = COPY[lang].docs;
+const { Content, headings } = await render(entry);
+const title = headings.find((h) => h.depth === 1)?.text ?? entry.id;
+const nav = [
+  { slug: 'mcp', label: t.mcp },
+  { slug: 'cli', label: t.cli },
+];
+const toc = headings.filter((h) => h.depth === 2 || h.depth === 3);
+const path = `/docs/${entry.id}`;
+---
+
+<Base
+  lang={lang}
+  title={`${title} — Wake`}
+  description={`Wake documentation: ${title}.`}
+  alternate={localePath(lang === 'en' ? 'zh' : 'en', path)}
+>
+  <main class="doc-page">
+    <div class="wrap doc-layout">
+      <aside class="doc-toc">
+        <p>{t.label}</p>
+        {
+          nav.map((n) => (
+            <a href={localePath(lang, `/docs/${n.slug}`)} aria-current={n.slug === entry.id ? 'page' : undefined}>
+              {n.label}
+            </a>
+          ))
+        }
+        <a href={localePath(lang, '/changelog')}>{t.changelog}</a>
+        <hr />
+        {toc.map((h) => <a class:list={[h.depth === 3 && 'sub']} href={`#${h.slug}`}>{h.text}</a>)}
+        <hr />
+        <a href={`${REPO_URL}/edit/main/docs/${entry.id}.md`}>{t.edit}</a>
+      </aside>
+      <article class="prose" lang="en">
+        {t.englishOnly && <p class="lang-note" lang="zh-Hans">{t.englishOnly}</p>}
+        <LocalizeLinks lang={lang}><Content /></LocalizeLinks>
+      </article>
+    </div>
+  </main>
+</Base>

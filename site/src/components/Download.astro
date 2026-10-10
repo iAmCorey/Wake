@@ -1,0 +1,70 @@
+---
+import Icon from './Icon.astro';
+import { COPY, type Lang } from '../lib/copy';
+import { getRelease } from '../lib/release';
+
+interface Props {
+  lang: Lang;
+}
+const { lang } = Astro.props;
+const t = COPY[lang].download;
+const r = await getRelease();
+const date = r.date
+  ? new Intl.DateTimeFormat(lang === 'zh' ? 'zh-CN' : 'en', { dateStyle: 'long' }).format(new Date(r.date))
+  : null;
+const file = (url: string) => url.split('/').pop();
+---
+
+<section class="download" id="download">
+  <div class="wrap">
+    <h2>{t.title}</h2>
+    <p class="rel">
+      {(date ? t.released.replace('{date}', date) : t.version).replace('{v}', r.version)} <a href={r.url}>{t.notes}</a>
+    </p>
+    <div class="platforms">
+      <div class="platform" data-os="mac">
+        <Icon name="apple" class="os-ico" />
+        <h3>{t.mac.name}</h3>
+        <p class="req">{t.mac.req}</p>
+        <div class="files">
+          <a class="file" href={r.mac}><span>{t.universal}</span><code>{file(r.mac)}</code></a>
+        </div>
+        <p class="note">{t.gatekeeper} <code>xattr -d com.apple.quarantine Wake.app</code></p>
+      </div>
+      <div class="platform" data-os="linux">
+        <Icon name="linux" class="os-ico" />
+        <h3>{t.linux.name}</h3>
+        <p class="req">{t.linux.req}</p>
+        <div class="files">
+          <a class="file" href={r.linux.deb.amd64}><span>.deb x86_64</span><code>{file(r.linux.deb.amd64)}</code></a>
+          <a class="file" href={r.linux.deb.arm64}><span>.deb arm64</span><code>{file(r.linux.deb.arm64)}</code></a>
+          <a class="file" href={r.linux.tar.amd64}><span>.tar.gz x86_64</span><code>{file(r.linux.tar.amd64)}</code></a>
+          <a class="file" href={r.linux.tar.arm64}><span>.tar.gz arm64</span><code>{file(r.linux.tar.arm64)}</code></a>
+        </div>
+      </div>
+      <div class="platform" data-os="windows">
+        <Icon name="windows" class="os-ico" />
+        <h3>{t.windows.name}</h3>
+        <p class="req">{t.windows.req}</p>
+        <div class="files">
+          <a class="file" href={r.windows}><span>.zip x86_64</span><code>{file(r.windows)}</code></a>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .download :global(.os-ico) {
+    width: 26px;
+    height: 26px;
+    margin-bottom: 12px;
+    color: var(--gold);
+  }
+</style>
+
+<script>
+  const ua = navigator.userAgent;
+  const os = /Windows/i.test(ua) ? 'windows' : /Mac/i.test(ua) ? 'mac' : /Linux|X11/i.test(ua) ? 'linux' : null;
+  if (os) document.querySelector(`.platform[data-os="${os}"]`)?.classList.add('is-yours');
+</script>
