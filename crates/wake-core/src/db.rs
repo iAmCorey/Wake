@@ -1214,6 +1214,21 @@ impl Store {
             .optional()?)
     }
 
+    /// 一条会话停在哪:主线上最后一句用户提问与最后一条助手回复,各折成一行(单元怎么读回
+    /// 一句话在 `adapters::unit_prompt` / `unit_reply`,与写单元的 `units_from_messages` 放在
+    /// 一处)。新会话开场的交接用(`tools::session_start_context`)。两个角色各查各的:一次
+    /// 提问之后 agent 连跑几百步工具时,混在一起往回数会够不着那句提问,整场会话就被当成没
+    /// 提问(2026-10-10 Codex review);往回几百步都只有工具调用的,不给最后一答
+    pub fn last_exchange(&self, key: &str) -> Result<(Option<String>, Option<String>)> {
+        let conn = self.read.lock().unwrap();
+        Ok((
+            last_unit_of(&conn, key, Role::User, 50, crate::adapters::unit_prompt)?,
+            last_unit_of(&conn, key, Role::Assistant, 200, |text| {
+                crate::adapters::unit_reply(text).map(str::to_string)
+            })?,
+        ))
+    }
+
     /// 路径 → 现行 key(watcher 增量的易主清理用)
     pub fn key_for_path(&self, file_path: &str) -> Result<Option<String>> {
         let conn = self.read.lock().unwrap();
@@ -2955,6 +2970,29 @@ const ROOT_SESSION_COLS_ALL: &str =
        WHERE c.parent_key = s.key), 0),
      s.tokens_used, s.model, s.source, s.archived, s.file_path, s.file_size,
      COALESCE(u.favorite,0), COALESCE(u.pinned,0), s.host";
+
+/// 主线上某个角色最近的单元里,第一个 `decode` 读得出话的(往回最多看 `limit` 条)。按 id
+/// 倒着走 idx_messages_session:同一会话的单元按 seq 顺序写入、追加只加在后面
+/// (`replace_units`),id 序就是 seq 序,不用排序,也不必把整条会话的正文读出来
+fn last_unit_of(
+    conn: &Connection,
+    key: &str,
+    role: Role,
+    limit: i64,
+    decode: impl Fn(&str) -> Option<String>,
+) -> Result<Option<String>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT text FROM messages WHERE session_key = ?1 AND sidechain_id IS NULL AND role = ?2 \
+         ORDER BY id DESC LIMIT ?3",
+    )?;
+    let mut rows = stmt.query(params![key, role.as_str(), limit])?;
+    while let Some(row) = rows.next()? {
+        if let Some(found) = decode(row.get_ref(0)?.as_str()?) {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
 
 fn child_filter_sql(
     filter: &SessionFilter,

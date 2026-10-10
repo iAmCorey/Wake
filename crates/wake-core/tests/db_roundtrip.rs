@@ -8,7 +8,7 @@ use wake_core::db::{self, IndexLock, Ownership, Store, Wait};
 use wake_core::models::*;
 
 mod common;
-use common::meta;
+use common::{meta, unit};
 
 fn temp_store() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -16,14 +16,30 @@ fn temp_store() -> (tempfile::TempDir, Store) {
     (dir, store)
 }
 
-fn unit(seq: i64, role: Role, text: &str) -> IndexUnit {
-    IndexUnit {
-        seq,
-        sidechain_id: None,
-        role,
-        timestamp: Some(1_700_000_000_000 + seq),
-        text: text.to_string(),
+/// 一次提问之后 agent 连跑几百步工具:最后一问照样找得到——会话不会被当成没提问、从新会话
+/// 开场的交接里消失;往回 200 条助手消息里一句话都没有的,不给最后一答
+#[test]
+fn last_exchange_survives_a_long_tool_run() {
+    let (_dir, store) = temp_store();
+    for (key, steps) in [("claude-code:long", 300), ("claude-code:short", 20)] {
+        let mut units = vec![
+            unit(0, Role::User, "refactor the parser"),
+            unit(1, Role::Assistant, "On it."),
+        ];
+        units.extend(
+            (2..steps).map(|seq| unit(seq, Role::Assistant, &format!("\nBash step {seq}"))),
+        );
+        store.write_session(&meta(key, key), 1, &units).unwrap();
     }
+    let asked = Some("refactor the parser".to_string());
+    assert_eq!(
+        store.last_exchange("claude-code:long").unwrap(),
+        (asked.clone(), None)
+    );
+    assert_eq!(
+        store.last_exchange("claude-code:short").unwrap(),
+        (asked, Some("On it.".to_string()))
+    );
 }
 
 #[test]

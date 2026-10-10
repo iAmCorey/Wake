@@ -5,7 +5,7 @@
 //! 执行失败(坏 key、文件解析失败)是给 LLM 看的结果(`Failed` → isError)。
 //! "没匹配上项目""没有结果"都不是错误,照常返回带提示的文本。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
@@ -270,14 +270,21 @@ pub fn invoke(
 }
 
 /// 新会话开场注入几条、看多久以内的(`wake-cli context`;插件与 Codex 钩子都调它)
-const CONTEXT_SESSIONS: i64 = 5;
+const CONTEXT_SESSIONS: usize = 5;
 const CONTEXT_DAYS: i64 = 14;
+/// 从多少条最近的会话里挑:每个 agent 先各取一条,再按时间补满
+const CONTEXT_CANDIDATES: i64 = 50;
+/// 最后一答折成一行的长度(最后一问与标题同用 MAX_TITLE)
+const CONTEXT_REPLY_CHARS: usize = 120;
 
 /// 新会话开场的上下文(`wake-cli context`,Claude Code 插件与 Codex 的 SessionStart 钩子
-/// 调它):`dir` 所在项目最近两周的几条会话,查询与条目都是 wake_list_sessions 那一份
-/// (`recent_roots` / `push_session_lines`)。认不出项目、这段时间没有会话时给 None——钩子的
-/// 输出原样进 agent 的上下文,"没有结果"的提示与已知项目清单在这里只是噪音。不是 MCP 工具、
-/// 没有要逐字节对齐的另一面,只读库里的会话行、不读会话文件,所以不经 ToolContext、不要 roster
+/// 调它):`dir` 所在项目最近两周、各个 agent 停在哪——每条带最后一问与最后一答,好让新开的
+/// agent(多半是另一家)接得上。挑法:每个 agent 先各取最近一条、再按时间补满五条——只按
+/// 时间挑,用得最多的那一家会把别家整个挤出去,而交接要的恰恰是别家做到哪了;一句用户提问
+/// 都没有的会话(别的 agent 代跑的、刚开还没说话的)不列。认不出项目、这段时间没有会话时给
+/// None——钩子的输出原样进 agent 的上下文,"没有结果"的提示与已知项目清单在这里只是噪音。
+/// 筛选与 wake_list_sessions 同一份(`recent_roots`)。不是 MCP 工具、没有要逐字节对齐的另一面,
+/// 只读索引(会话行与消息单元)、不读会话文件,所以不经 ToolContext、不要 roster
 pub fn session_start_context(
     store: &Store,
     dir: &std::path::Path,
@@ -286,30 +293,97 @@ pub fn session_start_context(
     if project_paths.is_empty() {
         return Ok(None);
     }
-    let since = crate::db::now_ms() - CONTEXT_DAYS * crate::cleanup::DAY;
-    let (sessions, total) = recent_roots(
+    // 上层目录会匹配到底下的好几个项目(monorepo 根、~/Github),那时每条标出是哪个项目
+    let many_projects = project_paths.len() > 1;
+    let now = crate::db::now_ms();
+    let (candidates, total) = recent_roots(
         store,
         project_paths,
         Vec::new(),
-        Some(since),
+        Some(now - CONTEXT_DAYS * crate::cleanup::DAY),
         false,
-        CONTEXT_SESSIONS,
+        CONTEXT_CANDIDATES,
     )?;
-    if sessions.is_empty() {
+    // 每条候选一格:None = 还没问过,Some(None) = 一句提问都没有(不列),Some(Some(_)) = 选中。
+    // 先每个 agent 各取最近一条,再按时间补满;问过的不再问,够数就停
+    let mut picked: Vec<Option<Option<Exchange>>> = candidates.iter().map(|_| None).collect();
+    let mut agents = HashSet::new();
+    let mut count = 0;
+    for one_per_agent in [true, false] {
+        for (s, slot) in candidates.iter().zip(picked.iter_mut()) {
+            if count == CONTEXT_SESSIONS {
+                break;
+            }
+            if slot.is_some() || (one_per_agent && agents.contains(&s.agent)) {
+                continue;
+            }
+            let exchange = Exchange::of(store, &s.key)?;
+            if exchange.is_some() {
+                agents.insert(s.agent);
+                count += 1;
+            }
+            *slot = Some(exchange);
+        }
+    }
+    if count == 0 {
         return Ok(None);
     }
     let mut out = format!(
-        "Wake: {total} session{} in this project in the last {CONTEXT_DAYS} days{}:\n\n",
-        plural(total),
-        if total > sessions.len() as i64 {
-            format!(", the {} most recent", sessions.len())
+        "Wake: recent sessions in this project, across your coding agents ({}):\n\n",
+        if total > count as i64 {
+            format!("{count} of {total} from the last {CONTEXT_DAYS} days")
         } else {
-            String::new()
+            format!("last {CONTEXT_DAYS} days")
         }
     );
-    push_session_lines(&mut out, &sessions);
+    // 候选本来就按更新时间倒序
+    for (s, slot) in candidates.iter().zip(&picked) {
+        let Some(Some(x)) = slot else { continue };
+        out.push_str(&format!("- {}", s.agent.display_name()));
+        if many_projects && !s.project_name.is_empty() {
+            out.push_str(&format!(" · {}", s.project_name));
+        }
+        out.push_str(&format!(
+            " · {} · \"{}\" · `{}`\n  last asked: \"{}\"\n",
+            ago(now, s.updated_at),
+            one_line(&s.title, MAX_TITLE),
+            s.key,
+            x.asked
+        ));
+        if let Some(reply) = &x.reply {
+            out.push_str(&format!("  last reply: \"{reply}\"\n"));
+        }
+    }
     out.push_str("\nRead one with the wake_get_session tool, or run `wake-cli show <key>`.\n");
     Ok(Some(out))
+}
+
+/// 一条会话停在哪:最后一问与最后一答,各一行(`Store::last_exchange`)。一句用户提问都没有
+/// 就是 None——那条会话不进开场上下文
+struct Exchange {
+    asked: String,
+    reply: Option<String>,
+}
+
+impl Exchange {
+    fn of(store: &Store, key: &str) -> Result<Option<Self>, ToolError> {
+        let (asked, reply) = store.last_exchange(key)?;
+        Ok(asked.map(|asked| Self {
+            asked,
+            reply: reply.map(|r| one_line(&r, CONTEXT_REPLY_CHARS)),
+        }))
+    }
+}
+
+/// 开场注入里的时间:离现在多久(开场那一刻算的,读的人不用再换算日期)
+fn ago(now_ms: i64, t_ms: i64) -> String {
+    let mins = (now_ms - t_ms).max(0) / 60_000;
+    match mins {
+        0 => "just now".to_string(),
+        m if m < 60 => format!("{m}m ago"),
+        m if m < 24 * 60 => format!("{}h ago", m / 60),
+        m => format!("{}d ago", m / (24 * 60)),
+    }
 }
 
 // ---------------------------------------------------------------- 参数读取
@@ -975,14 +1049,6 @@ fn recent_roots(
     })?)
 }
 
-/// 会话清单的条目,一条一行("- " + `session_line`)
-fn push_session_lines(out: &mut String, sessions: &[SessionMeta]) {
-    for s in sessions {
-        out.push_str("- ");
-        out.push_str(&session_line(s));
-    }
-}
-
 fn list_sessions(ctx: &ToolContext, args: &Value) -> ToolResult {
     let agents = agents_arg(args)?;
     let since = since_arg(ctx, args)?;
@@ -1009,7 +1075,10 @@ fn list_sessions(ctx: &ToolContext, args: &Value) -> ToolResult {
         plural(total),
         sessions.len()
     ));
-    push_session_lines(&mut out, &sessions);
+    for s in &sessions {
+        out.push_str("- ");
+        out.push_str(&session_line(s));
+    }
     out.push_str("\nRead one with wake_get_session using its key.\n");
     out.push_str(&index_note(ctx.store));
     Ok(out)
@@ -1430,6 +1499,16 @@ fn get_session(ctx: &ToolContext, args: &Value) -> ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ago_reads_like_a_person_would_say_it() {
+        let now = 1_800_000_000_000;
+        assert_eq!(ago(now, now), "just now");
+        assert_eq!(ago(now, now + 5_000), "just now", "时钟略有偏差也不出负数");
+        assert_eq!(ago(now, now - 90_000), "1m ago");
+        assert_eq!(ago(now, now - 3 * 3_600_000), "3h ago");
+        assert_eq!(ago(now, now - 50 * 3_600_000), "2d ago");
+    }
 
     #[test]
     fn agent_names_parse_leniently() {

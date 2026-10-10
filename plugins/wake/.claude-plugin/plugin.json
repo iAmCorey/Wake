@@ -1,7 +1,7 @@
 {
   "name": "wake",
   "displayName": "Wake",
-  "description": "Every new session starts with this project's recent sessions, and Wake's MCP tools let Claude search and read any earlier session from any coding agent. Read-only; needs the Wake app.",
+  "description": "Every new session starts knowing where your coding agents left off in this project, and Wake's MCP tools let Claude search and read any earlier session from any agent. Read-only; needs the Wake app.",
   "author": {
     "name": "Corey Chiu",
     "url": "https://github.com/iAmCorey"

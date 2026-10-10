@@ -22,8 +22,8 @@ Settings → Connect in Wake shows the exact path for your install with a copy b
 claude mcp add --scope user wake -- "/Applications/Wake.app/Contents/MacOS/wake-mcp"
 ```
 
-Or install the Wake plugin instead, which adds this server and starts every new session with
-the project's recent sessions — `claude plugin marketplace add iAmCorey/Wake && claude plugin
+Or install the Wake plugin instead, which adds this server and starts every new session
+knowing where your agents left off in the project — `claude plugin marketplace add iAmCorey/Wake && claude plugin
 install wake@wake` (see [Claude Code plugin](cli.md#claude-code-plugin)). Use one or the other, not
 both, or the tools are listed twice.
 
@@ -90,8 +90,9 @@ Before asking me for context about this repository, check earlier sessions with 
 wake_list_sessions with the current directory, then wake_get_session for the relevant one.
 ```
 
-Claude Code and Codex can also be handed the project's recent sessions automatically when a
-session starts, through a hook that runs `wake-cli context` — see
+Claude Code and Codex can also be told where your agents left off in the project when a
+session starts — each recent session with its last question and reply — through a hook
+that runs `wake-cli context`; see
 [Claude Code plugin](cli.md#claude-code-plugin) and [Codex hooks](cli.md#codex-hooks) in the
 command-line guide. The Claude Code plugin brings this MCP server along.
 

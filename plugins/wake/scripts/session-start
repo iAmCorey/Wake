@@ -1,6 +1,6 @@
 #!/bin/sh
-# SessionStart hook: prints this project's recent sessions, which Claude Code adds to the
-# new session's context. `wake-cli context` prints nothing when the project has no recent
+# SessionStart hook: prints where your agents left off in this project, which Claude Code
+# adds to the new session's context. `wake-cli context` prints nothing when the project has no recent
 # sessions. When Wake is not installed or has no index yet, this stays quiet too — a hook
 # should never get in the way of starting a session.
 cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0

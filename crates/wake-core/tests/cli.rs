@@ -18,7 +18,7 @@ use wake_core::adapters::{create_adapter_roster_for, create_adapters_for, AgentA
 use wake_core::cli;
 use wake_core::db::{self, Store};
 use wake_core::mcp::tools::{self, TranscriptCache};
-use wake_core::models::{SessionFilter, SessionMeta};
+use wake_core::models::{AgentId, Role, SessionFilter, SessionMeta};
 use wake_core::scanner::{run_scan, NullEvents};
 
 mod common;
@@ -758,11 +758,13 @@ fn refresh_refuses_when_only_remote_memories_would_be_lost() {
     assert_eq!(left, 1, "远程记忆不许被清掉");
 }
 
-/// `context` 给 SessionStart 钩子用:当前目录所在项目最近两周的会话,子目录归到所在项目;
-/// 认不出项目、两周内没有会话时一个字节都不输出、退 0——钩子的输出原样进 agent 的上下文。
-/// 家目录不当"所在项目":在家目录随手开的会话不该被塞进每个新项目
+/// `context` 给 SessionStart 钩子用:当前目录所在项目最近两周、各个 agent 停在哪(最后一问、
+/// 最后一答),子目录归到所在项目。每个 agent 先各取一条再按时间补满五条——常用的那一家
+/// 不能把别家挤出去;一句提问都没有的会话不列。认不出项目、两周内没有会话时一个字节都不
+/// 输出、退 0——钩子的输出原样进 agent 的上下文。家目录不当"所在项目":在家目录随手开的
+/// 会话不该被塞进每个新项目
 #[test]
-fn context_prints_this_folders_recent_sessions_or_nothing() {
+fn context_shows_where_each_agent_left_off_or_nothing() {
     let tmp = tempfile::tempdir().unwrap();
     let home = std::fs::canonicalize(tmp.path()).unwrap();
     let project = home.join("app");
@@ -773,19 +775,62 @@ fn context_prints_this_folders_recent_sessions_or_nothing() {
     {
         let store = Store::open(&db).unwrap();
         let now = db::now_ms();
-        let session = |id: &str, at: &Path, updated_at: i64| SessionMeta {
-            project_path: at.to_string_lossy().into_owned(),
-            created_at: updated_at,
-            updated_at,
-            ..common::meta(&format!("claude-code:{id}"), &format!("about {id}"))
+        let write = |key: &str, at: &Path, minutes_ago: i64, turns: &[(Role, &str)]| {
+            let updated_at = now - minutes_ago * 60_000;
+            let meta = SessionMeta {
+                agent: AgentId::from_str(key.split(':').next().unwrap()).unwrap(),
+                project_path: at.to_string_lossy().into_owned(),
+                created_at: updated_at,
+                updated_at,
+                ..common::meta(key, &format!("about {key}"))
+            };
+            let units: Vec<_> = turns
+                .iter()
+                .enumerate()
+                .map(|(seq, (role, text))| common::unit(seq as i64, *role, text))
+                .collect();
+            store.write_session(&meta, updated_at, &units).unwrap();
         };
-        store
-            .write_meta_only(&[
-                (session("recent", &project, now), 1),
-                (session("stale", &project, now - 30 * 86_400_000), 1),
-                (session("in-home", &home, now), 1),
-            ])
-            .unwrap();
+        // Claude Code 五条都比 Codex 那条新,只按时间挑 Codex 就进不来。每条最后一个用户单元
+        // 是 `/model` 一类命令的输出——不是人说的话,最后一问要往前找到真正的提问
+        for n in 1..=5 {
+            write(
+                &format!("claude-code:c{n}"),
+                &project,
+                n,
+                &[
+                    (Role::User, &format!("ask c{n}")),
+                    (Role::Assistant, &format!("did c{n}\nmore")),
+                    (
+                        Role::User,
+                        "<local-command-stdout>Set model to opus</local-command-stdout>",
+                    ),
+                ],
+            );
+        }
+        write(
+            "codex:review",
+            &project,
+            2 * 24 * 60,
+            &[
+                (
+                    Role::User,
+                    "<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>--base main</command-args>",
+                ),
+                (Role::Assistant, "Looks good overall"),
+                // 只有工具调用的消息:单元以换行开头,不算回复
+                (Role::Assistant, "\nBash git diff main"),
+            ],
+        );
+        // 一句提问都没有(别的 agent 代跑、刚开还没说话)
+        write("codex:silent", &project, 0, &[(Role::Assistant, "working")]);
+        write(
+            "claude-code:stale",
+            &project,
+            30 * 24 * 60,
+            &[(Role::User, "old")],
+        );
+        write("claude-code:in-home", &home, 0, &[(Role::User, "hi")]);
     }
     let context = |dir: &Path| {
         let (out, _, code) = cli_raw_with(&["--db", db.to_str().unwrap(), "context"], |cmd| {
@@ -796,10 +841,37 @@ fn context_prints_this_folders_recent_sessions_or_nothing() {
     let (text, code) = context(&project.join("src"));
     assert_eq!(code, Some(0));
     assert!(
-        text.starts_with("Wake: 1 session in this project in the last 14 days:"),
+        text.starts_with(
+            "Wake: recent sessions in this project, across your coding agents (5 of 7 from the last 14 days):"
+        ),
         "{text}"
     );
-    assert!(text.contains("`claude-code:recent`"), "{text}");
+    let at = |needle: &str| {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("{needle} 不在: {text}"))
+    };
+    // 按时间排:c1 最新,Codex 那条最旧
+    assert!(
+        at("`claude-code:c1`") < at("`claude-code:c4`")
+            && at("`claude-code:c4`") < at("`codex:review`")
+    );
+    assert!(
+        !text.contains("claude-code:c5"),
+        "补满五条,c5 排不上: {text}"
+    );
+    assert!(
+        text.contains("last asked: \"ask c1\"\n  last reply: \"did c1\"\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("last asked: \"/review --base main\""),
+        "slash 命令写回原样: {text}"
+    );
+    assert!(
+        text.contains("last reply: \"Looks good overall\""),
+        "工具调用不算回复: {text}"
+    );
+    assert!(!text.contains("codex:silent"), "没有提问的会话不列: {text}");
     assert!(!text.contains("stale"), "两周以前的不列: {text}");
     assert!(!text.contains("in-home"), "家目录的会话不跟进来: {text}");
 

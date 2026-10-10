@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- New: Every new Claude Code session can start with the project's recent sessions from Wake — install the Wake plugin with one command, and it adds Wake's MCP tools too. Codex gets the same through Codex hooks. Both are in Settings → Connect
+- New: New Claude Code and Codex sessions can start knowing where your agents left off in the project — the latest sessions from Claude Code, Codex, Cursor and the rest, each with its last question and reply. For Claude Code, install the Wake plugin with one command (it adds Wake's MCP tools too); Codex gets it through Codex hooks. Both are in Settings → Connect
 - Fix: Looking up a project's sessions from a folder that has no history of its own no longer returns sessions started in your home folder or at the filesystem root
 - Update: Copy buttons in Settings → Connect are icons now; hover one to see what it copies
 - Fix: Search results show the text around each match, with every search term highlighted, instead of a dozen characters

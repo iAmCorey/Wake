@@ -117,7 +117,7 @@ const PLAIN: &[PlainSpec] = &[
     PlainSpec {
         name: "context",
         action: Action::Context,
-        summary: "this folder's project, its recent sessions — for a session-start hook; prints nothing when there are none",
+        summary: "where your agents left off in this folder's project — for a session-start hook; prints nothing when there are none",
     },
 ];
 
@@ -933,13 +933,13 @@ pub fn setup_text(f: &SetupFacts<'_>) -> String {
         out.push_str(&snippet_section(
             "Claude Code plugin",
             &claude_plugin_snippet(),
-            "Every new session starts with this project's recent sessions, and Claude gets\n\
-             Wake's MCP tools to read them.",
+            "Every new session starts knowing where your agents left off in this project, and\n\
+             Claude gets Wake's MCP tools to read those sessions.",
         ));
         out.push_str(&snippet_section(
             "Codex hooks",
             &codex_hooks_snippet(f.cli_bin),
-            "Every new Codex session starts with this project's recent sessions.",
+            "Every new Codex session starts knowing where your agents left off in this project.",
         ));
     }
     // 片段按 agent 认,不按下标——那个顺序是 Connect 页的事;hint 也用它自己

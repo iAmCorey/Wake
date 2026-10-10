@@ -97,7 +97,7 @@ fn context(db: &Option<PathBuf>) -> ExitCode {
         Ok(dir) => dir,
         Err(e) => return write(refuse(format!("cannot read the current directory: {e}"))),
     };
-    // 只读库里的会话行、不读会话文件,不必把 roster 建起来(与 setup 同理);库不存在或
+    // 只读索引(会话行与消息单元)、不读会话文件,不必把 roster 建起来(与 setup 同理);库不存在或
     // 太老由 open_read_only 给出 "launch Wake once"。哪天要读会话文件了,改回 open_index
     let store = match Store::open_read_only(&db_path(db)) {
         Ok(store) => store,

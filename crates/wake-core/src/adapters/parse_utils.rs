@@ -1055,6 +1055,19 @@ pub fn epoch_ms(n: f64) -> i64 {
 
 /// 清洗标题候选:剥 slash-command 壳与 system-reminder 等标签,压单行截断。空串=不可用
 pub fn clean_title_candidate(raw: &str) -> String {
+    clean_user_text(raw, false)
+}
+
+/// 用户那句话折成一行(新会话开场交接里的 "last asked"):与标题同一套清洗,只是 slash 命令
+/// 写回用户敲的样子 `/name args`——标题只留参数,交接里要看得出是哪条命令。空串 = 不是人说的
+/// 话(只剩 `/model` 一类命令的输出等)
+pub fn clean_prompt_line(raw: &str) -> String {
+    clean_user_text(raw, true)
+}
+
+/// 两者共用的清洗;`whole_command` 定 slash 命令写成 `/name args`,还是只留参数(没有参数退
+/// 命令名)
+fn clean_user_text(raw: &str, whole_command: bool) -> String {
     let mut s = strip_tag_block(raw, "system-reminder");
     s = strip_tag_block(&s, "local-command-caveat");
     s = strip_tag_block(&s, "local-command-stdout");
@@ -1062,10 +1075,11 @@ pub fn clean_title_candidate(raw: &str) -> String {
     let args = extract_tag(&s, "command-args");
     let name = extract_tag(&s, "command-name");
     if args.is_some() || name.is_some() {
-        s = args
-            .filter(|a| !a.trim().is_empty())
-            .or(name)
-            .unwrap_or_default();
+        let args = args.filter(|a| !a.trim().is_empty());
+        s = match (whole_command, name, args) {
+            (true, Some(name), args) => format!("{name} {}", args.unwrap_or_default()),
+            (_, name, args) => args.or(name).unwrap_or_default(),
+        };
     }
     // 去掉残余短标签
     let mut out = String::with_capacity(s.len());
@@ -1094,22 +1108,7 @@ pub fn clean_title_candidate(raw: &str) -> String {
             out.push(c);
         }
     }
-    let compact = out
-        .replace(IMAGE_PLACEHOLDER, " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if compact.is_empty() {
-        return String::new();
-    }
-    let chars: Vec<char> = compact.chars().collect();
-    if chars.len() > MAX_TITLE {
-        let mut t: String = chars[..MAX_TITLE].iter().collect();
-        t.push('…');
-        t
-    } else {
-        compact
-    }
+    crate::text::one_line(&out.replace(IMAGE_PLACEHOLDER, " "), MAX_TITLE)
 }
 
 fn strip_tag_block(s: &str, tag: &str) -> String {

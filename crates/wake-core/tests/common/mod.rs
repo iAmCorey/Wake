@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use wake_core::db::{IndexLock, Ownership};
-use wake_core::models::{AgentId, SessionMeta};
+use wake_core::models::{AgentId, IndexUnit, Role, SessionMeta};
 
 /// 一条最小的会话元数据(Claude Code、无模型无 token);测试按需用 `..meta(..)` 改字段。
 /// SessionMeta 没有 Default,新字段只补这一处
@@ -33,6 +33,17 @@ pub fn meta(key: &str, title: &str) -> SessionMeta {
         source: None,
         favorite: false,
         pinned: false,
+    }
+}
+
+/// 一个索引单元(主线、时间戳随 seq 递增);IndexUnit 同样没有 Default
+pub fn unit(seq: i64, role: Role, text: &str) -> IndexUnit {
+    IndexUnit {
+        seq,
+        sidechain_id: None,
+        role,
+        timestamp: Some(1_700_000_000_000 + seq),
+        text: text.to_string(),
     }
 }
 

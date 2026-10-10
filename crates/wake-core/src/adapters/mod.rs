@@ -624,6 +624,27 @@ fn units_from_messages(messages: &[TranscriptMessage]) -> Vec<IndexUnit> {
         .collect()
 }
 
+/// `units_from_messages` 的反向,新会话开场的交接从索引里取最后一问一答用
+/// (`Store::last_exchange`):用户那句话按标题同款清洗、slash 命令写回 `/name args`,清洗后为空
+/// 的(只剩命令输出之类)不算。两边的写法一起改,下面的测试卡着
+pub(crate) fn unit_prompt(text: &str) -> Option<String> {
+    Some(parse_utils::clean_prompt_line(text)).filter(|p| !p.is_empty())
+}
+
+/// 见 `unit_prompt`。单元 = 消息正文 + 换行 + 工具行,所以首行为空就是只有工具调用的消息,
+/// 不算回复;否则取正文里第一行有字的,代码块的边界行(带语言名的 ```rust 也是)与分隔线不算。
+/// 回复以代码块开头时取到的是块里的第一行——不跳过整块去找后面的话:单元里正文后面紧跟着
+/// 工具行,跳过去很可能取到 "Bash git push"
+pub(crate) fn unit_reply(text: &str) -> Option<&str> {
+    if text.lines().next().is_none_or(|l| l.trim().is_empty()) {
+        return None;
+    }
+    text.lines().find(|l| {
+        let l = l.trim_start();
+        !l.starts_with("```") && !l.starts_with("~~~") && l.chars().any(char::is_alphanumeric)
+    })
+}
+
 /// agent 在这些消息里查 Wake 的每一次调用:units_from_messages 把这些调用从索引里
 /// 跳过,这里按同一判据逐次记下来(所在消息的 seq 与时间、走的接入、用的工具)落
 /// wake_lookups 表——mcp-roadmap 定的"MCP 接入有没有真实使用"的信号,过滤掉又不记,
@@ -1307,6 +1328,42 @@ mod tests {
             model: None,
             images: Vec::new(),
         }
+    }
+
+    #[test]
+    fn units_read_back_into_the_last_question_and_reply() {
+        let units = units_from_messages(&[
+            msg(0, "", &[("Bash", "git diff")]),
+            msg(
+                1,
+                "```\nDone: pushed to main.\n```",
+                &[("Bash", "git push")],
+            ),
+            msg(2, "```rust\nfn main() {}\n```", &[("Bash", "cargo run")]),
+        ]);
+        assert_eq!(unit_reply(&units[0].text), None, "只有工具调用不算回复");
+        assert_eq!(unit_reply(&units[1].text), Some("Done: pushed to main."));
+        assert_eq!(
+            unit_reply(&units[2].text),
+            Some("fn main() {}"),
+            "带语言名的代码块边界不是回复"
+        );
+        assert_eq!(
+            unit_prompt(
+                "<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>--base main</command-args>"
+            )
+            .as_deref(),
+            Some("/review --base main")
+        );
+        assert_eq!(
+            unit_prompt("<command-name>/compact</command-name>").as_deref(),
+            Some("/compact")
+        );
+        assert_eq!(
+            unit_prompt("<local-command-stdout>Set model to opus</local-command-stdout>"),
+            None,
+            "命令输出不是人说的话"
+        );
     }
 
     #[test]

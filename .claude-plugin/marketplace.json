@@ -9,7 +9,7 @@
     {
       "name": "wake",
       "source": "./plugins/wake",
-      "description": "Every new session starts with this project's recent sessions (from Claude Code, Codex and the other agents Wake indexes), and Wake's MCP tools let Claude search and read any earlier session. Needs the Wake app."
+      "description": "Every new session starts knowing where your agents left off in this project (Claude Code, Codex and the other agents Wake indexes, each with its last question and reply), and Wake's MCP tools let Claude search and read any earlier session. Needs the Wake app."
     }
   ]
 }

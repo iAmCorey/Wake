@@ -122,12 +122,28 @@ To make this automatic instead of per-project, install the skill (see [Teaching 
 
 ### `context`
 
-Prints the recent sessions of the project the current directory belongs to — up to five
-from the last 14 days, in the same lines `sessions` uses — and nothing at all when there
-are none:
+Prints where your coding agents left off in the project the current directory belongs to:
+up to five sessions from the last 14 days, each with its last question and the first line
+of its last reply. Every agent gets its latest session in before the rest are filled in by
+time, so the agent you use most cannot crowd out the others, and sessions without a single
+question in them (ones another agent ran for you, or ones nobody typed into yet) are left
+out. It prints nothing at all when there are none:
 
 ```bash
 cd ~/Github/my-app && wake-cli context
+```
+
+```text
+Wake: recent sessions in this project, across your coding agents (5 of 9 from the last 14 days):
+
+- Claude Code · 2h ago · "Fix the login redirect" · `claude-code:1b2c…`
+  last asked: "push it"
+  last reply: "Pushed to main: the redirect now keeps the original query string."
+- Codex · 1d ago · "Review the auth changes" · `codex:01a0…`
+  last asked: "/review --base main"
+  last reply: "Two issues: the session cookie is not marked Secure, and the logout route skips CSRF…"
+
+Read one with the wake_get_session tool, or run `wake-cli show <key>`.
 ```
 
 It is what the [Claude Code plugin](#claude-code-plugin) and the [Codex hooks](#codex-hooks) setup run: whatever the hook
@@ -275,13 +291,14 @@ install anything, or want the guidance to live in the repository.
 
 ## Claude Code plugin
 
-The Wake plugin starts every new Claude Code session with this project's recent sessions
-already in its context — from Claude Code, Codex and every other agent Wake indexes — so
-"continue from yesterday" needs no explaining, and it adds Wake's MCP tools so Claude can
-open any of them with `wake_get_session`. Underneath it is a session-start hook that runs
+The Wake plugin starts every new Claude Code session knowing where your agents left off in
+this project — Claude Code, Codex and every other agent Wake indexes, each session with its
+last question and reply — so "continue from yesterday" or "pick up what Codex was doing"
+needs no explaining, and it adds Wake's MCP tools so Claude can open any of them with
+`wake_get_session`. Underneath it is a session-start hook that runs
 [`wake-cli context`](#context), which prints nothing in a project without recent history.
 It needs Wake 0.8.9 or later and covers macOS and Linux. Settings → Connect shows the
-command with a Copy button.
+command with a copy button.
 
 ```bash
 claude plugin marketplace add iAmCorey/Wake && claude plugin install wake@wake
