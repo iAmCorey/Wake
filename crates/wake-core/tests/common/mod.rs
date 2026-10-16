@@ -1019,7 +1019,7 @@ pub struct AgIndexRow {
     pub workspace: &'static str,
     /// 父会话 id;非空 = 子会话,同时记 nesting_depth = 1
     pub parent: &'static str,
-    /// 会话所在的 app 数据目录名(`antigravity` / `antigravity-ide`)
+    /// 会话所在的 app 数据目录名(`antigravity` / `antigravity-ide` / `antigravity-cli`)
     pub app: &'static str,
 }
 

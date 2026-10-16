@@ -3036,7 +3036,12 @@ fn antigravity_transcripts_replace_index_cards() {
     let adapter = AntigravityAdapter::new().with_custom_root(gemini.clone());
     assert_eq!(
         adapter.data_roots(),
-        vec![db.clone(), desktop.clone(), ide.clone()]
+        vec![
+            db.clone(),
+            desktop.clone(),
+            ide.clone(),
+            gemini.join("antigravity-cli").join("brain")
+        ]
     );
     let mut refs = adapter.list_session_files().expect("antigravity list");
     refs.sort_by(|a, b| (&a.native_id, &a.file_path).cmp(&(&b.native_id, &b.file_path)));
@@ -3180,11 +3185,14 @@ fn antigravity_transcripts_replace_index_cards() {
         "{after:?}"
     );
 
-    // 自定义 location 的其余形状:单个 brain、app 数据目录、索引所在目录
+    // 自定义 location 的其余形状:单个 brain、app 数据目录、索引所在目录(连同 CLI 的 brain)
     let roots = |dir: PathBuf| AntigravityAdapter::new().with_custom_root(dir).data_roots();
     assert_eq!(roots(ide.clone()), vec![ide.clone()]);
     assert_eq!(roots(gemini.join("antigravity-ide")), vec![ide.clone()]);
-    assert_eq!(roots(gemini.join("antigravity-cli")), vec![db.clone()]);
+    assert_eq!(
+        roots(gemini.join("antigravity-cli")),
+        vec![db.clone(), gemini.join("antigravity-cli").join("brain")]
+    );
 }
 
 // ---------------------------------------------------------------- seq 契约

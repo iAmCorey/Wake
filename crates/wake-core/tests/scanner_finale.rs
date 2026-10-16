@@ -2065,6 +2065,38 @@ fn hidden_trees_come_back_together() {
         .is_empty());
 }
 
+/// CLI(`agy`)的转录写在索引库旁边的 `antigravity-cli/brain` 下:不扫它的话 CLI 会话
+/// 只剩卡片,详情页没有正文。`.gemini` 与 `antigravity-cli` 两种自定义根都要认得出
+#[test]
+fn antigravity_cli_transcript_is_read() {
+    use wake_core::adapters::antigravity::AntigravityAdapter;
+    const KEY: &str = "antigravity:ag-cli";
+    let home = tempfile::tempdir().unwrap();
+    let gemini = home.path().join(".gemini");
+    common::build_antigravity_index(
+        &gemini,
+        &[common::AgIndexRow {
+            id: "ag-cli",
+            preview: "Dashboard buttons",
+            workspace: "/Users/tester/Github/dashboard",
+            app: "antigravity-cli",
+            ..Default::default()
+        }],
+    );
+    let brain = gemini.join("antigravity-cli").join("brain");
+    let transcript = common::stage_antigravity_transcript(&brain, "ag-cli", &[]);
+    for root in [gemini.clone(), gemini.join("antigravity-cli")] {
+        let adapters: Vec<Box<dyn AgentAdapter>> =
+            vec![AntigravityAdapter::new().with_custom_root(root)];
+        let dir = tempfile::tempdir().unwrap();
+        let store = temp_store(dir.path());
+        run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+        let s = store.get_session(KEY).unwrap().expect("会话入库");
+        assert_eq!(s.file_path, transcript.to_string_lossy(), "转录压过卡片");
+        assert_eq!(s.source, None, "CLI 是默认形态,不挂 via 徽章");
+    }
+}
+
 /// Cursor 两源端到端:转录带正文的会话固定由 CLI 源胜出(它有 slug 可反推
 /// 项目),哪怕 IDE 库里那份 lastUpdatedAt 更新、roster 里 IDE 实例排在前面;
 /// 转录只剩 turn_ended 空壳的会话由 IDE 库副本胜出。按 mtime 裁决的话胜负随

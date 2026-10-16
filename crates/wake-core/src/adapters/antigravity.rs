@@ -15,9 +15,10 @@ use std::sync::Arc;
 ///   ——标题在 preview 列(title 列常空)、时间、workspace、父会话、会话所在的 app 数据目录
 ///   (`app_data_dir`,老库没有这一列);正文另存为加密 .pb,读不到。
 /// - `<app 数据目录>/brain/<id>/.system_generated/logs/transcript.jsonl`:新版本写下的明文转录
-///   (`~/.gemini/antigravity/brain` 与 `~/.gemini/antigravity-ide/brain`),用户贴图在同会话的
-///   `.user_uploaded/media_<毫秒>.<ext>`。格式来自 PR #52(@iroha3)对真实数据的整理;本机的
-///   brain 目录还没有转录,这一形态未经真机验证。
+///   (`~/.gemini/antigravity/brain`、`~/.gemini/antigravity-ide/brain` 与 CLI 的
+///   `~/.gemini/antigravity-cli/brain`),用户贴图在同会话的
+///   `.user_uploaded/media_<毫秒>.<ext>`。格式来自 PR #52(@iroha3)对真实数据的整理;2026-10-09
+///   用本机 CLI 写下的转录核过同一形态。
 ///
 /// 两种都如实列出,同一会话转录与卡片的胜负交给 scanner 的副本裁决(`dedup_rank`:转录恒胜,
 /// 转录读不出时卡片接得住);转录的标题、工作区与来自哪一端仍以索引为准。索引里记了父会话
@@ -33,8 +34,9 @@ pub struct AntigravityAdapter {
 }
 
 const DB_FILE: &str = "conversation_summaries.db";
-/// 写 `brain` 的 app 数据目录(`~/.gemini` 下):桌面端 / CLI 与 IDE
-const APP_DIRS: [&str; 2] = ["antigravity", "antigravity-ide"];
+/// 写 `brain` 的 app 数据目录(`~/.gemini` 下):桌面端、IDE 与 CLI(索引库也在 CLI 目录里;
+/// 索引的 `app_data_dir` 列记的就是这几个名字)
+const APP_DIRS: [&str; 3] = ["antigravity", "antigravity-ide", "antigravity-cli"];
 /// 会话目录里转录的相对路径
 const TRANSCRIPT: [&str; 3] = [".system_generated", "logs", "transcript.jsonl"];
 const ENCRYPTED_NOTE: &str =
@@ -69,7 +71,7 @@ impl AntigravityAdapter {
         Self::at(&super::home_dir().unwrap_or_default().join(".gemini"))
     }
 
-    /// `~/.gemini` 形态:索引 + 两个 app 数据目录下的 brain
+    /// `~/.gemini` 形态:索引 + 各 app 数据目录下的 brain
     fn at(gemini: &Path) -> Self {
         Self::from_parts(
             Some(gemini.join("antigravity-cli").join(DB_FILE)),
@@ -743,8 +745,8 @@ impl AgentAdapter for AntigravityAdapter {
         } else if name == "brain" {
             Self::from_parts(None, vec![dir])
         } else if name == "antigravity-cli" || dir.join(DB_FILE).is_file() {
-            // 索引库所在的目录(或它的拷贝)
-            Self::from_parts(Some(dir.join(DB_FILE)), Vec::new())
+            // 索引库所在的目录(或它的拷贝);CLI 的转录也写在这里的 brain 下
+            Self::from_parts(Some(dir.join(DB_FILE)), vec![dir.join("brain")])
         } else if APP_DIRS.contains(&name.as_str()) {
             Self::from_parts(None, vec![dir.join("brain")])
         } else {
