@@ -2278,6 +2278,11 @@ pub struct Workbench {
     /// 最近一次显式选择(不分 agent),per-agent 无记录时若仍在该会话的
     /// 可用列表内则用它——让"一直用 Ghostty"的人不用每家 agent 都选一遍
     last_terminal: Option<terminal::TerminalApp>,
+    /// 详情页是否渲染工具调用卡。两个开关独立存(设计约束见 DESIGN.md「对话角色」
+    /// 一节):关掉只影响这一层,不连带 thinking,也不改逐条的展开态
+    show_tools: bool,
+    /// 详情页是否渲染 thinking 面板
+    show_thinking: bool,
     _subs: Vec<Subscription>,
     /// 索引写锁(见 index_lock.rs):**必须是最后一个字段**——drop 按声明序,watcher 先
     /// join(它的线程还在写库)再放锁;派出去的写线程各持一份克隆,锁随最后一份走
@@ -2734,6 +2739,8 @@ impl Workbench {
             _calendar_task: None,
             detail_selection_auto_scroll: AutoScroll::default(),
             detail: None,
+            show_tools: true,
+            show_thinking: true,
             image_action_feedback_generation: 0,
             page: Page::Sessions,
             cleanup: cleanup::CleanupState::default(),
@@ -2753,6 +2760,7 @@ impl Workbench {
             index_lock,
         };
         this.load_open_in_prefs();
+        this.load_transcript_part_prefs();
         this.load_cleanup_prefs();
         this.refresh(cx);
         this._calendar_task = Some(cx.spawn(async move |this, cx| loop {
@@ -5517,6 +5525,45 @@ impl Workbench {
         }
     }
 
+    /// 详情页的两个输出开关(prefs 表,key `transcript_parts`)。缺省即 "true"——
+    /// 没写过这条偏好的用户看到的是完整的工具与 thinking,与 0.9.x 的行为一致
+    fn load_transcript_part_prefs(&mut self) {
+        let Some(raw) = self.store.pref_get("transcript_parts") else {
+            return;
+        };
+        let Ok(prefs) = serde_json::from_str::<TranscriptPartPrefs>(&raw) else {
+            return;
+        };
+        self.show_tools = prefs.tools;
+        self.show_thinking = prefs.thinking;
+    }
+
+    fn save_transcript_part_prefs(&self) {
+        let prefs = TranscriptPartPrefs {
+            tools: self.show_tools,
+            thinking: self.show_thinking,
+        };
+        if let Ok(raw) = serde_json::to_string(&prefs) {
+            let _ = self.store.pref_set("transcript_parts", &raw);
+        }
+    }
+
+    /// 切换一个输出开关。两个开关各存各的、互不连带(DESIGN.md 的硬约束);
+    /// 行组成变了,列表要整表重测,否则收起后的行还占着原来的高度
+    fn toggle_transcript_part(&mut self, tools: bool, cx: &mut Context<Self>) {
+        if tools {
+            self.show_tools = !self.show_tools;
+        } else {
+            self.show_thinking = !self.show_thinking;
+        }
+        self.save_transcript_part_prefs();
+        if let Some(detail) = &self.detail {
+            let count = detail.transcript.len();
+            detail.msg_list.splice(0..count, count);
+        }
+        cx.notify();
+    }
+
     /// per-agent 记忆任何 App 点击都写(只影响本 agent,收敛到用户实际用的);
     /// 全局 last_terminal 只在 explicit(下拉显式选择)时写——左段点的可能
     /// 是回退值,写进全局会让一个 dsh 会话把 Kooky 偏好冲成 Terminal。
@@ -6792,7 +6839,8 @@ impl Workbench {
                 }
                 MessageRole::Assistant => {
                     let mut col = v_flex().w_full().min_w_0().gap(SPACE_SM);
-                    if let Some(thinking) = &m.thinking {
+                    let thinking_shown = self.show_thinking;
+                    if let Some(thinking) = m.thinking.as_ref().filter(|_| thinking_shown) {
                         col = col.child(thinking_panel(
                             ix,
                             thinking,
@@ -6834,7 +6882,7 @@ impl Workbench {
                                 .children(parts),
                         );
                     }
-                    if !m.tool_calls.is_empty() {
+                    if self.show_tools && !m.tool_calls.is_empty() {
                         col = col.child(tool_cluster(
                             ix,
                             &m.tool_calls,
@@ -7660,8 +7708,47 @@ impl Workbench {
                 )
                 .into_any_element()
         };
+        // 工具调用 / thinking 的显示开关。两颗独立(切换一颗不动另一颗),
+        // 与逐条的展开态是两层:这两个决定「这一类内容是否出现」,展开态决定
+        // 「出现的那条是否展开」。关闭时图标变 muted,再点回来
+        let part_toggle = |id: &'static str,
+                           glyph: &'static str,
+                           on: bool,
+                           on_tip: &'static str,
+                           off_tip: &'static str,
+                           tools: bool| {
+            Button::new(id)
+                .ghost()
+                .rounded(RADIUS_BUTTON)
+                .icon(icon(glyph).with_size(zpx(16.)).text_color(if on {
+                    theme.foreground
+                } else {
+                    theme.muted_foreground
+                }))
+                .tooltip(if on { on_tip } else { off_tip })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_transcript_part(tools, cx);
+                }))
+                .into_any_element()
+        };
         let actions: Vec<AnyElement> = vec![
             open_in,
+            part_toggle(
+                "toggle-tools",
+                "icons/sliders-horizontal.svg",
+                self.show_tools,
+                t("Hide tool calls"),
+                t("Show tool calls"),
+                true,
+            ),
+            part_toggle(
+                "toggle-thinking",
+                "icons/brain.svg",
+                self.show_thinking,
+                t("Hide thinking"),
+                t("Show thinking"),
+                false,
+            ),
             tool_btn(
                 "fav",
                 "icons/star.svg",
@@ -10075,6 +10162,20 @@ struct OpenInPrefs {
     agents: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     last: Option<String>,
+}
+
+/// 详情页输出开关。`serde(default)` 要配一个返回 true 的函数:字段缺失(老版本
+/// 写下的偏好、或只写了其中一个)应回落到"显示",与默认行为一致
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TranscriptPartPrefs {
+    #[serde(default = "default_true")]
+    tools: bool,
+    #[serde(default = "default_true")]
+    thinking: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Open In 的目标图标:内嵌品牌覆盖(见 TerminalApp::brand_icon)→
