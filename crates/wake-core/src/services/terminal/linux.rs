@@ -77,6 +77,11 @@ impl TerminalApp {
         None
     }
 
+    /// Linux 端没有深链目标:列出的每个终端都能直接跑 shell 命令
+    pub fn launches_shell(&self) -> bool {
+        true
+    }
+
     /// spawn 前缀:`<bin> <prefix…> <argv…>`,prefix 是各家"后面全是命令 argv"
     /// 的开关——gnome-terminal/kgx 用 `--`,wezterm 是子命令 `start --`,
     /// xfce4-terminal 用 `-x`(-e 是单串旧式),kitty 裸接,其余 `-e`

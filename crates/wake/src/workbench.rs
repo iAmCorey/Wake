@@ -6248,6 +6248,103 @@ impl Workbench {
             .into_any_element()
     }
 
+    /// 新会话的落点:(agent, 项目目录)。项目取当前筛选的项目;没在项目里时退回
+    /// 打开着的那条会话的项目(用户在读某个项目的历史,顺手开一条新的就是这个
+    /// 项目的)。agent 同理:先看筛选,再看打开着的会话,最后退到本机有 CLI 的
+    /// 第一个 agent。
+    ///
+    /// 目录不存在就返回 None——按钮据此禁用,而不是点了才报错。
+    fn new_session_target(&self) -> Option<(AgentId, String)> {
+        let project = self
+            .selected_project
+            .clone()
+            .or_else(|| {
+                // 远程会话的 project_path 是远端路径,本地起终端 cd 过去没有意义
+                self.detail
+                    .as_ref()
+                    .filter(|d| d.meta.host.is_empty())
+                    .map(|d| d.meta.project_path.clone())
+            })
+            .filter(|p| !p.is_empty() && std::path::Path::new(p).is_dir())?;
+        let agent = self
+            .selected_agent
+            .or_else(|| self.detail.as_ref().map(|d| d.meta.agent))
+            .filter(|a| !terminal::new_session_targets(*a).is_empty())
+            .or_else(|| {
+                self.agent_counts
+                    .iter()
+                    .map(|(a, _)| *a)
+                    .find(|a| !terminal::new_session_targets(*a).is_empty())
+            })?;
+        Some((agent, project))
+    }
+
+    /// 在项目目录里起一个新会话。终端走与 Open In 同一份记忆(本 agent 的偏好 →
+    /// 最近一次全局选择 → 候选首项),新会话与恢复会话落在同一个终端里才符合直觉
+    fn do_new_session(
+        &mut self,
+        agent: AgentId,
+        project: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let terms = terminal::new_session_targets(agent);
+        let Some(term) = self.open_in_target(agent, &terms) else {
+            window.push_notification(
+                Notification::warning(t("No terminal application found on PATH")),
+                cx,
+            );
+            return;
+        };
+        // 只写本 agent 的记忆,与 do_resume 的规则一致:全局 last_terminal 留给
+        // 用户在下拉里显式选终端的那一刻
+        self.preferred_terminal.insert(agent, term);
+        self.save_open_in_prefs();
+        cx.notify();
+        let task =
+            cx.background_spawn(async move { terminal::launch_new_session(agent, &project, term) });
+        Self::notify_when_done(window, cx, task, move |outcome| {
+            if outcome.ok {
+                Notification::success(crate::tf!("Started a new session: {}", outcome.command))
+            } else {
+                Notification::error(
+                    outcome
+                        .error
+                        .unwrap_or_else(|| t("Couldn't start a new session").into()),
+                )
+            }
+        });
+    }
+
+    /// 页头右端的新建会话按钮。落点由 `new_session_target` 决定,解析不出(没选项目、
+    /// 目录已消失、本机没有能起新会话的 agent)就禁用——灰按钮比点了再报错好。
+    /// 与 Refresh / 排序同为 icon-only ghost,三颗并排
+    fn new_session_button(&self, cx: &Context<Self>) -> AnyElement {
+        let target = self.new_session_target();
+        let enabled = target.is_some();
+        let button = Button::new("new-session")
+            .ghost()
+            .rounded(RADIUS_BUTTON)
+            .icon(icon("icons/plus.svg").with_size(zpx(16.)))
+            .disabled(!enabled)
+            .tooltip(if let Some((agent, _project)) = &target {
+                // 落点写进 tooltip:用户在点之前就知道会开在哪、用什么 agent
+                let name: SharedString =
+                    crate::tf!("New {} session in this project", agent.display_name()).into();
+                name
+            } else {
+                t("Select a project to start a new session").into()
+            });
+        match target {
+            Some((agent, project)) => button
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.do_new_session(agent, project.clone(), window, cx);
+                }))
+                .into_any_element(),
+            None => button.into_any_element(),
+        }
+    }
+
     /// 页头右端的 Refresh(三页同一外形,各刷各的——用户 2026-09-22 定):会话页与
     /// Insights 走整库重扫(`refresh_sessions`,Insights 的数字全是会话派生的),Memory
     /// 页只同步记忆来源(`refresh_memories`)。进行中 `loading` + 禁用
@@ -6348,6 +6445,7 @@ impl Workbench {
                     .item(mk_dir(t("Ascending"), true))
             })
             .anchor(Anchor::TopRight);
+        let new_session = self.new_session_button(cx);
         v_flex()
             .w(self.columns().1)
             .h_full()
@@ -6361,6 +6459,7 @@ impl Workbench {
                 Some(
                     h_flex()
                         .gap(SPACE_XS)
+                        .child(new_session)
                         .child(self.refresh_button(self.scan.scanning, Self::refresh_sessions, cx))
                         .child(sort_menu)
                         .into_any_element(),

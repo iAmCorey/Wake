@@ -439,6 +439,117 @@ pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome
     }
 }
 
+// ---------- 新会话(不带 id 的启动) ----------
+
+/// 一个新会话要跑的 argv。空数组即 CLI 的默认启动(各家的"新建会话"就是
+/// 裸调用);只有 Dsh 例外:`dsh` 官方唯一分发形态是 `npx @deepseek-ai/dsh`,
+/// 交互面是 `web` 子命令。
+///
+/// 「这台机器上能不能开新会话」的判据与 resume 同源——有没有该 agent 的
+/// CLI。桌面端独有的 agent(WorkBuddy / ZCode / Craft Agents / Grok Bot)
+/// 在这里一起返回 None,UI 据此不画按钮。
+fn new_session_args(agent: AgentId) -> Option<Vec<String>> {
+    agent_bin(agent)?;
+    match agent {
+        AgentId::Dsh => Some(vec!["@deepseek-ai/dsh".into(), "web".into()]),
+        _ => Some(Vec::new()),
+    }
+}
+
+/// 能在 shell 里跑命令的宿主。macOS 的三个深链目标(Kooky / Claude Desktop /
+/// Codex Desktop)只能打开**已有**会话,没有"新建"的 URL 形制,不能参与新会话
+fn shell_targets(terms: Vec<TerminalApp>) -> Vec<TerminalApp> {
+    terms.into_iter().filter(|t| t.launches_shell()).collect()
+}
+
+/// 新会话可用的终端:本 agent 的候选(与 resume 同一份 filtering)再剔掉
+/// 深链目标。空数组 = 这台机器开不了新会话(agent 没有 CLI 或没有可用的终端)
+pub fn new_session_targets(agent: AgentId) -> Vec<TerminalApp> {
+    if new_session_args(agent).is_none() {
+        return Vec::new();
+    }
+    shell_targets(terminals_for(agent))
+}
+
+/// 在项目目录里起一个新会话。与 `resume_session_in` 共用 CLI 解析、命令
+/// 拼装、起终端三个环节;差别只有两处:argv 不带会话 id,cwd 是硬要求
+/// (agent 把新会话记在哪个项目下由启动目录决定)。
+///
+/// 返回 `ResumeOutcome`:字段语义与 resume 一致(command 是真正跑的那条,
+/// error 是失败通知的唯一展示面),复用它而不是另造一个同形结构。
+pub fn launch_new_session(agent: AgentId, project_path: &str, term: TerminalApp) -> ResumeOutcome {
+    let Some(args) = new_session_args(agent) else {
+        return ResumeOutcome {
+            ok: false,
+            command: String::new(),
+            error: Some(format!(
+                "{} has no command-line app to start a new session in",
+                agent.display_name()
+            )),
+        };
+    };
+    if !term.launches_shell() {
+        return ResumeOutcome {
+            ok: false,
+            command: String::new(),
+            error: Some(format!(
+                "{} can only reopen an existing session",
+                term.display_name()
+            )),
+        };
+    }
+    let bin = agent_bin(agent).unwrap_or("?");
+    let Some(cli) = resolve_cli(bin) else {
+        return ResumeOutcome {
+            ok: false,
+            command: String::new(),
+            error: Some(cli_not_found_error(agent, bin)),
+        };
+    };
+    let cwd_ok = !project_path.is_empty() && Path::new(project_path).is_dir();
+    let cwd = cwd_ok.then_some(project_path);
+    let command = match compose_command(term, &cli, &args, cwd) {
+        Ok(command) => command,
+        Err(e) => {
+            return ResumeOutcome {
+                ok: false,
+                command: String::new(),
+                error: Some(format!("Cannot start a new session: {e}")),
+            };
+        }
+    };
+    if !cwd_ok {
+        let hint = clipboard_fallback(&command);
+        return ResumeOutcome {
+            ok: false,
+            command,
+            error: Some(format!(
+                "Project directory no longer exists: {project_path}. {hint}"
+            )),
+        };
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    let result = platform::launch_shell(term, &command);
+    #[cfg(target_os = "windows")]
+    let result = platform::launch_shell(term, &cli, &args, cwd, &command);
+    match result {
+        Ok(()) => ResumeOutcome {
+            ok: true,
+            command,
+            error: None,
+        },
+        Err(e) => {
+            let hint = clipboard_fallback(&command);
+            ResumeOutcome {
+                ok: false,
+                command,
+                error: Some(format!("Couldn't open terminal ({e}). {hint}")),
+            }
+        }
+    }
+}
+
 /// 失败兜底通知的后半句:剪贴板写成了才说 copied(Linux 可能三个剪贴板
 /// 工具都不在),没写成把命令本体给出来——error 是失败通知唯一展示面
 /// (workbench 只渲染 error 文案),命令不能只活在 ResumeOutcome.command 里
@@ -593,6 +704,74 @@ mod tests {
             cli_not_found_error(AgentId::Opencode, "opencode2"),
             "Agent CLI `opencode2` for OpenCode was not found on PATH — is it installed and available to Wake?"
         );
+    }
+
+    /// 新会话的 argv:除了 dsh 的 `npx` 形制,一律是空数组(裸调 CLI 即新建);
+    /// 没有 CLI 的桌面端 agent 给 None,UI 据此不画按钮
+    #[test]
+    fn new_session_args_only_uses_the_cli_default_invocation() {
+        assert_eq!(
+            super::new_session_args(AgentId::ClaudeCode).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            super::new_session_args(AgentId::Codex).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            super::new_session_args(AgentId::Dsh).unwrap(),
+            vec!["@deepseek-ai/dsh", "web"]
+        );
+        for agent in [
+            AgentId::Workbuddy,
+            AgentId::Zcode,
+            AgentId::CraftAgents,
+            AgentId::GrokBot,
+        ] {
+            assert!(
+                super::new_session_args(agent).is_none(),
+                "{agent:?} has no CLI"
+            );
+            assert!(super::new_session_targets(agent).is_empty());
+        }
+    }
+
+    /// 深链宿主只能开已有会话:过滤后它们不出现,普通终端全保留
+    #[test]
+    fn new_session_targets_drop_deep_link_hosts() {
+        use super::TerminalApp;
+        #[cfg(target_os = "macos")]
+        {
+            let all = vec![
+                TerminalApp::Terminal,
+                TerminalApp::Ghostty,
+                TerminalApp::Kooky,
+                TerminalApp::ClaudeDesktop,
+                TerminalApp::CodexDesktop,
+            ];
+            assert_eq!(
+                super::shell_targets(all),
+                vec![TerminalApp::Terminal, TerminalApp::Ghostty]
+            );
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let all = vec![TerminalApp::GnomeTerminal, TerminalApp::Kitty];
+            assert_eq!(
+                super::shell_targets(all.clone()),
+                all,
+                "Linux 的终端都是 shell 宿主"
+            );
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let all = vec![TerminalApp::WindowsTerminal, TerminalApp::Cmd];
+            assert_eq!(
+                super::shell_targets(all.clone()),
+                all,
+                "Windows 的宿主都是 shell 宿主"
+            );
+        }
     }
 
     fn remote_meta(agent: AgentId, id: &str, cwd: &str) -> crate::models::SessionMeta {

@@ -75,6 +75,11 @@ impl TerminalApp {
         None
     }
 
+    /// Windows 端没有深链目标:列出的每个宿主都能直接跑 shell 命令
+    pub fn launches_shell(&self) -> bool {
+        true
+    }
+
     /// 此宿主自身不是 shell,得再装一个 PowerShell 会话才跑得起命令
     /// (terminals_for 据此在没有 PowerShell 的机器上藏掉它们)
     fn needs_powershell(&self) -> bool {
