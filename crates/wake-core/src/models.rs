@@ -30,13 +30,14 @@ pub enum AgentId {
     Devin,
     Kilo,
     MimoCode,
+    QwenWork,
 }
 
 impl AgentId {
     /// 全部 agent,**枚举声明序**(= Ord = 用户钉的侧栏展示序;面板成组、
     /// 表单下拉共用同一顺序)。曾误抄 create_adapters 的构造序,下拉与侧栏
     /// 排序当场对不上——契约测试现在卡它与 Ord 一致
-    pub const ALL: [AgentId; 24] = [
+    pub const ALL: [AgentId; 25] = [
         AgentId::ClaudeCode,
         AgentId::Codex,
         AgentId::Grok,
@@ -61,6 +62,7 @@ impl AgentId {
         AgentId::Devin,
         AgentId::Kilo,
         AgentId::MimoCode,
+        AgentId::QwenWork,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -89,6 +91,7 @@ impl AgentId {
             AgentId::Kilo => "kilo",
             AgentId::GrokBot => "grok-bot",
             AgentId::MimoCode => "mimo-code",
+            AgentId::QwenWork => "qwenwork",
         }
     }
 
@@ -118,6 +121,7 @@ impl AgentId {
             "kilo" => Some(AgentId::Kilo),
             "grok-bot" => Some(AgentId::GrokBot),
             "mimo-code" => Some(AgentId::MimoCode),
+            "qwenwork" => Some(AgentId::QwenWork),
             _ => None,
         }
     }
@@ -148,6 +152,8 @@ impl AgentId {
             AgentId::Kilo => "Kilo Code",
             AgentId::GrokBot => "Grok Bot",
             AgentId::MimoCode => "MiMo Code",
+            // 阿里的桌面 agent,app 在各语言下都只叫这个名字(Info.plist 的本地化显示名)
+            AgentId::QwenWork => "千问办公",
         }
     }
 
@@ -262,6 +268,8 @@ impl AgentId {
                     "brands/mimo-code-light.png"
                 }
             }
+            // 官方 app 图标(QwenWorkCN.app 的 icon.icns),两模式通用,ZCode 同款
+            AgentId::QwenWork => "brands/qwenwork.png",
         }
     }
 }

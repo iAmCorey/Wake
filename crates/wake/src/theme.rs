@@ -129,6 +129,9 @@ pub fn agent_series_color(agent: wake_core::models::AgentId) -> u32 {
         // 标志是单色字标,MiMo Code 的横幅把 "MIMO" 涂成橙色:取小米标准橙,离 Claude 橙 ΔE00
         // 11.7(Kilo 那档离 Hermes 11.9),比横幅原色(离 Claude 8.7)分得开
         MimoCode => 0xFF6900,
+        // app 图标的品牌绿 #00CB5E 离 Qoder 绿只有 ΔE00 6.1,压深一档:最近的 Qoder、Copilot
+        // 都是 14.1
+        QwenWork => 0x0B8A4C,
     }
 }
 

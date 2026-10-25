@@ -418,6 +418,9 @@ pub fn create_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(kilo::KiloLegacyAdapter::new()),
         Box::new(grok_bot::GrokBotAdapter::new()),
         Box::new(mimo::MimoAdapter::new()),
+        // 千问办公一家两个数据源(Kilo 同款):现用的目录在前,前身 QoderWork 国内版的在后
+        Box::new(qoder::QoderAdapter::qwenwork()),
+        Box::new(qoder::QoderAdapter::qwenwork_legacy()),
     ]
 }
 

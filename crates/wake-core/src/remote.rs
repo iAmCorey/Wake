@@ -205,6 +205,12 @@ pub const REMOTE_LAYOUTS: &[RemoteAgentLayout] = &[
         exclude: &[],
     },
     RemoteAgentLayout {
+        agent: AgentId::QwenWork,
+        mount: ".qwenworkcn/projects",
+        sync_paths: &[".qwenworkcn/projects"],
+        exclude: &[],
+    },
+    RemoteAgentLayout {
         agent: AgentId::Zcode,
         // home 形态:cli/db/db.sqlite、v2/tasks-index.sqlite 与 cli/memories 全相对
         // 派生。只拉两个库文件 + 记忆目录(里面只有 Markdown)——凭证

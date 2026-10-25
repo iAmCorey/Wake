@@ -382,6 +382,8 @@ fn user_dirs(agent: AgentId) -> Option<UserDirs> {
         // 同样);它还读 `skill/` 单数与 `~/.mimocode`,常用的是这一处
         AgentId::MimoCode => Fixed(Base::Config, &["mimocode/skills"]),
         AgentId::Devin => Fixed(Base::AppConfig, &["devin/skills"]),
+        // app 内置与用户装的 skill 都落在这里(本机核对,每个子目录一份 SKILL.md)
+        AgentId::QwenWork => Fixed(Base::Home, &[".qwenworkcn/skills"]),
         AgentId::Kimi | AgentId::GrokBot | AgentId::Workbuddy => return None,
     })
 }
@@ -413,7 +415,8 @@ fn project_dirs(agent: AgentId) -> &'static [&'static str] {
         | AgentId::CraftAgents
         | AgentId::Kimi
         | AgentId::GrokBot
-        | AgentId::Workbuddy => &[],
+        | AgentId::Workbuddy
+        | AgentId::QwenWork => &[],
     }
 }
 

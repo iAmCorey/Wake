@@ -144,9 +144,10 @@ fn fs_ref(agent: AgentId, path: &Path, native_id: &str) -> SessionFileRef {
 
 /// 默认 roster 的实例数。**不等于 `AgentId::ALL.len()`**:Cursor 一家有两个
 /// 数据源(CLI 的 agent-transcripts 与 IDE 的 state.vscdb),Kilo Code 也是两个
-/// (新版的 kilo.db 与旧版扩展的任务目录),各占一个实例。新增 agent 或给某家
+/// (新版的 kilo.db 与旧版扩展的任务目录),千问办公也是两个(现用的 `~/.qwenworkcn`
+/// 与前身 QoderWork 的 `~/.qoderworkcn`),各占一个实例。新增 agent 或给某家
 /// 再加数据源时,这个数跟着加一——契约要卡的是"漏了实例就爆",而不是"每家恰好一个"
-const DEFAULT_INSTANCES: usize = AgentId::ALL.len() + 2;
+const DEFAULT_INSTANCES: usize = AgentId::ALL.len() + 3;
 
 /// SQLite 型 agent 的虚拟路径引用(`<db>#<id>`,与 sqlite_ro::virtual_path 同构)
 fn db_ref(agent: AgentId, db: &Path, id: &str) -> SessionFileRef {
@@ -7540,6 +7541,226 @@ fn workbuddy_is_a_codebuddy_twin() {
     assert!(
         wake_core::services::terminal::resume_targets(&meta).is_empty(),
         "没有 CLI 的 agent 不画 Open In"
+    );
+}
+
+/// 一行 jsonl(测试里手写转录用)
+fn jsonl(rows: &[serde_json::Value]) -> String {
+    rows.iter()
+        .map(|row| serde_json::to_string(row).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 千问办公是 Qoder 的孪生实例:同一解析核心,两个默认根(现用的与前身 QoderWork 的,
+/// 前者去重胜出);人打的字在 humanInput.text,content 里前面垫着 `<system-reminder>`;
+/// 引擎后台的记忆整理与命令判定轮次不是会话;没有 CLI,不给 resume 目标
+#[test]
+fn qwenwork_is_a_qoder_twin() {
+    let _env = setup();
+    let twin = QoderAdapter::qwenwork();
+    assert_eq!(twin.agent(), AgentId::QwenWork);
+    assert!(twin.data_roots()[0].ends_with(".qwenworkcn/projects"));
+    let legacy = QoderAdapter::qwenwork_legacy();
+    assert_eq!(legacy.agent(), AgentId::QwenWork);
+    assert!(legacy.data_roots()[0].ends_with(".qoderworkcn/projects"));
+    assert!(
+        legacy.dedup_rank("") > twin.dedup_rank(""),
+        "新目录那份胜出"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let slug = dir.path().join("-Users-tester--qwenworkcn-workspace-abc");
+    fs::create_dir_all(&slug).unwrap();
+    let reminder =
+        "<system-reminder>\nUser environment — Timezone: Asia/Shanghai.\n</system-reminder>";
+    let user = |uuid: &str, parent: Option<&str>, typed: Option<&str>, text: &str| {
+        let mut row = serde_json::json!({
+            "type": "user", "uuid": uuid, "parentUuid": parent,
+            "timestamp": "2026-09-30T07:23:59.387Z", "cwd": "/Users/tester/.qwenworkcn/workspace/abc",
+            "origin": {"kind": "human"},
+            "message": {"role": "user", "content": [
+                {"type": "text", "text": reminder},
+                {"type": "text", "text": text}
+            ]}
+        });
+        if let Some(typed) = typed {
+            row["humanInput"] = serde_json::json!({"text": typed, "mode": "prompt"});
+        }
+        row
+    };
+    let assistant = |uuid: &str, parent: &str| {
+        serde_json::json!({
+            "type": "assistant", "uuid": uuid, "parentUuid": parent,
+            "timestamp": "2026-09-30T07:24:09.000Z",
+            "message": {"id": uuid, "role": "assistant", "model": "qwork-advanced",
+                "content": [{"type": "text", "text": "好的。"}]}
+        })
+    };
+    fs::write(
+        slug.join("aaaaaaaa-0000-0000-0000-000000000001.jsonl"),
+        jsonl(&[
+            serde_json::json!({"type": "runtime-config", "model": "qwork-advanced"}),
+            user(
+                "u1",
+                None,
+                Some("整理一下这周的会议纪要"),
+                "整理一下这周的会议纪要",
+            ),
+            assistant("a1", "u1"),
+            user("u2", Some("a1"), Some("继续"), "继续"),
+            assistant("a2", "u2"),
+            serde_json::json!({"type": "last-prompt", "lastPrompt": "继续"}),
+            serde_json::json!({"type": "active-leaf", "leafUuid": "a2"}),
+        ]),
+    )
+    .unwrap();
+    // 前身 QoderWork 写的:没有 humanInput,人打的字是 `<system-reminder>` 后面那一块
+    fs::write(
+        slug.join("aaaaaaaa-0000-0000-0000-000000000002.jsonl"),
+        jsonl(&[
+            user("u1", None, None, "总结一下这篇文章"),
+            assistant("a1", "u1"),
+        ]),
+    )
+    .unwrap();
+    let internal = dir.path().join("-Users-tester");
+    fs::create_dir_all(&internal).unwrap();
+    let memory_run = internal.join("aaaaaaaa-0000-0000-0000-000000000003.jsonl");
+    fs::write(
+        &memory_run,
+        jsonl(&[
+            serde_json::json!({"type": "workspace-directories", "directories": []}),
+            serde_json::json!({
+                "type": "user", "uuid": "m1", "parentUuid": null, "origin": {"kind": "human"},
+                "message": {"role": "user", "content": [{"type": "text",
+                    "text": "Target file this round: MEMORY.md\nCurrent usage: 1000 / 10240 bytes (10%)."}]}
+            }),
+        ]),
+    )
+    .unwrap();
+    let command_check = internal.join("aaaaaaaa-0000-0000-0000-000000000004.jsonl");
+    fs::write(
+        &command_check,
+        jsonl(&[serde_json::json!({
+            "type": "user", "uuid": "c1", "parentUuid": null, "origin": {"kind": "human"},
+            "message": {"role": "user", "content": [{"type": "text",
+                "text": "# Input\nCommand: \"rm -f /tmp/x\""}]}
+        })]),
+    )
+    .unwrap();
+
+    let rooted = twin.with_custom_root(dir.path().to_path_buf());
+    assert_eq!(rooted.agent(), AgentId::QwenWork);
+    let refs = rooted.list_session_files().unwrap();
+    assert_eq!(
+        refs.iter()
+            .map(|r| r.native_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "aaaaaaaa-0000-0000-0000-000000000001",
+            "aaaaaaaa-0000-0000-0000-000000000002"
+        ],
+        "引擎的内部轮次不列"
+    );
+    assert!(rooted.file_ref(&memory_run).is_none());
+    assert!(rooted.file_ref(&command_check).is_none());
+
+    let s = rooted.parse_session(&refs[0]).unwrap();
+    assert_eq!(s.meta.key, "qwenwork:aaaaaaaa-0000-0000-0000-000000000001");
+    assert_eq!(
+        s.meta.title, "整理一下这周的会议纪要",
+        "首条提问而不是 last-prompt 的\"继续\""
+    );
+    assert_eq!(s.meta.message_count, 4);
+    let t = rooted.parse_transcript(&refs[0]).unwrap();
+    assert_eq!(t.mainline[0].kind, MessageKind::Text);
+    assert_eq!(t.mainline[0].text, "整理一下这周的会议纪要");
+    assert!(
+        wake_core::services::terminal::resume_targets(&s.meta).is_empty(),
+        "没有 CLI 的 agent 不画 Open In"
+    );
+
+    let old = rooted.parse_transcript(&refs[1]).unwrap();
+    assert_eq!(old.meta.title, "总结一下这篇文章");
+    assert_eq!(old.mainline[0].kind, MessageKind::Text);
+    assert_eq!(old.mainline[0].text, "总结一下这篇文章");
+}
+
+/// Qoder IDE / Qoder CN 的任务转录:`<project-key>/transcript/<id>.jsonl`,没有 parentUuid
+/// 与 active-leaf,文件顺序就是对话;工具结果等边车在 `<project-key>/<id>/`
+#[test]
+fn qoder_task_transcripts_are_sessions() {
+    let _env = setup();
+    let dir = tempfile::tempdir().unwrap();
+    let slug = dir.path().join("-Users-tester-blog");
+    let id = "task-0123456789abcdef0123.session.execution";
+    fs::create_dir_all(slug.join("transcript")).unwrap();
+    fs::create_dir_all(slug.join(id).join("tool-results")).unwrap();
+    let base = |typ: &str, uuid: &str, ts: &str| {
+        serde_json::json!({"type": typ, "sessionId": id, "uuid": uuid,
+            "timestamp": ts, "cwd": "/Users/tester/blog"})
+    };
+    let mut progress = base("progress", "p1", "2026-07-27T15:31:51.836057Z");
+    progress["data"] = serde_json::json!({"hookEvent": "SessionStart", "type": "hook_progress"});
+    let mut session_meta = base("session_meta", "m1", "2026-07-27T15:31:59.358202Z");
+    session_meta["data"] =
+        serde_json::json!({"meta_type": "session_info", "content": {"mode": "plan"}});
+    let mut ask = base("user", "u1", "2026-07-27T15:31:59.359255Z");
+    ask["message"] = serde_json::json!({"role": "user", "content": "看看这个项目的代码质量"});
+    let mut think = base("assistant", "a1", "2026-07-27T15:32:10.180161Z");
+    think["message"] = serde_json::json!({"role": "assistant", "content": [
+        {"type": "thinking", "thinking": "先看项目结构。"},
+        {"type": "tool_use", "id": "call_1", "name": "Glob", "input": {"pattern": "src/**"}}
+    ]});
+    let mut result = base("user", "u2", "2026-07-27T15:32:11.000000Z");
+    result["message"] = serde_json::json!({"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "call_1", "content": "Found 17 files"}
+    ]});
+    result["toolUseResult"] = serde_json::json!({"numFiles": 17});
+    let mut answer = base("assistant", "a2", "2026-07-27T15:33:00.000000Z");
+    answer["message"] = serde_json::json!({"role": "assistant", "content": [
+        {"type": "text", "text": "整体结构清晰。"}
+    ]});
+    let path = slug.join("transcript").join(format!("{id}.jsonl"));
+    fs::write(
+        &path,
+        jsonl(&[progress, session_meta, ask, think, result, answer]),
+    )
+    .unwrap();
+
+    let rooted = QoderAdapter::new().with_custom_root(dir.path().to_path_buf());
+    let refs = rooted.list_session_files().unwrap();
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].native_id, id);
+    let back = rooted.file_ref(&path).expect("watcher 认任务转录");
+    assert_eq!(back.native_id, id);
+
+    let s = rooted.parse_session(&refs[0]).unwrap();
+    assert_eq!(s.unknown_line_count, 0);
+    assert_eq!(s.meta.title, "看看这个项目的代码质量");
+    assert_eq!(s.meta.project_path, "/Users/tester/blog");
+    let t = rooted.parse_transcript(&refs[0]).unwrap();
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+        ]
+    );
+    let tool = &t.mainline[1].tool_calls[0];
+    assert_eq!(tool.name, "Glob");
+    assert_eq!(tool.output.as_deref(), Some("Found 17 files"));
+    assert!(t.mainline[1].thinking.is_some());
+    assert_eq!(t.mainline[2].text, "整体结构清晰。");
+    assert_eq!(
+        rooted.session_paths(&s.meta),
+        vec![
+            path.to_string_lossy().to_string(),
+            slug.join(id).to_string_lossy().to_string()
+        ],
+        "删除时连同工具结果边车"
     );
 }
 
