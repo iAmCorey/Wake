@@ -2029,6 +2029,32 @@ impl Store {
         Ok((out, total))
     }
 
+    /// Every visible prompt written by the user, newest first.  Subagent and
+    /// sidechain prompts are agent-generated work items rather than questions
+    /// from the person using Wake, so deliberately leave them out.
+    pub fn list_user_questions(&self) -> Result<Vec<QuestionHit>> {
+        let conn = self.read.lock().unwrap();
+        let sql = format!(
+            "SELECT {SESSION_COLS}, m.seq, m.text, COALESCE(m.ts, s.updated_at)
+             FROM messages m
+             JOIN sessions s ON s.key = m.session_key
+             LEFT JOIN user_data u ON u.session_key = s.key
+             WHERE m.role = 'user' AND m.sidechain_id IS NULL AND m.text <> ''
+               AND s.archived = 0 AND s.spawned = 0
+             ORDER BY COALESCE(m.ts, s.updated_at) DESC, m.id DESC"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok(QuestionHit {
+                session: row_to_meta(row)?,
+                seq: row.get(19)?,
+                text: row.get(20)?,
+                timestamp: row.get(21)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+    }
+
     /// 当前筛选下各会话可见的直接子会话数,一次 GROUP BY parent_key:关系入库时已压平(树最多
     /// 两层),分支下面的子代理算在分支名下
     pub fn child_counts(&self, f: &SessionFilter) -> Result<HashMap<String, i64>> {

@@ -94,6 +94,9 @@ const PALETTE_TOP: Zpx = Zpx(72.);
 const FORM_LABEL_W: Zpx = Zpx(52.);
 /// 左栏顶部由 44px 窗口控制区 + 44px 品牌行组成；中栏标题区共享总高度。
 const LIBRARY_IDENTITY_HEIGHT: Zpx = Zpx(88.);
+/// Detail header height in the common three-row metadata layout. Keep the
+/// session question rail's content aligned with the transcript body below it.
+const DETAIL_READER_HEADER_HEIGHT: Zpx = Zpx(176.);
 /// 侧栏底部常态工具栏内容高；加上父容器 1px 顶部分隔线，总高 44px。
 const SIDEBAR_FOOTER_ROW_HEIGHT: Zpx = Zpx(43.);
 /// 三栏固定结构宽度(100% 档);实际宽度走 `Workbench::columns`。工具摘要需要从窗口宽度
@@ -1441,7 +1444,7 @@ impl SearchTab {
         match page {
             Page::Memory => SearchTab::Memory,
             Page::Skills => SearchTab::Skills,
-            Page::Sessions | Page::Insights => SearchTab::Sessions,
+            Page::Sessions | Page::Questions | Page::Insights => SearchTab::Sessions,
         }
     }
 
@@ -2529,6 +2532,7 @@ mod detail_selection_tests {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Sessions,
+    Questions,
     Insights,
     Memory,
     Skills,
@@ -2584,6 +2588,8 @@ pub struct Workbench {
     /// Settings → Data 的"已隐藏的会话":要把各家的会话列一遍,进 Data 页时在后台对
     hidden: HiddenSessions,
     total_sessions: i64,
+    /// The Questions view is a read-only projection of top-level user prompts.
+    questions: Vec<QuestionHit>,
 
     list_state: Entity<ListState<SessionsDelegate>>,
     palette_list: Entity<ListState<SearchDelegate>>,
@@ -2608,6 +2614,9 @@ pub struct Workbench {
     /// 文本拖选靠近详情视口边缘时，持续推动外层消息列表。
     detail_selection_auto_scroll: AutoScroll,
     detail: Option<DetailState>,
+    /// Current-session prompt rail; default expanded so the navigation is
+    /// discoverable, while the user can reclaim reader width on demand.
+    questions_nav_expanded: bool,
     /// 图片操作反馈的全局递增代次。即使关闭后重新打开同一会话和图片，旧计时
     /// 器也不会误清新状态。
     image_action_feedback_generation: u64,
@@ -3077,6 +3086,7 @@ impl Workbench {
             update_status: UpdateStatus::Idle,
             hidden: HiddenSessions::default(),
             total_sessions: 0,
+            questions: Vec::new(),
             list_state,
             palette_list,
             palette_input,
@@ -3089,6 +3099,7 @@ impl Workbench {
             _calendar_task: None,
             detail_selection_auto_scroll: AutoScroll::default(),
             detail: None,
+            questions_nav_expanded: true,
             image_action_feedback_generation: 0,
             page: Page::Sessions,
             cleanup: cleanup::CleanupState::default(),
@@ -3332,8 +3343,15 @@ impl Workbench {
         match self.page {
             // Skills:skill 与会话无关,会话扫描的事件不重扫,进页与页头 Refresh 才扫
             Page::Sessions | Page::Skills => {}
+            Page::Questions => self.reload_questions(),
             Page::Insights => self.reload_insights(cx),
             Page::Memory => self.reload_memories(cx),
+        }
+    }
+
+    fn reload_questions(&mut self) {
+        if self.page == Page::Questions {
+            self.questions = self.store.list_user_questions().unwrap_or_default();
         }
     }
 
@@ -5448,7 +5466,7 @@ impl Workbench {
         self.detail = Some(detail);
         // 搜索路径:中栏列表同步选中并滚到该会话。
         // 列表点击路径(jump=None)不走——List 点击自带选中,再滚会跳视口
-        if jump_seq.is_some() {
+        if jump_seq.is_some() && self.page != Page::Questions {
             self.sync_list_selection(key, window, cx);
         }
         cx.notify();
@@ -6208,6 +6226,7 @@ impl Workbench {
         let theme = cx.theme();
         // Memory 页标题换成 Memory:侧栏顶上就说明现在管的是什么,不另加模式标题行(用户 2026-09-21)
         let title = match self.page {
+            Page::Questions => t("Questions"),
             Page::Memory => t("Memory"),
             Page::Skills => t("Skills"),
             _ => "Wake",
@@ -6804,6 +6823,77 @@ impl Workbench {
                     .w_full()
                     .into_any_element()
             })
+    }
+
+    /// The middle rail for the Questions destination.  It intentionally shows
+    /// prompt text rather than session titles; clicking a row reuses the normal
+    /// transcript reader and jumps to that exact message sequence.
+    fn render_question_list(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let count = self.questions.len();
+        let subtitle = format!(
+            "{} {}",
+            count,
+            if count == 1 { "question" } else { "questions" }
+        );
+        let rows = self.questions.iter().enumerate().map(|(ix, question)| {
+            let key = question.session.key.clone();
+            let seq = question.seq;
+            let title: SharedString = one_line(&question.text, SESSION_TITLE_MAX_WIDTH).into();
+            let timestamp: SharedString = smart_time(question.timestamp).into();
+            let project: SharedString = question.session.project_name.clone().into();
+            let agent = question.session.agent;
+            div()
+                .id(("question-row", ix))
+                .mx(SPACE_SM)
+                .px(SPACE_XS)
+                .py(SPACE_SM)
+                .rounded(theme.radius)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.secondary_hover))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_detail(&key, Some(seq), window, cx);
+                }))
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(FONT_BODY)
+                        .font_medium()
+                        .child(title),
+                )
+                .child(
+                    h_flex()
+                        .gap(ICON_TEXT_GAP)
+                        .text_size(FONT_LABEL)
+                        .text_color(theme.muted_foreground)
+                        .child(brand_img(agent, zpx(15.), theme.mode.is_dark()))
+                        .child(badge(project, theme.muted, theme.muted_foreground))
+                        .child(div().flex_1())
+                        .child(timestamp),
+                )
+        });
+        v_flex()
+            .w(self.columns().1)
+            .h_full()
+            .flex_shrink_0()
+            .bg(theme.background)
+            .child(library_header(
+                "questions-header",
+                t("Questions"),
+                subtitle,
+                SPACE_XL,
+                None,
+                cx,
+            ))
+            .child(
+                v_flex()
+                    .id("questions-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .pb(SPACE_LG)
+                    .children(rows),
+            )
     }
 
     fn show_image_action_success(
@@ -7667,6 +7757,161 @@ impl Workbench {
 
     fn stop_detail_selection_auto_scroll(&mut self) {
         self.detail_selection_auto_scroll.stop();
+    }
+
+    /// Per-session question navigation beside the reader.  This follows the
+    /// selected session rather than being a global destination.
+    fn render_session_question_nav(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let expanded = self.questions_nav_expanded;
+        let questions = self
+            .detail
+            .as_ref()
+            .map(|detail| {
+                detail
+                    .transcript
+                    .iter()
+                    .filter(|message| {
+                        message.role == MessageRole::User && !message.text.trim().is_empty()
+                    })
+                    .map(|message| (message.seq, message.text.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        v_flex()
+            .w(if expanded { zpx(308.) } else { zpx(44.) })
+            .h_full()
+            .flex_shrink_0()
+            .child(
+                h_flex()
+                    .h(DETAIL_READER_HEADER_HEIGHT)
+                    .flex_shrink_0()
+                    .px(SPACE_MD)
+                    .bg(theme.background)
+                    .items_center()
+                    .justify_between()
+                    .when(expanded, |row| {
+                        row.child(
+                            v_flex()
+                                .min_w_0()
+                                .gap(zpx(2.))
+                                .child(
+                                    div()
+                                        .text_size(FONT_TITLE)
+                                        .font_semibold()
+                                        .child(t("Questions")),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(FONT_LABEL)
+                                        .text_color(theme.muted_foreground)
+                                        .child(format!(
+                                            "{} {}",
+                                            questions.len(),
+                                            if questions.len() == 1 {
+                                                "question"
+                                            } else {
+                                                "questions"
+                                            }
+                                        )),
+                                ),
+                        )
+                    })
+                    .child(
+                        Button::new("toggle-session-questions")
+                            .ghost()
+                            .rounded(RADIUS_BUTTON)
+                            .icon(
+                                icon(if expanded {
+                                    "icons/chevron-left.svg"
+                                } else {
+                                    "icons/chevron-right.svg"
+                                })
+                                .with_size(zpx(16.)),
+                            )
+                            .tooltip(if expanded { t("Collapse") } else { t("Expand") })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.questions_nav_expanded = !this.questions_nav_expanded;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .when(expanded, |rail| {
+                rail.child(
+                    v_flex()
+                        .id("session-questions-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .bg(theme.sidebar)
+                        .border_l_1()
+                        .border_color(theme.sidebar_border)
+                        .px(SPACE_SM)
+                        .gap(SPACE_XS)
+                        .children(questions.into_iter().enumerate().map(|(ix, (seq, text))| {
+                            let title: SharedString =
+                                one_line(&text, SESSION_TITLE_MAX_WIDTH).into();
+                            let full_text: SharedString = text.into();
+                            div()
+                                .id(("session-question", ix))
+                                .px(SPACE_MD)
+                                .py(SPACE_SM)
+                                .rounded(theme.radius)
+                                .cursor_pointer()
+                                .hover(|style| style.bg(theme.secondary_hover))
+                                .on_click(cx.listener(move |this, _, _window, cx| {
+                                    if let Some(detail) = this.detail.as_mut() {
+                                        if let Some(ix) = detail
+                                            .transcript
+                                            .iter()
+                                            .position(|message| message.seq == seq)
+                                        {
+                                            detail.jump_seq = Some(seq);
+                                            pin_list_row(&detail.msg_list, ix);
+                                            cx.notify();
+                                        }
+                                    }
+                                }))
+                                .child(
+                                    h_flex()
+                                        .gap(SPACE_SM)
+                                        .child(
+                                            div()
+                                                .text_size(FONT_LABEL)
+                                                .text_color(theme.muted_foreground)
+                                                .child(format!("{:02}", ix + 1)),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(("session-question-title", ix))
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_size(FONT_BODY)
+                                                .font_medium()
+                                                .child(title)
+                                                .tooltip(move |window, cx| {
+                                                    gpui_component::tooltip::Tooltip::new(
+                                                        full_text.clone(),
+                                                    )
+                                                    .build(window, cx)
+                                                }),
+                                        ),
+                                )
+                        })),
+                )
+            })
+            .when(!expanded, |rail| {
+                rail.child(
+                    v_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .bg(theme.sidebar)
+                        .border_l_1()
+                        .border_color(theme.sidebar_border),
+                )
+            })
+            .into_any_element()
     }
 
     fn render_detail(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -10805,11 +11050,15 @@ impl Render for Workbench {
                             return this.child(self.render_cleanup(window, cx));
                         }
                         match self.page {
+                            Page::Questions => this
+                                .child(self.render_question_list(cx))
+                                .child(self.render_detail(window, cx)),
                             Page::Memory => this.child(self.render_memory(cx)),
                             Page::Skills => this.child(self.render_skills(cx)),
                             Page::Insights => this.child(self.render_insights(cx)),
                             Page::Sessions => this
                                 .child(self.render_session_list(cx))
+                                .child(self.render_session_question_nav(cx))
                                 .child(self.render_detail(window, cx)),
                         }
                     }),
