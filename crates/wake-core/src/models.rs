@@ -528,6 +528,19 @@ pub struct SearchHit {
     pub timestamp: Option<i64>,
 }
 
+/// A real user prompt in a visible, top-level conversation.  Unlike `SearchHit`,
+/// this is not the result of a text search: Wake uses it to provide a chronological
+/// browse view of every question the user asked.
+#[derive(Debug, Clone)]
+pub struct QuestionHit {
+    pub session: SessionMeta,
+    pub seq: i64,
+    pub text: String,
+    /// epoch ms; falls back to the session update time when the source did not
+    /// record a timestamp for the message.
+    pub timestamp: i64,
+}
+
 /// 全文搜索的筛选面(`Store::search_with`)。`Store::search(q, agents, project,
 /// limit)` 是它的便捷形态,UI 用;wake-mcp 需要多项目并集与时间下界
 #[derive(Debug, Clone, Default)]
