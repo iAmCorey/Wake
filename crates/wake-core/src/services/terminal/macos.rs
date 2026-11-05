@@ -83,6 +83,16 @@ impl TerminalApp {
         }
     }
 
+    /// 这个宿主能否直接跑一条 shell 命令。三个深链目标只能打开**已有**会话
+    /// (`claude://resume?session=` / `codex://threads/` / Kooky 的 resume 链),
+    /// 没有"新建"的 URL 形制,新会话按钮不能落在它们身上
+    pub fn launches_shell(&self) -> bool {
+        !matches!(
+            self,
+            TerminalApp::Kooky | TerminalApp::ClaudeDesktop | TerminalApp::CodexDesktop
+        )
+    }
+
     /// 已安装的 .app 绝对路径(首个命中;/Applications 之外再试
     /// ~/Applications 下同名 bundle)
     pub fn resolved_app_path(&self) -> Option<std::path::PathBuf> {
