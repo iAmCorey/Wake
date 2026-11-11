@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/wake-core", "crates/wake"]
+members = ["crates/wake-core", "crates/wake", "crates/wake-web"]
 
 [workspace.package]
 version = "0.10.2"

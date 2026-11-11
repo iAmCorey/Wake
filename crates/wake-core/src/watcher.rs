@@ -177,6 +177,14 @@ pub(crate) fn process_batch(
         }
     }
 
+    // 归档跟着源走:这一批里还在的文件当场镜像进 vault——等下一次全量扫描的话,
+    // 写完就被清掉的会话(或者它最后那几轮)就进不了归档
+    if let Some((home, vault)) = crate::vault::active(store) {
+        for path in present.keys() {
+            crate::vault::mirror_path(&home, &vault, path);
+        }
+    }
+
     // 不是已入库会话文件的路径(新出现的会话文件,或者从不入库的共享边车——Grok Bot 的侧栏列表)
     // 与消失的路径,可能改变同实例别的文件的引用(`ref_dependents`:Claude 的分支数着同目录更早的
     // 同根文件,Grok Bot 的副本并进了列表行的指纹)。那些文件没动、没有事件,这里按引用与索引

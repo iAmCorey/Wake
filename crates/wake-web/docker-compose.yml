@@ -1,0 +1,17 @@
+# 绿联 NAS(UGOS Pro)的 Docker 应用里:项目 → 创建 → 粘贴本文件,改好下面两处再启动
+services:
+  wake-web:
+    image: ghcr.io/siwting/wake-web:latest
+    container_name: wake-web
+    restart: unless-stopped
+    ports:
+      - "8080:8080"               # 左边是 NAS 上的端口,被占用就换一个
+    environment:
+      TZ: Asia/Shanghai           # 统计页按这个时区划分"今天"
+    # 默认不用登录。要加访问密码就取消下面一行的注释
+    #   WAKE_PASSWORD: "你的密码"
+    volumes:
+      # 左边换成 NAS 上放各台电脑会话的共享文件夹(里面一台电脑一个子文件夹)。只读挂载
+      - /volume1/wake-data:/data:ro
+      # 索引(可随时删掉重建),放在 Docker 的数据目录里即可
+      - /volume1/docker/wake-web/index:/index

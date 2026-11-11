@@ -204,6 +204,8 @@ fn spawn_scan(
     std::thread::spawn(move || {
         // 写库的线程持一份锁的克隆:Workbench 先没了(关窗)扫描还在跑,锁得跟到扫完
         let _lock = lock;
+        // 归档先镜像:源里这一刻有的都先落进 vault,再扫
+        wake_core::vault::sync_for(&store);
         let _ = run_scan(&adapters, &store, events.as_ref(), full);
     });
 }
@@ -243,6 +245,37 @@ fn report_remote_cache_size(
         let bytes = wake_core::remote::cache_bytes(&db_dir);
         let _ = bg_tx.unbounded_send(BgEvent::RemoteCacheBytes(bytes));
     }
+    if let Some(vault) = wake_core::vault::dir_for(store) {
+        let bytes = wake_core::vault::cache_bytes(&vault);
+        let _ = bg_tx.unbounded_send(BgEvent::VaultBytes(bytes));
+    }
+}
+
+/// 本机归档根(`wake_core::vault`):Workbench::new 里定,用户换位置(VaultMoved)时改。
+/// 行渲染在 delegate 里、够不着 Workbench,所以放进程级;None = 没启用归档
+static VAULT_DIR: std::sync::RwLock<Option<std::path::PathBuf>> = std::sync::RwLock::new(None);
+
+fn set_vault_dir(dir: Option<std::path::PathBuf>) {
+    if let Ok(mut slot) = VAULT_DIR.write() {
+        *slot = dir;
+    }
+}
+
+/// 这条会话的源文件已经不在了,现在读的是归档里的副本
+fn source_gone(file_path: &str) -> bool {
+    VAULT_DIR.read().is_ok_and(|dir| {
+        dir.as_deref()
+            .is_some_and(|dir| std::path::Path::new(file_path).starts_with(dir))
+    })
+}
+
+/// "源已删除"徽章:列表行用填充胶囊(与 @host 同形,warning 色),详情页用描边版
+fn source_gone_badge(theme: &gpui_component::Theme) -> impl IntoElement {
+    badge(
+        t("Source deleted"),
+        theme.warning.opacity(0.14),
+        theme.warning,
+    )
 }
 
 // ---------------- 后台事件桥 ----------------
@@ -256,6 +289,10 @@ enum BgEvent {
     RemoteSyncDone,
     /// remotes/ 镜像的磁盘占用算好了(启动、同步收工、删 host 后各算一次)
     RemoteCacheBytes(u64),
+    /// vault/ 归档的磁盘占用(与镜像同一时机算)
+    VaultBytes(u64),
+    /// 归档搬迁线程收工:Ok = 新的归档根,Err = 没搬成(旧归档原样)
+    VaultMoved(Result<std::path::PathBuf, String>),
 }
 
 struct ChannelEvents(futures::channel::mpsc::UnboundedSender<BgEvent>);
@@ -888,6 +925,9 @@ impl ListDelegate for SessionsDelegate {
                                 ))
                                 .when(!s.host.is_empty(), |this| {
                                     this.child(host_badge(&s.host, &theme))
+                                })
+                                .when(source_gone(&s.file_path), |this| {
+                                    this.child(source_gone_badge(&theme))
                                 })
                                 .when(show_chevron, |this| {
                                     this.child(
@@ -2552,6 +2592,10 @@ pub struct Workbench {
     /// remotes/ 镜像的磁盘占用(Settings → Data 的 Storage 行并进索引库大小);
     /// 后台算、经 RemoteCacheBytes 送达,None = 还没算完
     remote_cache_bytes: Option<u64>,
+    /// 本机归档(vault/)的磁盘占用,同样后台算
+    vault_bytes: Option<u64>,
+    /// 归档正在搬到新位置(后台线程,跨卷时是整份拷贝)
+    vault_moving: bool,
     projects: Vec<ProjectInfo>,
     agents_collapsed: bool,
     projects_collapsed: bool,
@@ -2872,6 +2916,13 @@ pub(crate) struct DataSettingsSnapshot {
     pub(crate) size_bytes: u64,
     /// 其中镜像的部分(算完前为 0)
     pub(crate) remote_bytes: u64,
+    /// 其中本机归档的部分(算完前为 0)
+    pub(crate) vault_bytes: u64,
+    /// 归档根的绝对路径(没启用时为空)
+    pub(crate) vault_path: SharedString,
+    /// 归档在用户自选的位置(给"恢复默认"按钮)
+    pub(crate) vault_custom: bool,
+    pub(crate) vault_moving: bool,
     pub(crate) session_count: i64,
 }
 
@@ -2976,6 +3027,8 @@ impl Workbench {
             }
         };
         let store = Arc::new(store);
+        // 归档根要在组 roster 之前建好(roster 按目录在不在挂归档实例)
+        set_vault_dir(wake_core::vault::ensure(&store));
         let (adapters, data_locations) = Self::build_roster(&store);
 
         let list_state = cx.new(|cx| {
@@ -3057,6 +3110,8 @@ impl Workbench {
             favorite_only: false,
             agent_counts: Vec::new(),
             remote_cache_bytes: None,
+            vault_bytes: None,
+            vault_moving: false,
             projects: Vec::new(),
             agents_collapsed: false,
             projects_collapsed: false,
@@ -3453,11 +3508,19 @@ impl Workbench {
             .map(|metadata| metadata.len())
             .sum();
         let remote_bytes = self.remote_cache_bytes.unwrap_or(0);
+        let vault_bytes = self.vault_bytes.unwrap_or(0);
         DataSettingsSnapshot {
             display_path: tilde_path(&raw).into(),
             raw_path: raw.into(),
-            size_bytes: index_bytes + remote_bytes,
+            size_bytes: index_bytes + remote_bytes + vault_bytes,
             remote_bytes,
+            vault_bytes,
+            vault_path: wake_core::vault::dir_for(&self.store)
+                .map(|dir| dir.to_string_lossy().into_owned())
+                .unwrap_or_default()
+                .into(),
+            vault_custom: wake_core::vault::is_custom(&self.store),
+            vault_moving: self.vault_moving,
             session_count: self.session_total(),
         }
     }
@@ -4996,6 +5059,55 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Settings → Data 的"更改归档位置":系统选择器挑文件夹,归档搬进它下面的
+    /// `Wake Vault`(取消无事发生)
+    pub(crate) fn choose_vault_dir(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.vault_moving {
+            return;
+        }
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(t("Choose").into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let dir = match rx.await {
+                Ok(Ok(Some(paths))) if !paths.is_empty() => paths.into_iter().next().unwrap(),
+                _ => return,
+            };
+            this.update(cx, |this, cx| this.move_vault(Some(dir), cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// 归档搬回默认位置(索引库旁边)
+    pub(crate) fn reset_vault_dir(&mut self, cx: &mut Context<Self>) {
+        self.move_vault(None, cx);
+    }
+
+    /// 起归档搬迁线程;收工经 VaultMoved 换 roster 并补扫。`None` = 默认位置
+    fn move_vault(&mut self, folder: Option<std::path::PathBuf>, cx: &mut Context<Self>) {
+        if self.vault_moving {
+            return;
+        }
+        self.vault_moving = true;
+        cx.notify();
+        let (store, bg_tx, lock) = (
+            self.store.clone(),
+            self.bg_tx.clone(),
+            self.index_lock.clone(),
+        );
+        std::thread::spawn(move || {
+            // relocate 改 prefs 表,也算写者
+            let _lock = lock;
+            let result =
+                wake_core::vault::relocate(&store, folder.as_deref()).map_err(|e| e.to_string());
+            let _ = bg_tx.unbounded_send(BgEvent::VaultMoved(result));
+        });
+    }
+
     pub(crate) fn sync_all_remote_hosts(&mut self, cx: &mut Context<Self>) {
         let names = self.store.enabled_remote_host_names();
         self.spawn_remote_sync(names, cx);
@@ -5064,6 +5176,30 @@ impl Workbench {
                 self.remote_cache_bytes = Some(bytes);
                 cx.notify();
                 None
+            }
+            BgEvent::VaultBytes(bytes) => {
+                self.vault_bytes = Some(bytes);
+                cx.notify();
+                None
+            }
+            BgEvent::VaultMoved(result) => {
+                self.vault_moving = false;
+                cx.notify();
+                match result {
+                    Ok(dir) => {
+                        // 归档实例的根变了:roster 整体换代,补扫把指着旧位置的行换成新位置的
+                        set_vault_dir(Some(dir));
+                        self.rebuild_roster(cx);
+                        self.kick_incremental_scan(cx);
+                        let (store, bg_tx) = (self.store.clone(), self.bg_tx.clone());
+                        std::thread::spawn(move || report_remote_cache_size(&store, &bg_tx));
+                        Some(Notification::success(t("Archive moved")))
+                    }
+                    Err(e) => Some(Notification::error(crate::tf!(
+                        "Couldn't move the archive: {}",
+                        e
+                    ))),
+                }
             }
             BgEvent::RemoteSyncDone => {
                 self.syncing_hosts.clear();
@@ -7890,7 +8026,10 @@ impl Workbench {
             );
         }
         // 放在父会话目录里的子代理不能单独恢复(`resumable`)
-        let resume_targets = if wake_core::adapters::resumable(&self.adapters, meta) {
+        // 源已删除的会话没法原地恢复:各家 CLI 按自己的目录找转录,归档里那份它们看不见
+        let resume_targets = if wake_core::adapters::resumable(&self.adapters, meta)
+            && !source_gone(&meta.file_path)
+        {
             terminal::resume_targets(meta)
         } else {
             Vec::new()
@@ -8099,6 +8238,9 @@ impl Workbench {
                     // 详情页保持 model/source 同排的描边形态,色相与列表行的 host
                     // 胶囊一致(primary);muted 描边用户否决 2026-09-03
                     this.child(outline_badge(format!("@{}", meta.host), theme.primary))
+                })
+                .when(source_gone(&meta.file_path), |this| {
+                    this.child(outline_badge(t("Source deleted"), theme.warning))
                 })
                 .when(has_detail_facts, |this| {
                     this.child(div().flex_1().min_w_0().truncate().child(detail_fact_line))

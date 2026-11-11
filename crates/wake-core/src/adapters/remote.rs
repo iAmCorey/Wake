@@ -20,13 +20,39 @@ use std::path::Path;
 pub struct RemoteAdapter {
     inner: Box<dyn AgentAdapter>,
     host: String,
+    /// 本机归档(vault)实例:host 为空——与源那份同一个去重域、同一个 key——
+    /// 只是副本位次恒落后、不监听、不报记忆。见 `crate::vault`
+    archive: bool,
 }
+
+/// 归档副本的位次罚分:压过各家自己的 `dedup_rank`(现有最大为 1),源那份在就永远是它胜出
+const ARCHIVE_RANK: u8 = 100;
 
 impl RemoteAdapter {
     pub fn new(inner: Box<dyn AgentAdapter>, host: impl Into<String>) -> Self {
         Self {
             inner,
             host: host.into(),
+            archive: false,
+        }
+    }
+
+    /// 包一个挂在 vault 里的本机实例。key 改写在 host 为空时是恒等的,
+    /// 其余出口照常转发
+    pub fn archive(inner: Box<dyn AgentAdapter>) -> Self {
+        Self {
+            inner,
+            host: String::new(),
+            archive: true,
+        }
+    }
+
+    /// with_custom_root / excluding_data_roots 换 inner 时保住装饰形态
+    fn rewrap(&self, inner: Box<dyn AgentAdapter>) -> Self {
+        Self {
+            inner,
+            host: self.host.clone(),
+            archive: self.archive,
         }
     }
 
@@ -68,6 +94,25 @@ pub fn create_remote_adapters(
         };
         let inner = template.with_custom_root(mount);
         out.push(Box::new(RemoteAdapter::new(inner, host)));
+    }
+    out
+}
+
+/// 本机归档的整组实例:`vault::VAULT_LAYOUTS` 的各家模板 × `with_custom_root`
+/// (vault 内挂载点)× 归档装饰器。与远程实例一样追加在 roster 尾部、不进
+/// Session locations 面板;`templates` 同样由 roster 唯一构造点传入
+pub fn create_archive_adapters(
+    templates: &[Box<dyn AgentAdapter>],
+    vault: &Path,
+) -> Vec<Box<dyn AgentAdapter>> {
+    let mut out: Vec<Box<dyn AgentAdapter>> = Vec::new();
+    for layout in crate::vault::VAULT_LAYOUTS {
+        let mount = vault.join(layout.mount);
+        let Some(template) = super::custom_root_template(templates, layout.agent, &mount) else {
+            continue;
+        };
+        let inner = template.with_custom_root(mount);
+        out.push(Box::new(RemoteAdapter::archive(inner)));
     }
     out
 }
@@ -159,6 +204,10 @@ impl AgentAdapter for RemoteAdapter {
     }
 
     fn memory_sources(&self) -> Vec<MemorySource> {
+        // 归档只镜像会话,不镜像记忆:报了就会和本机实例的记忆重复
+        if self.archive {
+            return Vec::new();
+        }
         // inner 按缓存挂载点构造,它报的路径已经是缓存内的
         self.inner.memory_sources()
     }
@@ -170,6 +219,9 @@ impl AgentAdapter for RemoteAdapter {
     ) -> Result<Vec<MemoryDoc>> {
         // 项目根是本机路径,远程实例不展开项目模式(传空);记忆的 key 与会话 key
         // 同规矩:agent 段之后插 host,线程级挂的会话 key 同改
+        if self.archive {
+            return Ok(Vec::new());
+        }
         let mut docs = self.inner.list_memories(sources, &[])?;
         for d in &mut docs {
             d.key = self.rewrite_key(&d.key);
@@ -208,15 +260,18 @@ impl AgentAdapter for RemoteAdapter {
     }
 
     fn watch_paths(&self) -> Vec<std::path::PathBuf> {
+        // 归档只有 Wake 自己写(vault::mirror_path 跟着源的事件拷),监听它只会把
+        // 每次写入再解析一遍、然后在写事务里输给源那份。源消失时由
+        // promote_survivors 按列表找到归档副本,不靠事件
+        if self.archive {
+            return Vec::new();
+        }
         self.inner.watch_paths()
     }
 
     fn with_custom_root(&self, dir: std::path::PathBuf) -> Box<dyn AgentAdapter> {
         // 远程实例没有自定义 location 的产品入口;保持装饰不变量以防未来误用
-        Box::new(Self::new(
-            self.inner.with_custom_root(dir),
-            self.host.clone(),
-        ))
+        Box::new(self.rewrap(self.inner.with_custom_root(dir)))
     }
 
     fn claims_custom_root(&self, dir: &Path) -> bool {
@@ -228,7 +283,11 @@ impl AgentAdapter for RemoteAdapter {
     }
 
     fn dedup_rank(&self, path: &str) -> u8 {
-        self.inner.dedup_rank(path)
+        let rank = self.inner.dedup_rank(path);
+        if self.archive {
+            return rank.saturating_add(ARCHIVE_RANK);
+        }
+        rank
     }
 
     fn parent_links_global(&self) -> bool {
@@ -262,6 +321,6 @@ impl AgentAdapter for RemoteAdapter {
 
     fn excluding_data_roots(&self, roots: &[std::path::PathBuf]) -> Option<Box<dyn AgentAdapter>> {
         let inner = self.inner.excluding_data_roots(roots)?;
-        Some(Box::new(Self::new(inner, self.host.clone())))
+        Some(Box::new(self.rewrap(inner)))
     }
 }

@@ -509,6 +509,14 @@ pub fn create_adapter_roster_for(store: &crate::db::Store) -> AdapterRoster {
             remote_instances.extend(remote::create_remote_adapters(&base, &host, &host_cache));
         }
     }
+    // 本机归档(vault):目录在才挂(GUI 与 scan CLI 启动时 `vault::ensure`)。
+    // 同样借未经覆盖的模板——归档的布局是固定的,不随 location 配置变
+    let mut archive_instances: Vec<Box<dyn AgentAdapter>> = Vec::new();
+    if let Some(vault) = crate::vault::dir_for(store) {
+        if vault.is_dir() {
+            archive_instances = remote::create_archive_adapters(&base, &vault);
+        }
+    }
     let configured = create_adapters_with_root_overrides(base, &customs, &removed, &removed_roots);
     let disabled: std::collections::HashSet<(AgentId, std::path::PathBuf)> =
         store.disabled_locations().into_iter().collect();
@@ -547,6 +555,7 @@ pub fn create_adapter_roster_for(store: &crate::db::Store) -> AdapterRoster {
     // 远程实例无条件追加(缓存树可能还没同步下来——各家挂载点选的是"目录
     // 不存在也整形正确"的那层,缺根由 list_session_files 降级为空),同步
     // 落盘后 watcher/补扫自然收编
+    active.extend(archive_instances);
     active.extend(remote_instances);
 
     AdapterRoster { active, locations }

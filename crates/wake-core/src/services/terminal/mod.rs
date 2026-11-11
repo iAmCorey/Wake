@@ -272,6 +272,16 @@ pub(crate) fn sh_command_line(bin: &str, args: &[String], cwd: Option<&str>) -> 
     }
 }
 
+/// 在会话所在的那台机器上恢复它的命令:`cd <项目目录> && <agent CLI> <resume args>`。
+/// 网页版给用户复制——浏览器起不了终端,而且会话的 cwd 是原机器上的路径。CLI 用裸名,
+/// 交那台机器的 PATH 解析。这条会话恢复不了(子代理、没有 resume 入口的家)给 None
+pub fn local_resume_command(meta: &SessionMeta) -> Option<String> {
+    let (args, _requires_cwd) = resume_args(meta)?;
+    let bin = session_bin(meta)?;
+    let cwd = (!meta.project_path.is_empty()).then_some(meta.project_path.as_str());
+    Some(sh_command_line(bin, &args, cwd))
+}
+
 /// 远程会话的 resume 命令(阶段 1 只复制到剪贴板,不代起终端):
 /// `ssh -t <host> 'exec $SHELL -lic '\''cd <远程cwd> && <agent CLI> <resume args>'\'''`。
 /// CLI 用**裸名**交远端 PATH 解析——本地 resolve_cli 的绝对路径对远端无意义,

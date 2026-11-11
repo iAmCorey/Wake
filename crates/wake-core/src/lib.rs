@@ -9,4 +9,5 @@ pub mod scanner;
 pub mod services;
 pub mod skills;
 pub mod text;
+pub mod vault;
 pub mod watcher;

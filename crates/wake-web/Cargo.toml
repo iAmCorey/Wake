@@ -1,0 +1,19 @@
+[package]
+name = "wake-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# 只读的网页版:部署在 NAS / 服务器上,读若干"每台机器一个目录"的会话归档
+# (目录布局同桌面版的 vault 与远程镜像),建索引并提供浏览、搜索、导出。
+# 不依赖 gpui,Linux 上是一个静态链接友好的小二进制
+[dependencies]
+wake-core = { path = "../wake-core" }
+anyhow.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+chrono.workspace = true
+# 同步、无运行时的 HTTP/1.1 server:与 wake-core 的线程模型一致,不为它引入 tokio
+tiny_http = "0.12"
+# 把桌面版的 assets/(图标、品牌图)编进二进制
+include_dir = "0.7"

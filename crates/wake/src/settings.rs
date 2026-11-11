@@ -814,6 +814,13 @@ impl SettingsView {
                 format_storage_size(snapshot.remote_bytes)
             ));
         }
+        if snapshot.vault_bytes > 0 {
+            summary.push(' ');
+            summary.push_str(&crate::tf!(
+                "({} in archive)",
+                format_storage_size(snapshot.vault_bytes)
+            ));
+        }
         let summary: SharedString = summary.into();
         let reveal_path = snapshot.raw_path.clone();
         let show_in_finder = settings_button(
@@ -840,6 +847,83 @@ impl SettingsView {
                 .into_any_element(),
         ];
 
+        // 归档卡:位置 + 占用,右侧更改 / 恢复默认 / 在访达中显示。搬迁在后台线程,
+        // 进行中两个改位置的按钮都停用
+        let vault_card = (!snapshot.vault_path.is_empty()).then(|| {
+            let vault_details = vec![
+                div()
+                    .w_full()
+                    .truncate()
+                    .text_size(FONT_CAPTION)
+                    .text_color(theme.muted_foreground)
+                    .child(SharedString::from(crate::format::tilde_path(
+                        snapshot.vault_path.as_ref(),
+                    )))
+                    .into_any_element(),
+                div()
+                    .text_size(FONT_CAPTION)
+                    .text_color(theme.muted_foreground)
+                    .child(SharedString::from(if snapshot.vault_moving {
+                        t("Moving…").to_string()
+                    } else {
+                        crate::tf!(
+                            "{} · raw copies of session files, kept after the source is deleted",
+                            format_storage_size(snapshot.vault_bytes)
+                        )
+                    }))
+                    .into_any_element(),
+            ];
+            let change_workbench = self.workbench.clone();
+            let reset_workbench = self.workbench.clone();
+            let reveal_vault = snapshot.vault_path.clone();
+            let buttons = h_flex()
+                .gap(SPACE_SM)
+                .child(
+                    settings_button(
+                        Button::new("settings-vault-change")
+                            .label(t("Change…"))
+                            .loading(snapshot.vault_moving)
+                            .disabled(snapshot.vault_moving),
+                        cx,
+                    )
+                    .on_click(move |_, window, cx| {
+                        change_workbench.update(cx, |this, cx| this.choose_vault_dir(window, cx));
+                    }),
+                )
+                .when(snapshot.vault_custom, |this| {
+                    this.child(
+                        settings_button(
+                            Button::new("settings-vault-reset")
+                                .label(t("Use default"))
+                                .disabled(snapshot.vault_moving),
+                            cx,
+                        )
+                        .on_click(move |_, _, cx| {
+                            reset_workbench.update(cx, |this, cx| this.reset_vault_dir(cx));
+                        }),
+                    )
+                })
+                .child(
+                    settings_button(
+                        Button::new("settings-show-vault")
+                            .icon(icon("icons/folder.svg").with_size(zpx(13.)))
+                            .label(show_in_fm()),
+                        cx,
+                    )
+                    .on_click(move |_, _, _| {
+                        wake_core::services::terminal::open_in_file_manager(reveal_vault.as_ref())
+                    }),
+                );
+            settings_info_card(
+                t("Session archive"),
+                vault_details,
+                buttons.into_any_element(),
+                zpx(84.),
+                cx,
+            )
+            .into_any_element()
+        });
+
         let rows = [
             section_title(t("Storage"), cx).into_any_element(),
             settings_info_card(
@@ -850,6 +934,7 @@ impl SettingsView {
                 cx,
             )
             .into_any_element(),
+            vault_card.unwrap_or_else(|| div().into_any_element()),
             section_title(t("Hidden sessions"), cx)
                 .pt(SPACE_MD)
                 .into_any_element(),

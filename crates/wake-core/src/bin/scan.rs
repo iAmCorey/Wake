@@ -37,6 +37,14 @@ fn main() -> Result<()> {
 
     let store = Arc::new(Store::open(&db_path)?);
     // 必须带上库里的 location 配置:默认 roster 会把自定义根会话当已删清掉
+    // 归档先镜像、再组 roster(roster 按 vault 目录在不在决定挂不挂归档实例)。
+    // --tmp 的隔离库不建归档:它只是拿真实数据试扫一遍
+    if !args.iter().any(|a| a == "--tmp") {
+        wake_core::vault::ensure(&store);
+        if let Some(stats) = wake_core::vault::sync_for(&store) {
+            eprintln!("vault: {stats:?}");
+        }
+    }
     let adapters = create_adapters_for(&store);
     eprintln!(
         "adapters: {:?}",
