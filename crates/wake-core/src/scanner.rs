@@ -354,7 +354,11 @@ pub(crate) fn copy_order(
     adapters[*ia]
         .dedup_rank(&a.file_path)
         .cmp(&adapters[*ib].dedup_rank(&b.file_path))
-        .then_with(|| b.mtime_ms.cmp(&a.mtime_ms))
+        .then_with(|| {
+            adapters[*ib]
+                .copy_mtime(b)
+                .cmp(&adapters[*ia].copy_mtime(a))
+        })
         .then_with(|| a.file_path.cmp(&b.file_path))
 }
 
@@ -430,6 +434,27 @@ fn rank_of<'a>(
     }
 }
 
+/// Compare copies using the adapter's real timestamp rather than an opaque
+/// file stamp. This is also used in the write transaction by watcher events.
+fn copy_rank_and_time<'a>(
+    adapters: &'a [Box<dyn AgentAdapter>],
+    agent: AgentId,
+) -> impl Fn(&str, i64) -> (u8, i64) + 'a {
+    move |path, stamp| {
+        let Some(adapter) = crate::adapters::adapter_for(adapters, agent, path) else {
+            return (0, stamp);
+        };
+        let reference = SessionFileRef {
+            agent,
+            native_id: String::new(),
+            file_path: path.to_string(),
+            mtime_ms: stamp,
+            size: 0,
+        };
+        (adapter.dedup_rank(path), adapter.copy_mtime(&reference))
+    }
+}
+
 fn run_scan_inner(
     adapters: &[Box<dyn AgentAdapter>],
     store: &Arc<Store>,
@@ -449,7 +474,7 @@ fn run_scan_inner(
     // 跑完就清旗子,不按"全部成功"重试——解析失败的文件下次也不会自己好,它变了
     // 自然走增量重解析;留着旗子只会让每次启动都全量一遍
     let force_reindex = store.needs_fts_reindex();
-    let known = store.known_files()?;
+    let mut known = store.known_files()?;
     let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     struct WorkItem<'a> {
         adapter: &'a dyn AgentAdapter,
@@ -471,6 +496,7 @@ fn run_scan_inner(
     // 一个坏库既不能截断整轮(别家的新会话跟着进不来),也不能被当成"会话全没了"
     let mut per_adapter: Vec<Vec<SessionFileRef>> = Vec::with_capacity(adapters.len());
     let mut frozen: Vec<usize> = Vec::new();
+    let mut rekeyed_paths = std::collections::HashSet::new();
     for (ix, adapter) in adapters.iter().enumerate() {
         let listed = match adapter.list_session_files() {
             Ok(listed) => listed,
@@ -484,6 +510,19 @@ fn run_scan_inner(
                 continue;
             }
         };
+        for r in &listed {
+            let canonical = key_of(ix, r);
+            for id in adapter.native_id_aliases(r) {
+                let alias = session_key(r.agent, adapter.host(), &id);
+                if store.merge_session_alias(&alias, &canonical)?
+                    || known
+                        .get(&r.file_path)
+                        .is_some_and(|(_, _, key)| key == &alias)
+                {
+                    rekeyed_paths.insert(r.file_path.clone());
+                }
+            }
+        }
         let refs: Vec<SessionFileRef> = listed
             .into_iter()
             // 墓碑双轨:物理路径之外还按逻辑会话(key)屏蔽——多 location 下
@@ -498,6 +537,21 @@ fn run_scan_inner(
             .collect();
         per_adapter.push(refs);
     }
+    // Alias migration can move an already indexed row to its canonical key.
+    // Reconciliation must use the post-migration snapshot, or it can treat
+    // that retained row as a vanished old key.
+    if !rekeyed_paths.is_empty() {
+        known = store.known_files()?;
+    }
+    let frozen_keys: std::collections::HashSet<String> = known
+        .iter()
+        .filter_map(|(path, (_, _, key))| {
+            owners
+                .owner_of(path)
+                .filter(|ix| frozen.contains(ix))
+                .map(|_| key.clone())
+        })
+        .collect();
     // 同家同 ID 去重:同一会话在默认根与自定义根各有一份副本时,两个文件会
     // 每轮轮流改写同一行(key 相同,file_path 摇摆)。候选按 (副本 dedup_rank
     // 小者, mtime 新者, 平局路径字典序小者) 排序,首位入队,其余留作**解析
@@ -511,6 +565,9 @@ fn run_scan_inner(
         std::collections::HashMap::new();
     for (ix, refs) in per_adapter.iter().enumerate() {
         for r in refs {
+            if frozen_keys.contains(&key_of(ix, r)) {
+                continue;
+            }
             candidates
                 .entry(key_of(ix, r))
                 .or_default()
@@ -520,18 +577,41 @@ fn run_scan_inner(
     for v in candidates.values_mut() {
         v.sort_by(|a, b| copy_order(adapters, a, b));
     }
+    // The indexed winner may now be a lower-priority or older copy. Force the
+    // actual winner through parsing even if its own fingerprint is unchanged;
+    // otherwise pruning the old path would leave the session missing.
+    let known_by_key: std::collections::HashMap<&str, (&str, i64)> = known
+        .iter()
+        .map(|(path, (stamp, _, key))| (key.as_str(), (path.as_str(), *stamp)))
+        .collect();
+    let mut superseded_winners: std::collections::HashMap<String, (String, i64)> =
+        std::collections::HashMap::new();
+    for (key, copies) in &candidates {
+        let winner = &copies[0].1.file_path;
+        if let Some((old_path, old_stamp)) = known_by_key.get(key.as_str()).copied() {
+            if old_path != winner {
+                superseded_winners.insert(winner.clone(), (old_path.to_string(), old_stamp));
+            }
+        }
+    }
+    let protected_old_paths: std::collections::HashSet<&str> = superseded_winners
+        .values()
+        .map(|(path, _)| path.as_str())
+        .collect();
     for (ix, refs) in per_adapter.iter_mut().enumerate() {
         refs.retain(|r| {
-            candidates
-                .get(&key_of(ix, r))
-                .is_none_or(|v| v[0].1.file_path == r.file_path)
+            !frozen_keys.contains(&key_of(ix, r))
+                && candidates
+                    .get(&key_of(ix, r))
+                    .is_none_or(|v| v[0].1.file_path == r.file_path)
         });
     }
 
     // 路径易主清理(location 编辑改了 agent / 更深的他家根接管既有文件):
     // 旧 agent 的行不先删,新 key 写入会撞 file_path UNIQUE;且文件 mtime/size
     // 未变会跳过解析——旧行先删、该路径强制入队(2026-08-24 Codex review P1)
-    let mut owner_changed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut owner_changed: std::collections::HashSet<String> = rekeyed_paths;
+    owner_changed.extend(superseded_winners.keys().cloned());
     for refs in &per_adapter {
         for r in refs {
             if let Some((_, _, key)) = known.get(&r.file_path) {
@@ -563,6 +643,11 @@ fn run_scan_inner(
                 .iter()
                 .filter_map(|r| {
                     let meta = map.get(&r.file_path)?;
+                    // Do not let a quick placeholder replace an already
+                    // indexed competing copy before its winner is parsed.
+                    if superseded_winners.contains_key(&r.file_path) {
+                        return None;
+                    }
                     let changed = owner_changed.contains(&r.file_path)
                         || match known.get(&r.file_path) {
                             None => true,
@@ -615,7 +700,8 @@ fn run_scan_inner(
     let mut pruned = false;
     for (path, (_, _, key)) in &known {
         if !seen_paths.contains(path)
-            && !owners.owner_of(path).is_some_and(|ix| frozen.contains(&ix))
+            && !frozen_keys.contains(key)
+            && !protected_old_paths.contains(path.as_str())
         {
             let _ = store.remove_session(key);
             pruned = true;
@@ -628,23 +714,30 @@ fn run_scan_inner(
     }
 
     // 最近的会话优先
-    queue.sort_by(|a, b| b.r.mtime_ms.cmp(&a.r.mtime_ms));
+    // Some priorities require a catalog lookup; compute each once instead of
+    // repeating it for every sort comparison.
+    queue.sort_by_cached_key(|item| std::cmp::Reverse(item.adapter.scan_priority(&item.r)));
     progress.total = queue.len();
     events.on_progress(progress);
 
     let mut last_notify = std::time::Instant::now();
     let mut grok_backfill_succeeded = true;
+    let mut announced_first_new_session = false;
     for item in &queue {
         let forced_grok = force_grok_backfill && item.adapter.agent() == AgentId::Grok;
         let mut item_written = false;
         match item.adapter.parse_session(&item.r) {
             Ok(parsed) => {
+                // Wake-owned flags live separately; exposing each newly indexed
+                // session immediately keeps a large legacy import usable while
+                // the remaining messages are still being indexed.
                 // quick/parsed 合并策略属各 adapter(默认 parsed 为准 quick 补缺,
                 // Codex 覆写 title/key 优先级),scanner 不再内嵌任何 agent 特例
                 let meta = match &item.quick {
                     Some(q) => item.adapter.merge_quick_meta(parsed.meta, q),
                     None => parsed.meta,
                 };
+                let newly_discovered = !known_by_key.contains_key(meta.key.as_str());
                 // 合并可能改写 key(codex 的 state thread-id):改名后的 key
                 // 也要受墓碑约束,否则改名副本绕过上面的枚举过滤
                 if store.is_key_tombstoned(&meta.key) {
@@ -654,16 +747,23 @@ fn run_scan_inner(
                 // 全量写入也走事务内副本裁决:扫描快照里的旧副本不得覆盖
                 // watcher 并发间隙写入的更新副本(启动扫描与手动刷新期间
                 // watcher 都活着,2026-08-24 Codex review P1)
-                match store.write_session_guarded(
+                match store.write_session_guarded_with_order(
                     &meta,
                     item.r.mtime_ms,
                     &parsed.units,
                     &parsed.wake_lookups,
-                    &rank_of(adapters, meta.agent),
-                    None,
+                    &copy_rank_and_time(adapters, meta.agent),
+                    superseded_winners
+                        .get(&item.r.file_path)
+                        .map(|(path, stamp)| (path.as_str(), *stamp)),
                 ) {
                     Ok(written) => item_written = written,
                     Err(e) => eprintln!("[scanner] write failed {}: {e}", item.r.file_path),
+                }
+                if item_written && newly_discovered && !announced_first_new_session {
+                    events.on_sessions_changed();
+                    last_notify = std::time::Instant::now();
+                    announced_first_new_session = true;
                 }
             }
             Err(e) => {
@@ -690,13 +790,18 @@ fn run_scan_inner(
                             // 回退副本——把它作为 supersedes 交给写事务:它的正文
                             // 已经读不出来,留着只会让详情页永远打不开;让位的判定
                             // 与写入同一事务,不在这里先删(Codex review 第二、三轮)
-                            match store.write_session_guarded(
+                            match store.write_session_guarded_with_order(
                                 &meta,
                                 fb.mtime_ms,
                                 &parsed.units,
                                 &parsed.wake_lookups,
-                                &rank_of(adapters, meta.agent),
-                                Some((item.r.file_path.as_str(), item.r.mtime_ms)),
+                                &copy_rank_and_time(adapters, meta.agent),
+                                Some((
+                                    item.r.file_path.as_str(),
+                                    known
+                                        .get(&item.r.file_path)
+                                        .map_or(0, |(mtime, _, _)| *mtime),
+                                )),
                             ) {
                                 Ok(written) => item_written = written,
                                 Err(e) => eprintln!(
@@ -939,7 +1044,7 @@ fn sync_parent_links(
             .iter()
             .filter_map(|(child, path)| {
                 let adapter = &adapters[owner_by_key[child]];
-                let parent = adapter.parent_in_path()?(Path::new(path))?;
+                let parent = adapter.parent_id_for_path(Path::new(path))?;
                 Some((child.clone(), session_key(agent, adapter.host(), &parent)))
             })
             .collect();
@@ -1215,12 +1320,12 @@ fn reparse_for_parent_change(
     if meta.key != key || store.is_key_tombstoned(&meta.key) {
         return false;
     }
-    match store.write_session_guarded(
+    match store.write_session_guarded_with_order(
         &meta,
         reference.mtime_ms,
         &parsed.units,
         &parsed.wake_lookups,
-        &rank_of(adapters, agent),
+        &copy_rank_and_time(adapters, agent),
         None,
     ) {
         Ok(written) => written,
@@ -1262,6 +1367,12 @@ pub fn scan_files(
             continue;
         };
         let key = session_key(r.agent, adapters[ix].host(), &r.native_id);
+        for id in adapters[ix].native_id_aliases(&r) {
+            let alias = session_key(r.agent, adapters[ix].host(), &id);
+            if store.merge_session_alias(&alias, &key).unwrap_or(false) {
+                changed = true;
+            }
+        }
         // 认领的替身连解析都省了;合并改过 key 的情形由写入闸门兜住
         if store.is_key_tombstoned(&key) || store.is_key_claimed(&key) {
             continue;
@@ -1302,12 +1413,12 @@ pub fn scan_files(
                     // 全量扫描并发交错时,败方能后发落库违背 mtime 裁决
                     //(rsync 刷备份目录带旧 mtime 的事件串,2026-08-24 Codex review)
                     if store
-                        .write_session_guarded(
+                        .write_session_guarded_with_order(
                             &meta,
                             r.mtime_ms,
                             &parsed.units,
                             &parsed.wake_lookups,
-                            &rank_of(adapters, meta.agent),
+                            &copy_rank_and_time(adapters, meta.agent),
                             None,
                         )
                         .unwrap_or(false)

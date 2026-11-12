@@ -327,6 +327,9 @@ pub enum MessageKind {
     Text,
     Meta,
     CompactSummary,
+    /// Source data is incomplete or malformed; visible but never indexed as a
+    /// user or assistant message.
+    SourceWarning,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

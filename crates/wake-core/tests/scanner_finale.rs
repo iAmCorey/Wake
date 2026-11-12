@@ -446,6 +446,176 @@ fn one_failing_adapter_freezes_only_its_own_rows() {
 }
 
 #[test]
+fn failed_source_does_not_freeze_other_sessions_of_same_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(&dir.path().join("wake.db")).unwrap());
+    let sources = |stamp, fail| {
+        let mut broken = seed(
+            AgentId::Devin,
+            "/tmp/freeze-b",
+            "/tmp/freeze-b/b.jsonl",
+            "b",
+            10,
+        );
+        broken.fail_list = fail;
+        vec![
+            Box::new(seed(
+                AgentId::Devin,
+                "/tmp/freeze-a",
+                "/tmp/freeze-a/a.jsonl",
+                "a",
+                stamp,
+            )) as Box<dyn AgentAdapter>,
+            Box::new(broken),
+        ]
+    };
+    run_scan(&sources(10, false), &store, &Recorder::new(), true).unwrap();
+    run_scan(&sources(20, true), &store, &Recorder::new(), false).unwrap();
+    assert!(store.get_session("devin:b").unwrap().is_some());
+    assert_eq!(store.known_files().unwrap()["/tmp/freeze-a/a.jsonl"].0, 20);
+}
+
+#[test]
+fn failed_copy_keeps_winning_index_when_other_copy_is_readable() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    let roots = || {
+        vec![
+            Box::new(seed(
+                AgentId::Grok,
+                "/tmp/shared-a",
+                "/tmp/shared-a/same.jsonl",
+                "same",
+                10,
+            )) as Box<dyn AgentAdapter>,
+            Box::new(seed(
+                AgentId::Grok,
+                "/tmp/shared-b",
+                "/tmp/shared-b/same.jsonl",
+                "same",
+                20,
+            )),
+        ]
+    };
+    run_scan(&roots(), &store, &Recorder::new(), false).unwrap();
+    let before = store.get_session("grok:same").unwrap().unwrap();
+    assert_eq!(before.file_path, "/tmp/shared-b/same.jsonl");
+    let mut missing = seed(
+        AgentId::Grok,
+        "/tmp/shared-a",
+        "/tmp/shared-a/same.jsonl",
+        "same",
+        10,
+    );
+    missing.fail_list = true;
+    let readers: Vec<Box<dyn AgentAdapter>> = vec![
+        Box::new(missing),
+        Box::new(seed(
+            AgentId::Grok,
+            "/tmp/shared-b",
+            "/tmp/shared-b/same.jsonl",
+            "same",
+            20,
+        )),
+    ];
+    run_scan(&readers, &store, &Recorder::new(), false).unwrap();
+    assert_eq!(
+        store.get_session("grok:same").unwrap().unwrap().file_path,
+        before.file_path
+    );
+}
+
+#[test]
+fn unreadable_new_winner_does_not_replace_an_existing_readable_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    let old = seed(
+        AgentId::Grok,
+        "/tmp/copy-old",
+        "/tmp/copy-old/s.jsonl",
+        "s",
+        1,
+    );
+    run_scan(
+        &[Box::new(old) as Box<dyn AgentAdapter>],
+        &store,
+        &Recorder::new(),
+        false,
+    )
+    .unwrap();
+    let mut old = seed(
+        AgentId::Grok,
+        "/tmp/copy-old",
+        "/tmp/copy-old/s.jsonl",
+        "s",
+        1,
+    );
+    old.fail_parse = true;
+    let mut new = seed(
+        AgentId::Grok,
+        "/tmp/copy-new",
+        "/tmp/copy-new/s.jsonl",
+        "s",
+        2,
+    );
+    new.fail_parse = true;
+    let adapters: Vec<Box<dyn AgentAdapter>> = vec![Box::new(old), Box::new(new)];
+    run_scan(&adapters, &store, &Recorder::new(), false).unwrap();
+    assert_eq!(
+        store.get_session("grok:s").unwrap().unwrap().file_path,
+        "/tmp/copy-old/s.jsonl"
+    );
+}
+
+#[test]
+fn unhiding_one_session_does_not_rescan_unrelated_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    let old: Vec<Box<dyn AgentAdapter>> = vec![
+        Box::new(seed(
+            AgentId::Grok,
+            "/tmp/hidden-a",
+            "/tmp/hidden-a/a.jsonl",
+            "a",
+            10,
+        )),
+        Box::new(seed(
+            AgentId::Devin,
+            "/tmp/hidden-b",
+            "/tmp/hidden-b/b.jsonl",
+            "b",
+            10,
+        )),
+    ];
+    run_scan(&old, &store, &Recorder::new(), false).unwrap();
+    let a = store.get_session("grok:a").unwrap().unwrap();
+    wake_core::cleanup::trash_sessions(&store, &[a], &[]).unwrap();
+    let changed: Vec<Box<dyn AgentAdapter>> = vec![
+        Box::new(seed(
+            AgentId::Grok,
+            "/tmp/hidden-a",
+            "/tmp/hidden-a/a.jsonl",
+            "a",
+            10,
+        )),
+        Box::new(seed(
+            AgentId::Devin,
+            "/tmp/hidden-b",
+            "/tmp/hidden-b/new.jsonl",
+            "new",
+            20,
+        )),
+    ];
+    let group = wake_core::cleanup::hidden_sessions(&store, &changed)
+        .unwrap()
+        .remove(0);
+    wake_core::cleanup::unhide(&store, &changed, group).unwrap();
+    assert!(store.get_session("grok:a").unwrap().is_some());
+    assert!(store.get_session("devin:b").unwrap().is_some());
+    assert!(store.get_session("devin:new").unwrap().is_none());
+}
+
+#[test]
 fn parent_links_from_multiple_locations_are_merged_by_winning_file() {
     let dir = tempfile::tempdir().unwrap();
     let store = temp_store(dir.path());
@@ -1476,6 +1646,61 @@ fn duplicate_session_across_roots_resolves_to_newest() {
             "第 {round} 轮后 file_path 未稳定在 mtime 新者上"
         );
     }
+}
+
+#[test]
+fn watcher_orders_equal_rank_copies_by_real_time_not_fingerprint() {
+    struct FingerprintedCopy {
+        inner: SeedAdapter,
+        real_time: i64,
+    }
+    impl AgentAdapter for FingerprintedCopy {
+        fn agent(&self) -> AgentId {
+            self.inner.agent()
+        }
+        fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
+            self.inner.list_session_files()
+        }
+        fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
+            self.inner.parse_session(r)
+        }
+        fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript> {
+            self.inner.parse_transcript(r)
+        }
+        fn data_roots(&self) -> Vec<std::path::PathBuf> {
+            self.inner.data_roots()
+        }
+        fn with_custom_root(&self, root: std::path::PathBuf) -> Box<dyn AgentAdapter> {
+            self.inner.with_custom_root(root)
+        }
+        fn copy_mtime(&self, _: &SessionFileRef) -> i64 {
+            self.real_time
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let store = temp_store(temp.path());
+    let older = || FingerprintedCopy {
+        inner: seed(AgentId::Codebuddy, "/old", "/old/s.jsonl", "s", 900),
+        real_time: 1,
+    };
+    let newer = FingerprintedCopy {
+        inner: seed(AgentId::Codebuddy, "/new", "/new/s.jsonl", "s", 100),
+        real_time: 2,
+    };
+    run_scan(
+        &[Box::new(older()) as Box<dyn AgentAdapter>],
+        &store,
+        &Recorder::new(),
+        false,
+    )
+    .unwrap();
+    let incoming = newer.inner.r.clone();
+    let adapters: Vec<Box<dyn AgentAdapter>> = vec![Box::new(older()), Box::new(newer)];
+    scan_files(&adapters, &store, &Recorder::new(), vec![incoming]);
+    assert_eq!(
+        store.get_session("codebuddy:s").unwrap().unwrap().file_path,
+        "/new/s.jsonl"
+    );
 }
 
 /// 副本裁决先看实例的 dedup_rank、同级才比 mtime:一家的多个数据源可以固定

@@ -1377,6 +1377,25 @@ mod session_group_tests {
     }
 
     #[test]
+    fn source_warning_is_visible_while_internal_metadata_is_hidden() {
+        let mut message = wake_core::models::TranscriptMessage {
+            seq: 0,
+            role: wake_core::models::Role::System,
+            kind: wake_core::models::MessageKind::SourceWarning,
+            text: "[Missing legacy message: fixture]".into(),
+            truncated: false,
+            tool_calls: Vec::new(),
+            thinking: None,
+            timestamp: None,
+            model: None,
+            images: Vec::new(),
+        };
+        assert!(super::visible_transcript_message(&message));
+        message.kind = wake_core::models::MessageKind::Meta;
+        assert!(!super::visible_transcript_message(&message));
+    }
+
+    #[test]
     fn thinking_and_tools_keep_independent_expansion_state() {
         let mut thinking = HashSet::new();
         let mut tools = HashSet::new();
@@ -2019,15 +2038,35 @@ fn load_visible_transcript(
     Ok(transcript
         .mainline
         .into_iter()
-        .filter(|message| {
-            message.kind != MessageKind::Meta
-                && (!message.text.trim().is_empty()
-                    || !message.tool_calls.is_empty()
-                    || message.thinking.is_some()
-                    || !message.images.is_empty()
-                    || message.kind == MessageKind::CompactSummary)
-        })
+        .filter(visible_transcript_message)
         .collect())
+}
+
+fn visible_transcript_message(message: &TranscriptMessage) -> bool {
+    message.kind != MessageKind::Meta
+        && (!message.text.trim().is_empty()
+            || !message.tool_calls.is_empty()
+            || message.thinking.is_some()
+            || !message.images.is_empty()
+            || message.kind == MessageKind::CompactSummary)
+}
+
+fn source_warning_text(text: &str) -> String {
+    if let Some(id) = text
+        .strip_prefix("[Missing legacy message: ")
+        .and_then(|s| s.strip_suffix(']'))
+    {
+        crate::tf!("Missing legacy message: {}", id)
+    } else if let Some(id) = text
+        .strip_prefix("[Unreadable legacy message: ")
+        .and_then(|s| s.strip_suffix(']'))
+    {
+        crate::tf!("Unreadable legacy message: {}", id)
+    } else if text == "[Invalid legacy message reference]" {
+        t("Invalid legacy message reference").to_string()
+    } else {
+        text.to_string()
+    }
 }
 
 fn toggle_expanded_row(rows: &mut HashSet<usize>, ix: usize) {
@@ -6054,7 +6093,9 @@ impl Workbench {
         let Some(detail) = &self.detail else { return };
         // 远程会话只读(菜单项已隐藏,这里兜住快捷键等其余入口):本地只有
         // 缓存副本,trash 它下次同步就复活;动远端文件是阶段 3 的产品决定
-        if !detail.meta.host.is_empty() {
+        let imported_legacy =
+            wake_core::adapters::codebuddy_legacy::is_imported_legacy(&detail.meta);
+        if !detail.meta.host.is_empty() && !imported_legacy {
             window.push_notification(
                 Notification::info(t(
                     "Remote sessions are read-only — files stay on the remote host",
@@ -7123,20 +7164,23 @@ impl Workbench {
         let Some(m) = transcript.get(ix) else {
             return div().into_any_element();
         };
-        // 只有 thinking、没有回复正文或工具调用的中间事件属于运行日志，
-        // 连续铺在阅读视图里会把真正的对话切碎；完整原始记录仍保留在源文件中。
+        // 普通会话的独立 thinking 事件折掉；CodeBuddy 旧格式常把思考和正文
+        // 分开存，必须保留独立行才能查看完整内容。
         if matches!(m.role, MessageRole::Assistant)
             && m.text.is_empty()
             && m.tool_calls.is_empty()
             && m.thinking.is_some()
             && shots.is_empty()
+            && !wake_core::adapters::codebuddy_legacy::is_imported_legacy(&detail.meta)
         {
             return div().into_any_element();
         }
         // 搜索跳转的落点消息:淡 primary 底色保持高亮,直到换会话
         let is_jump_target = jump_seq == Some(m.seq);
 
-        let inner: AnyElement = if m.kind == MessageKind::CompactSummary {
+        let inner: AnyElement = if m.kind == MessageKind::SourceWarning {
+            centered_pill(one_line(&source_warning_text(&m.text), 120), cx).into_any_element()
+        } else if m.kind == MessageKind::CompactSummary {
             centered_pill(t("Context compacted"), cx).into_any_element()
         } else {
             match m.role {
@@ -7732,7 +7776,8 @@ impl Workbench {
         let delete_entity = export_entity.clone();
         // 远程会话只读:Delete 项整个不出现(阶段 1 不做远程删除——本地能
         // trash 的只有缓存副本,下次 rsync 就复活,语义是骗人的)
-        let menu_is_remote = !meta.host.is_empty() || self.cleanup.open;
+        let menu_hide_only = wake_core::adapters::codebuddy_legacy::is_imported_legacy(meta);
+        let menu_is_remote = (!meta.host.is_empty() && !menu_hide_only) || self.cleanup.open;
         let more_menu = Button::new("more-actions")
             .ghost()
             .rounded(RADIUS_BUTTON)
@@ -7792,8 +7837,14 @@ impl Workbench {
                     )
                     .when(!menu_is_remote, |menu| {
                         menu.separator().item(
-                            PopupMenuItem::element(|_, cx| {
-                                div().text_color(cx.theme().danger).child(move_to_trash())
+                            PopupMenuItem::element(move |_, cx| {
+                                div()
+                                    .text_color(cx.theme().danger)
+                                    .child(if menu_hide_only {
+                                        t("Hide")
+                                    } else {
+                                        move_to_trash()
+                                    })
                             })
                             .icon(
                                 icon("icons/trash-2.svg")

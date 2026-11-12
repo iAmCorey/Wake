@@ -1,6 +1,7 @@
 pub mod antigravity;
 pub mod claude;
 pub mod codebuddy;
+pub mod codebuddy_legacy;
 pub mod codex;
 pub mod copilot;
 pub mod craft;
@@ -80,6 +81,11 @@ pub trait AgentAdapter: Send + Sync {
     /// 历史);Grok Bot 副本的引用并进了侧栏列表里那一行的指纹,列表变了,同账号的副本都要重比。
     /// 远程装饰器必须转发
     fn ref_dependents(&self, _path: &Path) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+    /// A newly discovered or removed session can affect sources owned by
+    /// other instances of the same agent and host.
+    fn cross_source_dependents(&self, _path: &Path) -> Vec<std::path::PathBuf> {
         Vec::new()
     }
     /// 一个文件装着好几个会话、各以虚拟路径 `<文件>#<id>`(`sqlite_ro::virtual_path`)入库时,这个
@@ -221,6 +227,16 @@ pub trait AgentAdapter: Send + Sync {
     /// 侧档(gemini projects.json / kimi session_index / codex state DB)必须
     /// 全部相对 `dir` 派生,落回默认家目录就会拿错树。新增 adapter 必须实现。
     fn with_custom_root(&self, dir: std::path::PathBuf) -> Box<dyn AgentAdapter>;
+    /// Remote mounts usually only need custom-root shaping. Sources whose
+    /// metadata is owned by the local app may also need the host identity.
+    fn with_remote_root(
+        &self,
+        dir: std::path::PathBuf,
+        _host_cache: &Path,
+        _host: &str,
+    ) -> Box<dyn AgentAdapter> {
+        self.with_custom_root(dir)
+    }
     /// 一家多源时,自定义 location(与远程挂载点)交给哪个实例构造:认领它的实例来,
     /// 都不认领就交同家第一个实例(`custom_root_template`)。按路径**形状**判——远程挂载点
     /// 在同步落盘前就要定形,别依赖存在性。默认不认领;Kilo 的旧版实例认领扩展的任务目录
@@ -245,6 +261,20 @@ pub trait AgentAdapter: Send + Sync {
     /// 解析失败的回退顺位。远程装饰器必须转发
     fn dedup_rank(&self, _path: &str) -> u8 {
         0
+    }
+    /// Some adapters use an opaque change fingerprint in mtime_ms. Preserve
+    /// the real file timestamp when ordering copies from equal-ranked roots.
+    fn copy_mtime(&self, r: &SessionFileRef) -> i64 {
+        r.mtime_ms
+    }
+    /// Scan newest sessions first even if mtime_ms is an opaque fingerprint.
+    fn scan_priority(&self, r: &SessionFileRef) -> i64 {
+        r.mtime_ms
+    }
+    /// Older on-disk or catalog IDs that identify this same logical session.
+    /// Scanner migrates app-owned flags and tombstones before admitting it.
+    fn native_id_aliases(&self, _r: &SessionFileRef) -> Vec<String> {
+        Vec::new()
     }
     /// `parent_links` 报的边是不是一张**全局**总表(Codex 的 state DB `thread_spawn_edges`
     /// 在 home 里,parent 的胜出文件可能归同家另一个 location)。默认 false = 边车长在
@@ -278,6 +308,11 @@ pub trait AgentAdapter: Send + Sync {
     /// (`adapters::resumable`)。默认 None。远程装饰器必须转发
     fn parent_in_path(&self) -> Option<ParentInPath> {
         None
+    }
+    /// Resolve the logical parent ID. Most sources use the directory name;
+    /// an adapter can translate it when a catalog assigns a different ID.
+    fn parent_id_for_path(&self, path: &Path) -> Option<String> {
+        self.parent_in_path().and_then(|parent| parent(path))
     }
     /// `parent_links` 只记 agent 派出去的子会话(Grok 的 subagents 登记表)时为 true:关系同步
     /// 把挂上的子会话标成 `SessionMeta::spawned`。这类标记出自别的会话的边车,解析子会话时
@@ -410,6 +445,7 @@ pub fn create_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(hermes::HermesAdapter::new()),
         Box::new(openclaw::OpenclawAdapter::new()),
         Box::new(codebuddy::CodebuddyAdapter::new()),
+        Box::new(codebuddy_legacy::CodebuddyLegacyAdapter::new()),
         Box::new(codebuddy::CodebuddyAdapter::workbuddy()),
         Box::new(zcode::ZcodeAdapter::new()),
         Box::new(craft::CraftAdapter::new()),

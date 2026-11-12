@@ -54,7 +54,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex` and many other fo
 | DeepSeek Harness (`dsh`) | `~/.dsh/sessions/**/session*.jsonl[.zstd]` | ✅ | — |
 | Hermes Agent | `~/.hermes/state.db` + `profiles/*/state.db` | ✅ | ✅ |
 | OpenClaw | `~/.openclaw/agents/*/agent/openclaw-agent.sqlite` + `agents/*/sessions/*.jsonl` | ✅ | ✅ |
-| CodeBuddy | `~/.codebuddy/projects/*/*.jsonl` | ✅ | — |
+| CodeBuddy | `~/.codebuddy/projects/*/*.jsonl` + imported IDE 4.x history and the 5.x conversation catalog | ✅ | ✅ |
 | WorkBuddy | `~/.workbuddy/projects/*/*.jsonl` | ✅ | — |
 | ZCode | `~/.zcode/cli/db/db.sqlite` | ✅ | — |
 | Craft Agents | `~/.craft-agent/workspaces/*/sessions/*/session.jsonl` | ✅ | ✅ |
@@ -71,6 +71,7 @@ Agents' own environment variables (`CODEX_HOME`, `XDG_DATA_HOME`, …) are respe
 - **Cursor** — chats are read from transcripts, or from Cursor's own database when there is no transcript
 - **Craft Agents** — on a Claude connection, Wake shows the Craft session and hides the duplicate Claude Code copy
 - **Kilo Code** — the new extension, CLI and JetBrains plugin share `kilo.db`; tasks from the legacy extension are listed too
+- **CodeBuddy** — IDE 4.x sessions imported into the 5.x catalog are read from their original history files. Missing messages are marked in the transcript; deleting an imported session in Wake only hides it. An unconverted 4.x session cannot be resumed through the CBC CLI.
 - **Grok Bot** — conversations live in Grok Bot's cloud; Wake reads the latest messages the desktop app keeps on this computer, a conversation it no longer keeps stays listed with its last message, and deleting one in Wake only hides it
 - **MiMo Code** — a session imported from Claude Code, Codex or OpenCode is listed once you continue it in MiMo Code, without the imported part
 
@@ -84,6 +85,7 @@ Add a machine in Settings → Remote hosts (an `~/.ssh/config` alias or `user@ho
 - `rsync` is needed on both ends; on Windows, take `rsync` and `ssh` from the same Cygwin/cwRsync install and put it ahead of Windows OpenSSH in `PATH` ([why](https://cygwin.com/pipermail/cygwin/2022-March/251153.html))
 - Only session data is copied, never credentials, and nothing on the remote is ever written
 - Remotes are assumed to use default paths; Windows remotes aren't supported
+- For imported CodeBuddy 4.x sessions, add the same SSH alias used by CodeBuddy. Wake reads the local 5.x catalog and mirrors only those remote sessions' indexed messages and referenced attachments; a failed sync keeps the previous cache.
 
 ## Connect your agents
 

@@ -7772,6 +7772,7 @@ dependencies = [
  "base64",
  "chrono",
  "dirs 5.0.1",
+ "md-5",
  "notify",
  "rusqlite",
  "serde",

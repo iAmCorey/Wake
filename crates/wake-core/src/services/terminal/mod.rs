@@ -218,6 +218,11 @@ fn resume_args(meta: &SessionMeta) -> Option<(Vec<String>, bool)> {
         AgentId::Openclaw => None,
         // CodeBuddy 的历史会话按 cwd 分桶(`--continue` 只看当前目录),
         // `--resume <id>`(别名 -r)同样在原项目目录启动最稳
+        AgentId::Codebuddy
+            if crate::adapters::codebuddy_legacy::is_legacy_history(&meta.file_path) =>
+        {
+            None
+        }
         AgentId::Codebuddy => Some((vec!["--resume".into(), id.into()], true)),
         // WorkBuddy 只有桌面端、没有 CLI,没有可拼的 resume 命令——不画 Open In
         AgentId::Workbuddy => None,
@@ -373,7 +378,10 @@ fn resume_unavailable(meta: &SessionMeta) -> ResumeOutcome {
 
 pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome {
     // Reject before any deep-link dispatch, CLI lookup or clipboard fallback.
-    if !is_resume_id(&meta.id) {
+    if !is_resume_id(&meta.id)
+        || (meta.agent == AgentId::Codebuddy
+            && crate::adapters::codebuddy_legacy::is_legacy_history(&meta.file_path))
+    {
         return resume_unavailable(meta);
     }
     // 深链类目标(macOS 的 Kooky / Claude Desktop / Codex Desktop)由平台
@@ -748,6 +756,18 @@ mod tests {
         assert!(super::resume_targets(&meta).is_empty());
         meta.file_path =
             "/h/.local/share/kilo/kilo.db#ses_migrated_0123456789abcdef0123456789".into();
+        assert!(super::resume_args(&meta).is_some());
+    }
+
+    #[test]
+    fn codebuddy_legacy_has_no_resume_until_converted() {
+        let mut meta = remote_meta(AgentId::Codebuddy, "legacy-1", "/work");
+        meta.file_path = "/history/session/index.json".into();
+        assert!(super::resume_args(&meta).is_none());
+        assert!(super::resume_targets(&meta).is_empty());
+        assert!(super::ssh_resume_command(&meta).is_none());
+        assert!(!super::resume_target(&meta, super::ResumeTarget::CopySshCommand).ok);
+        meta.file_path = "/projects/session.jsonl".into();
         assert!(super::resume_args(&meta).is_some());
     }
 

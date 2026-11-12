@@ -206,6 +206,31 @@ pub(crate) fn process_batch(
         })
         .collect();
 
+    // A newly created CBC transcript can replace an already indexed 4.x
+    // source even if the winner is malformed. Revisit the old source when the
+    // cross-source set changes so it remains available for fallback.
+    for (path, owner) in present
+        .iter()
+        .map(|(path, ix)| (path, *ix))
+        .chain(vanished.iter().copied())
+    {
+        if !matches!(store.file_stamp(&path.to_string_lossy()), Ok(None)) && path.exists() {
+            continue;
+        }
+        let source = &adapters[owner];
+        for other in adapters
+            .iter()
+            .filter(|other| other.agent() == source.agent() && other.host() == source.host())
+        {
+            dependents.extend(
+                other
+                    .cross_source_dependents(path)
+                    .into_iter()
+                    .filter_map(|p| other.file_ref(&p)),
+            );
+        }
+    }
+
     // 装着好几个会话的文件(`sessions_in`,Grok Bot 的侧栏列表):库里挂在它名下的虚拟路径按它
     // 此刻的内容对账——新出现的收编,没了的出库,引用变了的重解析
     let mut dropped: Vec<String> = Vec::new();

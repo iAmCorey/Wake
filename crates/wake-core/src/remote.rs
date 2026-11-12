@@ -32,6 +32,8 @@ use crate::models::AgentId;
 use crate::services::terminal::sh_quote;
 use std::path::{Path, PathBuf};
 
+const CODEBUDDY_PROJECTS: &str = ".codebuddy/projects";
+
 /// 一家 agent 在远程 home 下的数据布局。
 pub struct RemoteAgentLayout {
     pub agent: AgentId,
@@ -194,8 +196,8 @@ pub const REMOTE_LAYOUTS: &[RemoteAgentLayout] = &[
     },
     RemoteAgentLayout {
         agent: AgentId::Codebuddy,
-        mount: ".codebuddy/projects",
-        sync_paths: &[".codebuddy/projects"],
+        mount: CODEBUDDY_PROJECTS,
+        sync_paths: &[CODEBUDDY_PROJECTS],
         exclude: &[],
     },
     RemoteAgentLayout {
@@ -344,7 +346,33 @@ pub fn cache_bytes(db_dir: &Path) -> u64 {
 
 /// ssh 的批处理选项:探测与 rsync 的 `-e` 同一份——认证/超时行为两步一致,
 /// 探测过了 rsync 就不会再卡在认证上
-const SSH_OPTS: [&str; 2] = ["-oBatchMode=yes", "-oConnectTimeout=10"];
+pub(crate) const SSH_OPTS: [&str; 2] = ["-oBatchMode=yes", "-oConnectTimeout=10"];
+
+/// Shell helper shared by both remote probes. A missing path is only safe to
+/// interpret as absent when its nearest existing ancestor is traversable.
+pub(crate) const CHECK_MISSING_PARENT: &str = r#"
+wake_check_parent() {
+    parent=${1%/*}
+    while [ -n "$parent" ] && [ "$parent" != "." ]; do
+        if [ -L "$parent" ] && [ ! -e "$parent" ]; then
+            printf "%s\n" "A remote session directory symlink is unavailable" >&2
+            return 1
+        fi
+        if [ -e "$parent" ]; then
+            if [ ! -d "$parent" ] || [ ! -x "$parent" ]; then
+                printf "%s\n" "Cannot access a remote session directory" >&2
+                return 1
+            fi
+            return 0
+        fi
+        case "$parent" in
+            */*) parent=${parent%/*} ;;
+            *) parent=. ;;
+        esac
+    done
+    return 0
+}
+"#;
 
 /// 白名单全部 sync_paths,按 REMOTE_LAYOUTS 顺序(探测脚本、rsync 源列表、
 /// 缺席清理三处同序)
@@ -362,8 +390,9 @@ fn all_sync_paths() -> impl Iterator<Item = &'static str> {
 ///(认证/不可达/远端无 sh)。
 fn probe_args(host: &str) -> Vec<String> {
     let list = all_sync_paths().collect::<Vec<_>>().join(" ");
-    let script =
-        format!("for p in {list}; do if [ -e \"$p\" ]; then printf \"%s\\n\" \"$p\"; fi; done");
+    let script = format!(
+        "{CHECK_MISSING_PARENT}\nfor p in {list}; do if [ -e \"$p\" ]; then printf \"%s\\n\" \"$p\"; elif [ -L \"$p\" ]; then printf \"%s\\n\" \"A remote session symlink is unavailable\" >&2; exit 2; else wake_check_parent \"$p\" || exit 2; fi; done"
+    );
     SSH_OPTS
         .iter()
         .map(|s| s.to_string())
@@ -382,7 +411,7 @@ fn present_remote_paths(stdout: &str) -> Vec<&'static str> {
 /// 单测卡命令形状。`-R`(--relative)让 `host:./<相对路径>` 在目标重建相对
 /// 布局;`--delete` 让远程删除传播到缓存(watcher 收 Remove 后清库内行)——
 /// 它只作用于各源树**内部**,整棵源消失由 sync_host 的缺席清理负责。
-fn rsync_args(host: &str, paths: &[&str]) -> Vec<String> {
+fn rsync_args(host: &str, paths: &[&str], checksum: bool) -> Vec<String> {
     // -a enables special files. Override it afterwards: sockets/FIFOs carry no
     // session data, and recreating sockets under a long cache path can exceed
     // sun_path and abort openrsync's receiver (#47).
@@ -392,6 +421,9 @@ fn rsync_args(host: &str, paths: &[&str]) -> Vec<String> {
         "--delete".to_string(),
         "--no-specials".to_string(),
     ];
+    if checksum {
+        args.push("--checksum".to_string());
+    }
     args.extend(
         REMOTE_LAYOUTS
             .iter()
@@ -424,7 +456,9 @@ pub fn sync_hosts(store: &Store, names: &[String]) {
             scope.spawn(move || {
                 // 已入库的 host 也再卡一道:老库可能被未来版本写入过更宽的名字
                 let error = if valid_host_name(name) {
-                    sync_host(name, &dest).err()
+                    sync_host(name, &dest)
+                        .and_then(|()| crate::remote_codebuddy::sync_legacy(name, &dest))
+                        .err()
                 } else {
                     Some("invalid host name".to_string())
                 };
@@ -456,7 +490,26 @@ fn sync_host(host: &str, dest: &Path) -> Result<(), String> {
         if present.is_empty() {
             return Ok(());
         }
-        match run_rsync(host, dest, &present) {
+        // CodeBuddy can replace a transcript without changing its size or
+        // mtime. Check those files by content, without imposing that I/O on
+        // all the other agents' remote trees.
+        let (codebuddy, others): (Vec<_>, Vec<_>) = present
+            .iter()
+            .copied()
+            .partition(|path| *path == CODEBUDDY_PROJECTS);
+        let result = if others.is_empty() {
+            Ok(())
+        } else {
+            run_rsync(host, dest, &others, false)
+        }
+        .and_then(|()| {
+            if codebuddy.is_empty() {
+                Ok(())
+            } else {
+                run_rsync(host, dest, &codebuddy, true)
+            }
+        });
+        match result {
             Ok(()) => return Ok(()),
             Err(RsyncError::SourcesVanished(_)) if !retried => retried = true,
             Err(RsyncError::SourcesVanished(msg) | RsyncError::Other(msg)) => return Err(msg),
@@ -494,7 +547,7 @@ fn remove_cached(path: &Path) -> Result<(), String> {
 /// 起 ssh 探测。ssh 非零退出(255 = 连接/认证失败)整体报错,stderr 末几行
 /// 是用户能看懂的原话("Permission denied (publickey)"、"Host key
 /// verification failed")
-fn probe_remote(host: &str) -> Result<Vec<&'static str>, String> {
+pub(crate) fn probe_remote(host: &str) -> Result<Vec<&'static str>, String> {
     let output = run_tool("ssh", "OpenSSH", &probe_args(host), None)?;
     classify("ssh", &output, &[])?;
     Ok(present_remote_paths(&String::from_utf8_lossy(
@@ -513,9 +566,14 @@ enum RsyncError {
 /// 消失,agent 正在写,下轮自愈)算软成功;23 是"部分传输失败"泛码——错误
 /// 行全是 ENOENT 时是探测后消失的源,交调用方重探,权限/读错误同样报 23,
 /// 照常报错(记成功会隐藏真实缺数据)。
-fn run_rsync(host: &str, dest: &Path, paths: &[&str]) -> Result<(), RsyncError> {
-    let output = run_tool("rsync", "rsync", &rsync_args(host, paths), Some(dest))
-        .map_err(RsyncError::Other)?;
+fn run_rsync(host: &str, dest: &Path, paths: &[&str], checksum: bool) -> Result<(), RsyncError> {
+    let output = run_tool(
+        "rsync",
+        "rsync",
+        &rsync_args(host, paths, checksum),
+        Some(dest),
+    )
+    .map_err(RsyncError::Other)?;
     if output.status.code() == Some(23) && only_missing_sources(&output.stderr) {
         return Err(RsyncError::SourcesVanished(exit_error("rsync", &output)));
     }
@@ -704,14 +762,15 @@ mod tests {
         );
         // 一整条 sh -c '…':每个白名单路径都在 for 列表里,循环体按行回显存在项
         let script = &args[3];
-        assert!(script.starts_with("sh -c 'for p in "));
+        assert!(script.starts_with("sh -c '"));
+        assert!(script.contains("for p in "));
         for path in all_sync_paths() {
             assert!(
                 script.contains(&format!(" {path} ")) || script.contains(&format!(" {path};")),
                 "{path} 不在探测列表里"
             );
         }
-        assert!(script.ends_with("; do if [ -e \"$p\" ]; then printf \"%s\\n\" \"$p\"; fi; done'"));
+        assert!(script.contains("wake_check_parent \"$p\" || exit 2"));
     }
 
     #[test]
@@ -729,7 +788,11 @@ mod tests {
     #[test]
     fn rsync_args_shape() {
         let present = [".claude/projects", ".codex/state_5.sqlite"];
-        let args = rsync_args("devbox", &present);
+        let args = rsync_args("devbox", &present, false);
+        assert!(!args.iter().any(|arg| arg == "--checksum"));
+        assert!(rsync_args("devbox", &[CODEBUDDY_PROJECTS], true)
+            .iter()
+            .any(|arg| arg == "--checksum"));
         assert_eq!(args[0], "-az");
         let archive = args.iter().position(|a| a == "-az").unwrap();
         let no_specials = args.iter().position(|a| a == "--no-specials").unwrap();
