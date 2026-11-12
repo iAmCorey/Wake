@@ -41,6 +41,66 @@ impl Drop for Stage {
     }
 }
 
+/// Mirror only content-addressed images referenced by the cached CBC records.
+/// The source catalog and unrelated blobs are never copied from the host.
+pub(crate) fn sync_blobs(host: &str, cache: &Path) -> Result<(), String> {
+    const BLOBS: &str = ".codebuddy/blobs";
+    let mut paths = HashSet::new();
+    let projects = cache.join(".codebuddy/projects");
+    if !projects.is_dir() {
+        return Ok(());
+    }
+    for entry in walkdir::WalkDir::new(&projects).follow_links(false) {
+        let entry = entry.map_err(|e| format!("cannot inspect CBC cache: {e}"))?;
+        if !entry.file_type().is_file() || entry.path().extension().is_none_or(|e| e != "jsonl") {
+            continue;
+        }
+        let file =
+            fs::File::open(entry.path()).map_err(|e| format!("cannot read CBC cache: {e}"))?;
+        for row in crate::adapters::parse_utils::jsonl_values(std::io::BufReader::new(file)) {
+            let row = row.map_err(|e| format!("cannot read CBC cache: {e}"))?;
+            let Some(parts) = row
+                .as_ref()
+                .and_then(|r| r.get("content"))
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+            for block in parts {
+                if let Some(relative) = crate::adapters::codebuddy_content::blob_relative(block) {
+                    paths.insert(Path::new(BLOBS).join(relative));
+                }
+            }
+        }
+    }
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut paths: Vec<_> = paths.into_iter().collect();
+    paths.sort();
+    let current = cache.join(BLOBS);
+    let backup = current.with_file_name("blobs.wake-previous");
+    recover_interrupted_swap(&current, &backup)?;
+    let available = probe_files(host, &paths)?;
+    let stage =
+        Stage::create(cache, &STAGE_ID).map_err(|e| format!("cannot stage CBC images: {e}"))?;
+    let staged = stage.0.join(BLOBS);
+    fs::create_dir_all(&staged).map_err(|e| e.to_string())?;
+    // Missing source images keep their previously downloaded copy. Transfer
+    // failure keeps the entire previous generation, including its symlinks guard.
+    for path in paths.iter().filter(|p| !available.contains(*p)) {
+        let old = cache.join(path);
+        if let Ok(bytes) = read_session_file(&current, &old) {
+            let target = stage.0.join(path);
+            fs::create_dir_all(target.parent().unwrap()).map_err(|e| e.to_string())?;
+            fs::write(target, bytes).map_err(|e| e.to_string())?;
+        }
+    }
+    paths.retain(|p| available.contains(p));
+    sync_files(host, &stage.0, cache, &paths)?;
+    replace_generation(&staged, &current, &backup)
+}
+
 /// Keep network failures and partial transfers away from the live cache. The
 /// old generation is swapped only after all three selective transfers succeed.
 pub(crate) fn sync_legacy(host: &str, cache: &Path) -> Result<(), String> {
@@ -55,10 +115,11 @@ pub(crate) fn sync_legacy(host: &str, cache: &Path) -> Result<(), String> {
     }
     let rows = read_catalog(&catalog).map_err(|e| format!("CodeBuddy catalog: {e:#}"))?;
     let mut sessions = Vec::new();
-    for row in rows
-        .iter()
-        .filter(|row| !row.deleted && authority_matches(&row.authority, Some(host)))
-    {
+    for row in rows.iter().filter(|row| {
+        !row.deleted
+            && matches!(row.provider.as_str(), "codebuddy-ide-4" | "cbc")
+            && authority_matches(&row.authority, Some(host))
+    }) {
         match legacy_relative_dir(row) {
             Some(path) => sessions.push(path),
             None if row.provider == "codebuddy-ide-4" => {
@@ -440,6 +501,66 @@ mod verification {
         assert_ne!(stage.0, stale);
         assert!(stale.join("partial").is_file());
         assert!(fs::read_dir(&stage.0).unwrap().next().is_none());
+    }
+
+    #[test]
+    #[ignore = "reads real CBC transcripts and downloads referenced images from an explicitly selected host"]
+    fn real_cbc_images_are_mirrored_in_isolation() {
+        use crate::adapters::{codebuddy::CodebuddyAdapter, AgentAdapter};
+        let host = std::env::var("WAKE_VERIFY_CODEBUDDY_HOST").expect("set host");
+        assert!(crate::remote::valid_host_name(&host));
+        let source = PathBuf::from(std::env::var("WAKE_VERIFY_CBC_CACHE").expect("set cache"));
+        let tmp = tempfile::tempdir().unwrap();
+        let mut copied = 0;
+        let mut referenced = Vec::new();
+        for entry in walkdir::WalkDir::new(source.join(".codebuddy/projects")) {
+            let entry = entry.unwrap();
+            if !entry.file_type().is_file() || entry.path().extension().is_none_or(|e| e != "jsonl")
+            {
+                continue;
+            }
+            let bytes = fs::read(entry.path()).unwrap();
+            if !String::from_utf8_lossy(&bytes).contains("image_blob_ref") {
+                continue;
+            }
+            let dest = tmp.path().join(entry.path().strip_prefix(&source).unwrap());
+            fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            for row in String::from_utf8_lossy(&bytes)
+                .lines()
+                .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+            {
+                for block in row["content"].as_array().into_iter().flatten() {
+                    if let Some(relative) = crate::adapters::codebuddy_content::blob_relative(block)
+                    {
+                        referenced.push(relative);
+                    }
+                }
+            }
+            fs::write(dest, bytes).unwrap();
+            copied += 1;
+        }
+        sync_blobs(&host, tmp.path()).unwrap();
+        let missing = referenced
+            .iter()
+            .filter(|r| !tmp.path().join(".codebuddy/blobs").join(r).is_file())
+            .count();
+        let adapter = CodebuddyAdapter::new().with_remote_root(
+            tmp.path().join(".codebuddy/projects"),
+            tmp.path(),
+            &host,
+        );
+        let mut images = 0;
+        for r in adapter.list_session_files().unwrap() {
+            images += adapter
+                .parse_transcript(&r)
+                .unwrap()
+                .mainline
+                .iter()
+                .map(|m| m.images.len())
+                .sum::<usize>();
+        }
+        assert!(images > 0);
+        println!("isolated CBC image audit: transcripts={copied}, decoded_images={images}, missing_source_references={missing}");
     }
 
     /// Opt-in acceptance against a real local catalog and SSH alias. The Wake

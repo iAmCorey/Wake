@@ -41,6 +41,9 @@ fn render_message(m: &TranscriptMessage, out: &mut String) {
             .map(|t| format!(" · {}", fmt_time(Some(t))))
             .unwrap_or_default()
     ));
+    if m.kind == MessageKind::Aside {
+        out.push_str("*Side question · /btw*\n\n");
+    }
     if m.kind == MessageKind::CompactSummary {
         out.push_str(&format!("> {}\n\n", m.text));
         return;
@@ -313,6 +316,9 @@ fn compact_block(m: &TranscriptMessage, o: &CompactOptions) -> String {
         .map(|t| format!(" · {}", fmt_time(Some(t))))
         .unwrap_or_default();
     let mut out = format!("### [seq {}] {role}{when}\n", m.seq);
+    if m.kind == MessageKind::Aside {
+        out.push_str("[side question · /btw]\n");
+    }
     let mut budget = o.max_message_chars;
     if m.kind == MessageKind::CompactSummary {
         out.push_str("> [compacted summary] ");

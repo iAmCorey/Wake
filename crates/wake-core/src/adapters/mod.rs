@@ -1,6 +1,8 @@
 pub mod antigravity;
 pub mod claude;
 pub mod codebuddy;
+mod codebuddy_btw;
+pub(crate) mod codebuddy_content;
 pub mod codebuddy_legacy;
 pub mod codex;
 pub mod copilot;
@@ -219,6 +221,11 @@ pub trait AgentAdapter: Send + Sync {
             .filter(|p| p.is_dir())
             .collect()
     }
+    /// Watch database parents without descending into unrelated caches/plugins.
+    fn watch_recursive(&self, _path: &Path) -> bool {
+        true
+    }
+
     /// 以自定义数据根构造本家的第二实例("Session locations" 的 Add location)。
     /// `dir` 是用户在系统目录选择器里选中的目录;各家把它整形成自己默认根的形态
     /// (允许选"家目录"或数据目录任一层,SQLite 型在其中找库文件),整形判据只看
@@ -704,7 +711,7 @@ pub(crate) fn link_keys<'a>(
 fn units_from_messages(messages: &[TranscriptMessage]) -> Vec<IndexUnit> {
     messages
         .iter()
-        .filter(|m| m.kind == MessageKind::Text)
+        .filter(|m| matches!(m.kind, MessageKind::Text | MessageKind::Aside))
         .filter_map(|m| {
             let mut parts = vec![m.text.clone()];
             for tc in &m.tool_calls {

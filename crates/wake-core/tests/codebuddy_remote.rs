@@ -120,8 +120,18 @@ fn selected_sessions_and_assets_sync_atomically_and_keep_cache_offline() {
         &remote.join(&converted).join("messages/m1.json"),
         &message.to_string(),
     );
+    let blob_id = "b".repeat(64);
+    let blob_path = format!(".codebuddy/blobs/bb/{blob_id}.png");
+    fs::create_dir_all(remote.join(".codebuddy/blobs/bb")).unwrap();
+    fs::write(remote.join(&blob_path), b"\x89PNG\r\n\x1a\n").unwrap();
+    fs::write(
+        remote.join(".codebuddy/blobs/bb/unreferenced.png"),
+        "DO NOT COPY",
+    )
+    .unwrap();
     let cbc = [
-        json!({"type":"message","role":"user","content":[{"type":"input_text","text":"remote converted prompt"}]}),
+        json!({"type":"message","role":"user","content":[{"type":"input_text","text":"remote converted prompt"},
+            {"type":"image_blob_ref","blob_id":blob_id,"blob_path":format!("/home/remote/{blob_path}"),"mime":"image/png"}]}),
         json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"remote converted answer"}],
             "providerData":{"conversationRequestId":"r2","rawUsage":{"total_tokens":7}}}),
     ].into_iter().map(|v| v.to_string() + "\n").collect::<String>();
@@ -167,6 +177,9 @@ fn selected_sessions_and_assets_sync_atomically_and_keep_cache_offline() {
     assert!(!cache.join(&root).join("orphan").exists());
     assert!(!cache.join(&root).join("deleted").exists());
     assert!(!cache.join(".codebuddy/auth.json").exists());
+    assert!(cache.join(&blob_path).is_file());
+    assert!(!cache.join(".codebuddy/blobs/bb/unreferenced.png").exists());
+    fs::remove_file(remote.join(&blob_path)).unwrap();
 
     // Some writers replace a file with the same byte length and timestamp.
     // The mirror must still notice that its content changed.
@@ -305,6 +318,24 @@ fn selected_sessions_and_assets_sync_atomically_and_keep_cache_offline() {
     assert_eq!(converted_meta.id, "runtime-5");
     assert_eq!(converted_meta.tokens_used, Some(17));
     assert_eq!(converted_meta.source.as_deref(), Some("CodeBuddy IDE 4.x"));
+    let converted_adapter =
+        adapter_for(&adapters, AgentId::Codebuddy, &converted_meta.file_path).unwrap();
+    assert!(
+        cache.join(&blob_path).is_file(),
+        "missing cached blob before decode"
+    );
+    assert_eq!(
+        fs::read(cache.join(&blob_path)).unwrap(),
+        b"\x89PNG\r\n\x1a\n"
+    );
+    let detail = converted_adapter
+        .parse_transcript(&SessionFileRef::from_meta(&converted_meta))
+        .unwrap();
+    assert_eq!(
+        detail.mainline[0].images.len(),
+        1,
+        "a missing remote blob keeps the last cached image"
+    );
     assert!(store
         .get_session("codebuddy:CVM:runtime-5")
         .unwrap()

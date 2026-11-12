@@ -424,6 +424,14 @@ fn rsync_args(host: &str, paths: &[&str], checksum: bool) -> Vec<String> {
     if checksum {
         args.push("--checksum".to_string());
     }
+    if paths.contains(&CODEBUDDY_PROJECTS) {
+        // The selective mirror owns these siblings of projects. Protect its
+        // previous generation while the regular mirror applies deletions.
+        args.extend([
+            "--exclude=/.codebuddy/blobs".into(),
+            "--exclude=/.codebuddy/blobs.wake-previous".into(),
+        ]);
+    }
     args.extend(
         REMOTE_LAYOUTS
             .iter()
@@ -457,6 +465,7 @@ pub fn sync_hosts(store: &Store, names: &[String]) {
                 // 已入库的 host 也再卡一道:老库可能被未来版本写入过更宽的名字
                 let error = if valid_host_name(name) {
                     sync_host(name, &dest)
+                        .and_then(|()| crate::remote_codebuddy::sync_blobs(name, &dest))
                         .and_then(|()| crate::remote_codebuddy::sync_legacy(name, &dest))
                         .err()
                 } else {

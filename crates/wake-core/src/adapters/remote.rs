@@ -239,6 +239,10 @@ impl AgentAdapter for RemoteAdapter {
         self.inner.watch_paths()
     }
 
+    fn watch_recursive(&self, path: &Path) -> bool {
+        self.inner.watch_recursive(path)
+    }
+
     fn with_custom_root(&self, dir: std::path::PathBuf) -> Box<dyn AgentAdapter> {
         // 远程实例没有自定义 location 的产品入口;保持装饰不变量以防未来误用
         Box::new(Self::new(

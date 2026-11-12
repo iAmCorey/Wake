@@ -255,7 +255,8 @@ CREATE TABLE IF NOT EXISTS claimed_sessions (
 ///       main 时还没有这几条,跑过那时构建的库已经戳着它,所以另起一档
 /// "20" = CodeBuddy 的 AskUserQuestion 真人回答进入搜索。
 /// "21" = CodeBuddy 真人回答保留多行内容,并刷新旧 usage 缺失时的 CBC 统计。
-pub const FTS_FORMAT: &str = "21";
+/// "22" = CBC input blocks, framework events and catalog side questions.
+pub const FTS_FORMAT: &str = "22";
 
 /// 正文里中日韩字符的两字组索引(issue #79):trigram 对两个字的词 MATCH 不出东西,而中文最常搜的
 /// 恰恰是两字词。只收有两个以上相连中日韩字符的行,文本是 `cjk_bigrams` 切好、空格隔开的两字组,

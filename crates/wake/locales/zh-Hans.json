@@ -1,4 +1,8 @@
 {
+  "Side-question history did not store {} image attachment(s)": "旁路问答历史未保存 {} 张附件图片",
+  "Side question": "旁路问答",
+  "Side question failed": "旁路问答失败",
+  "Side question incomplete": "旁路问答尚未完成",
   " Copy Session ID": " 拷贝会话 ID",
   " Copy Handoff": " 拷贝交接说明",
   " Export as Markdown": " 导出为 Markdown",

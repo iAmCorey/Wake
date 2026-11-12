@@ -325,6 +325,8 @@ pub struct ToolCallView {
 #[serde(rename_all = "kebab-case")]
 pub enum MessageKind {
     Text,
+    /// Human side question or its answer; searchable, but not a title candidate.
+    Aside,
     Meta,
     CompactSummary,
     /// Source data is incomplete or malformed; visible but never indexed as a

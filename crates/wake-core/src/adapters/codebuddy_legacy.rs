@@ -40,6 +40,7 @@ pub(crate) struct CatalogRow {
     pub provider: String,
     pub runtime_id: String,
     pub revision: i64,
+    pub btw: Option<Vec<super::codebuddy_btw::BtwEntry>>,
 }
 
 pub(crate) fn catalog_path() -> PathBuf {
@@ -87,11 +88,13 @@ pub(crate) fn read_catalog(path: &Path) -> Result<Vec<CatalogRow>> {
     let db =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .context("open CodeBuddy catalog read-only")?;
+    db.execute_batch("BEGIN")?;
     if !super::sqlite_ro::has_table(&db, "conversations")? {
         // CLI-only installations can have a database with no IDE catalog.
         // Ordinary CBC transcripts must remain discoverable in that case.
         return Ok(Vec::new());
     }
+    let mut btw = super::codebuddy_btw::read(&db)?;
     let mut stmt = db.prepare(
         "SELECT id, user_id, workspace, COALESCE(workspace_authority,''),
                 COALESCE(title,''), COALESCE(custom_title,''),
@@ -99,7 +102,7 @@ pub(crate) fn read_catalog(path: &Path) -> Result<Vec<CatalogRow>> {
                 deleted_at IS NOT NULL, archived_at IS NOT NULL,
                 COALESCE(runtime_provider,''), COALESCE(runtime_session_id,''),
                 COALESCE(revision,0)
-         FROM conversations WHERE runtime_provider IN ('codebuddy-ide-4','cbc')",
+         FROM conversations WHERE runtime_provider IN ('codebuddy-ide-4','cbc') OR COALESCE(runtime_provider,'') = ''",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok(CatalogRow {
@@ -116,10 +119,16 @@ pub(crate) fn read_catalog(path: &Path) -> Result<Vec<CatalogRow>> {
             provider: r.get(10)?,
             runtime_id: r.get(11)?,
             revision: r.get(12)?,
+            btw: Some(Vec::new()),
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(Into::into)
+    let mut rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    for row in &mut rows {
+        if let Some(entries) = btw.remove(&row.id) {
+            row.btw = entries;
+        }
+    }
+    Ok(rows)
 }
 
 /// CodeBuddy encodes bytes in remote SSH authorities as _xHH_. Match the
@@ -379,6 +388,9 @@ impl CodebuddyLegacyAdapter {
     }
 
     fn reference(&self, row: &CatalogRow) -> Result<Option<SessionFileRef>> {
+        if !matches!(row.provider.as_str(), PROVIDER | "cbc") {
+            return Ok(None);
+        }
         let Some(dir) = self.session_dir(row) else {
             return Ok(None);
         };
@@ -417,7 +429,7 @@ impl CodebuddyLegacyAdapter {
             .parent()
             .ok_or_else(|| anyhow!("invalid history path"))?;
         let LegacyHistory {
-            messages,
+            mut messages,
             unknown,
             tokens_used: tokens,
             model,
@@ -428,6 +440,7 @@ impl CodebuddyLegacyAdapter {
             .find(|s| !s.is_empty())
             .or_else(|| title_from_messages(&messages))
             .unwrap_or_else(|| UNTITLED.to_string());
+        super::codebuddy_btw::merge(&mut messages, row.btw.as_deref())?;
         let (_, bytes) = session_stamp(dir, &row)?;
         let meta = SessionMeta {
             key: session_key(AgentId::Codebuddy, "", &row.id),
@@ -439,10 +452,16 @@ impl CodebuddyLegacyAdapter {
             project_name: project_name_of(&row.workspace),
             file_path: r.file_path.clone(),
             created_at: row.created_at,
-            updated_at: row.updated_at,
+            updated_at: messages
+                .iter()
+                .filter(|m| m.kind == MessageKind::Aside)
+                .filter_map(|m| m.timestamp)
+                .max()
+                .unwrap_or(0)
+                .max(row.updated_at),
             message_count: messages
                 .iter()
-                .filter(|m| m.kind == MessageKind::Text)
+                .filter(|m| matches!(m.kind, MessageKind::Text | MessageKind::Aside))
                 .count() as i64,
             size_bytes: bytes,
             git_branch: None,
@@ -578,6 +597,16 @@ impl AgentAdapter for CodebuddyLegacyAdapter {
             .and_then(|row| self.reference(row).ok().flatten())
     }
     fn cross_source_dependents(&self, path: &Path) -> Vec<PathBuf> {
+        if path == self.catalog
+            || path.as_os_str() == format!("{}-wal", self.catalog.display()).as_str()
+        {
+            return self
+                .list_session_files()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| PathBuf::from(r.file_path))
+                .collect();
+        }
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl")
             || subagent_parent(path).is_some()
         {
@@ -1125,6 +1154,7 @@ mod tests {
             provider: provider.into(),
             runtime_id: id.into(),
             revision: 1,
+            btw: Some(Vec::new()),
         }
     }
 

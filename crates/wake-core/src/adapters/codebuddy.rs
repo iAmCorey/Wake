@@ -91,7 +91,7 @@ impl SourceCatalog {
         let runtime = parent.as_deref().unwrap_or(runtime);
         rows.iter().find(|row| {
             super::codebuddy_legacy::authority_matches(&row.authority, self.host.as_deref())
-                && row.provider == "cbc"
+                && (row.provider == "cbc" || row.provider.is_empty())
                 && (row.runtime_id == runtime || (row.runtime_id.is_empty() && row.id == runtime))
         })
     }
@@ -105,6 +105,9 @@ impl SourceCatalog {
     }
 
     fn converted(&self, row: &super::codebuddy_legacy::CatalogRow, file: &Path) -> bool {
+        if row.provider != "cbc" {
+            return false;
+        }
         if self
             .legacy_index(row)
             .is_some_and(|p| p.parent().is_some_and(Path::is_dir))
@@ -137,14 +140,20 @@ impl SourceCatalog {
     ) -> Option<SessionFileRef> {
         let file = Path::new(&r.file_path);
         let row = self.row(file, &r.native_id, rows);
-        if row.is_none() && self.host.is_none() {
-            return Some(r);
-        }
         if row.is_some_and(|row| row.deleted) {
             return None;
         }
         let converted =
             row.filter(|row| !is_subagent_transcript(&r.file_path) && self.converted(row, file));
+        if converted.is_none()
+            && row.is_none_or(|row| row.btw.as_ref().is_some_and(Vec::is_empty))
+            && metadata_only(file)
+        {
+            return None;
+        }
+        if row.is_none() && self.host.is_none() {
+            return Some(r);
+        }
         if let Some(row) = converted {
             r.native_id = row.id.clone();
         }
@@ -171,6 +180,25 @@ impl SourceCatalog {
         r.mtime_ms = (hash.finish() & i64::MAX as u64) as i64;
         Some(r)
     }
+}
+
+/// Only reject small, fully readable metadata stubs. Unknown/truncated data
+/// stays discoverable so a temporary write cannot prune a cached conversation.
+fn metadata_only(path: &Path) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    if !file.metadata().is_ok_and(|m| m.len() <= 64 * 1024) {
+        return false;
+    }
+    jsonl_values(BufReader::new(file)).all(|row| {
+        row.ok().flatten().is_some_and(|row| {
+            matches!(
+                row["type"].as_str(),
+                Some("session-meta" | "context-usage" | "ai-title" | "custom-title" | "topic")
+            )
+        })
+    })
 }
 
 fn has_conversion_marker(path: &Path) -> bool {
@@ -246,6 +274,8 @@ const KNOWN_SKIP: &[&str] = &[
     "model-usage",
     "credit-usage",
     "session-meta",
+    "context-usage",
+    "request-recovery",
 ];
 
 /// CodeBuddy 的 isGeneratedPlaceholderTitle:自动标题没东西可总结时写的占位,
@@ -272,10 +302,6 @@ fn row_usage(row: &Value) -> i64 {
         .or_else(|| row.pointer("/message/usage"))
         .map(usage_tokens)
         .unwrap_or(0)
-}
-
-fn content_of(row: &Value, decode_images: bool) -> ParsedContent {
-    content_parts(row.get("content").unwrap_or(&Value::Null), decode_images)
 }
 
 /// CodeBuddy's 4.x converter renders an AskUserQuestion answer as one line
@@ -507,7 +533,11 @@ fn assistant_slot<'a>(
     p
 }
 
-fn parse_codebuddy_jsonl(path: &Path, decode_images: bool) -> Result<ParseResult> {
+fn parse_codebuddy_jsonl(
+    path: &Path,
+    decode_images: bool,
+    blobs: Option<&Path>,
+) -> Result<ParseResult> {
     let _budget = transcript_image_decode_budget(decode_images);
     let file = fs::File::open(path)?;
     let reader = BufReader::with_capacity(1 << 20, file);
@@ -576,11 +606,30 @@ fn parse_codebuddy_jsonl(path: &Path, decode_images: bool) -> Result<ParseResult
                 match row.get("role").and_then(Value::as_str).unwrap_or("") {
                     "user" => {
                         flush_assistant(&mut pending, &mut out.messages, &mut tool_index);
-                        let ParsedContent { text, images } = content_of(&row, decode_images);
+                        let mut kind = super::codebuddy_content::user_kind(&row);
+                        let mut content = super::codebuddy_content::content(
+                            &row,
+                            decode_images && kind == MessageKind::Text,
+                            blobs,
+                            kind == MessageKind::Text,
+                        );
+                        if kind == MessageKind::Text
+                            && content.text.is_empty()
+                            && content.images.is_empty()
+                        {
+                            // Keep a pure context envelope as hidden metadata,
+                            // preserving its position without treating it as input.
+                            kind = MessageKind::Meta;
+                            content = super::codebuddy_content::content(&row, false, blobs, false);
+                        }
+                        let ParsedContent { text, images } = content;
                         if text.is_empty() && images.is_empty() {
                             continue;
                         }
                         let mut msg = text_msg(Role::User, &text, ts);
+                        // The content blocks have already been classified. The
+                        // generic prefix heuristic must not hide genuine input.
+                        msg.kind = kind;
                         msg.images = images;
                         if last_synthetic_answer.take().is_some_and(|ix| {
                             ix + 1 == out.messages.len()
@@ -594,12 +643,17 @@ fn parse_codebuddy_jsonl(path: &Path, decode_images: bool) -> Result<ParseResult
                     }
                     "assistant" => {
                         let p = assistant_slot(&mut out, &mut pending, &mut tool_index, ts, &row);
-                        p.content.append(content_of(&row, decode_images));
+                        p.content.append(super::codebuddy_content::content(
+                            &row,
+                            decode_images,
+                            blobs,
+                            false,
+                        ));
                     }
                     "system" => {
                         // 系统行折叠为 Meta,不参与计数
                         flush_assistant(&mut pending, &mut out.messages, &mut tool_index);
-                        let text = content_of(&row, false).text;
+                        let text = content_parts(&row["content"], false).text;
                         if text.is_empty() {
                             continue;
                         }
@@ -770,7 +824,7 @@ impl CodebuddyAdapter {
         {
             anyhow::bail!("CodeBuddy conversation catalog is temporarily unavailable");
         }
-        let parsed = parse_codebuddy_jsonl(path, decode_images)?;
+        let mut parsed = parse_codebuddy_jsonl(path, decode_images, self.blob_root().as_deref())?;
         // Catalog-aware references use mtime_ms as an opaque fingerprint. It
         // must never be presented as a date when the transcript lacks times.
         let mut source_ref = r.clone();
@@ -787,12 +841,27 @@ impl CodebuddyAdapter {
                     anyhow::bail!("CodeBuddy session was deleted in its catalog");
                 }
                 if !is_subagent_transcript(&r.file_path) {
+                    super::codebuddy_btw::merge(&mut parsed.messages, row.btw.as_deref())?;
+                    meta.message_count = parsed
+                        .messages
+                        .iter()
+                        .filter(|m| matches!(m.kind, MessageKind::Text | MessageKind::Aside))
+                        .count() as i64;
                     meta.archived = row.archived;
                     if parsed.created_at == 0 && row.created_at > 0 {
                         meta.created_at = row.created_at;
                     }
                     if parsed.updated_at == 0 && row.updated_at > 0 {
                         meta.updated_at = row.updated_at;
+                    }
+                    if let Some(ts) = parsed
+                        .messages
+                        .iter()
+                        .filter(|m| m.kind == MessageKind::Aside)
+                        .filter_map(|m| m.timestamp)
+                        .max()
+                    {
+                        meta.updated_at = meta.updated_at.max(ts);
                     }
                     if catalog.converted(row, path) {
                         // An empty/corrupt CBC file is not a successful winner:
@@ -844,6 +913,16 @@ impl CodebuddyAdapter {
         }
         mark_subagent(&mut meta, path);
         Ok((meta, parsed))
+    }
+
+    fn blob_root(&self) -> Option<PathBuf> {
+        self.home
+            .as_ref()
+            .map(|home| home.join("blobs"))
+            .or_else(|| {
+                (self.root.file_name()? == "projects")
+                    .then(|| self.root.parent().unwrap().join("blobs"))
+            })
     }
 }
 
@@ -922,7 +1001,10 @@ impl AgentAdapter for CodebuddyAdapter {
                     .filter_map(|r| catalog.reference(r, &rows))
                     .collect())
             }
-            None => Ok(refs),
+            None => Ok(refs
+                .into_iter()
+                .filter(|r| !metadata_only(Path::new(&r.file_path)))
+                .collect()),
         }
     }
 
@@ -943,7 +1025,7 @@ impl AgentAdapter for CodebuddyAdapter {
         }
         match &self.catalog {
             Some(catalog) => catalog.reference(r, &catalog.rows().ok()?),
-            None => Some(r),
+            None => (!metadata_only(path)).then_some(r),
         }
     }
 
@@ -972,7 +1054,7 @@ impl AgentAdapter for CodebuddyAdapter {
         sidechain_id: &str,
     ) -> Result<Vec<TranscriptMessage>> {
         load_subagent(r, sidechain_id, |file| {
-            Ok(parse_codebuddy_jsonl(file, true)?.messages)
+            Ok(parse_codebuddy_jsonl(file, true, self.blob_root().as_deref())?.messages)
         })
     }
 
@@ -1076,6 +1158,35 @@ impl AgentAdapter for CodebuddyAdapter {
         vec![self.root.clone()]
     }
 
+    fn watch_paths(&self) -> Vec<PathBuf> {
+        let mut paths = self.data_roots();
+        if let Some(parent) = self.catalog.as_ref().and_then(|c| c.path.parent()) {
+            paths.push(parent.to_path_buf());
+        }
+        paths.into_iter().filter(|p| p.is_dir()).collect()
+    }
+
+    fn watch_recursive(&self, path: &Path) -> bool {
+        path == self.root
+    }
+
+    fn is_snapshot_event(&self, path: &Path) -> bool {
+        self.catalog.as_ref().is_some_and(|c| {
+            path == c.path || path.as_os_str() == format!("{}-wal", c.path.display()).as_str()
+        })
+    }
+
+    fn cross_source_dependents(&self, path: &Path) -> Vec<PathBuf> {
+        if !self.is_snapshot_event(path) {
+            return Vec::new();
+        }
+        self.list_session_files()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| PathBuf::from(r.file_path))
+            .collect()
+    }
+
     fn homes(&self) -> Vec<PathBuf> {
         self.home.iter().cloned().collect()
     }
@@ -1118,7 +1229,7 @@ mod compat_tests {
         fs::write(path, value).unwrap();
     }
 
-    fn catalog(db: &Path) {
+    pub(super) fn catalog(db: &Path) {
         let db = rusqlite::Connection::open(db).unwrap();
         db.execute_batch(
             "CREATE TABLE conversations (
@@ -1148,6 +1259,7 @@ mod compat_tests {
             provider: "codebuddy-ide-4".into(),
             runtime_id: "old-1".into(),
             revision: 1,
+            btw: Some(Vec::new()),
         }
     }
 
@@ -1874,7 +1986,7 @@ mod compat_tests {
             if outputs.is_empty() {
                 continue;
             }
-            let parsed = parse_codebuddy_jsonl(&cbc, false).unwrap();
+            let parsed = parse_codebuddy_jsonl(&cbc, false, None).unwrap();
             let r = SessionFileRef {
                 agent: AgentId::Codebuddy,
                 native_id: row.id.clone(),
@@ -1955,3 +2067,7 @@ mod compat_tests {
         assert_eq!(repeated, 0);
     }
 }
+
+#[cfg(test)]
+#[path = "codebuddy_tests.rs"]
+mod modern_tests;

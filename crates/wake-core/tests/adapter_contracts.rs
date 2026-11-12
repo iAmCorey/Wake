@@ -3531,11 +3531,19 @@ fn watch_paths_derive_from_data_roots() {
         // git 仓库,见 adapters::kilo);它的新版实例是库文件,本来就没有监听目录。
         // Claude Code 的默认实例另听桌面端的会话记录(见 adapters::claude_desktop),假 HOME
         // 里没有那个目录,所以这里照常相等;它由 claude.rs 的单测卡着
-        let expect: Vec<std::path::PathBuf> = if a.agent() == AgentId::Kilo {
+        let mut expect: Vec<std::path::PathBuf> = if a.agent() == AgentId::Kilo {
             Vec::new()
         } else {
             a.data_roots().into_iter().filter(|p| p.is_dir()).collect()
         };
+        // CBC additionally watches the catalog's parent for WAL creation,
+        // non-recursively so plugin/cache trees are not watched.
+        if a.agent() == AgentId::Codebuddy {
+            for home in a.homes().into_iter().filter(|p| p.is_dir()) {
+                assert!(!a.watch_recursive(&home));
+                expect.push(home);
+            }
+        }
         assert_eq!(
             watched, expect,
             "[{tag}] watch_paths 必须等于 data_roots 的现存目录子集"

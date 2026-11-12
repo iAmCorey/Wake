@@ -72,6 +72,7 @@ Agents' own environment variables (`CODEX_HOME`, `XDG_DATA_HOME`, …) are respe
 - **Craft Agents** — on a Claude connection, Wake shows the Craft session and hides the duplicate Claude Code copy
 - **Kilo Code** — the new extension, CLI and JetBrains plugin share `kilo.db`; tasks from the legacy extension are listed too
 - **CodeBuddy** — IDE 4.x sessions imported into the 5.x catalog are read from their original history files. Missing messages are marked in the transcript; deleting an imported session in Wake only hides it. An unconverted 4.x session cannot be resumed through the CBC CLI.
+- CBC histories keep real input separate from injected context and agent notifications, display referenced images, and include catalog `/btw` side questions in reading, search, and export. Metadata-only session stubs stay out of the list. Remote sync downloads only referenced CBC image blobs and retains cached images when their source is unavailable.
 - **Grok Bot** — conversations live in Grok Bot's cloud; Wake reads the latest messages the desktop app keeps on this computer, a conversation it no longer keeps stays listed with its last message, and deleting one in Wake only hides it
 - **MiMo Code** — a session imported from Claude Code, Codex or OpenCode is listed once you continue it in MiMo Code, without the imported part
 

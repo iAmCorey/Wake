@@ -218,15 +218,22 @@ pub(crate) fn process_batch(
             continue;
         }
         let source = &adapters[owner];
-        for other in adapters
-            .iter()
-            .filter(|other| other.agent() == source.agent() && other.host() == source.host())
-        {
+        // A local catalog can own metadata for both local and mirrored hosts.
+        let shared_snapshot = source.is_snapshot_event(path);
+        for other in adapters.iter().filter(|other| {
+            other.agent() == source.agent() && (other.host() == source.host() || shared_snapshot)
+        }) {
             dependents.extend(
                 other
                     .cross_source_dependents(path)
                     .into_iter()
-                    .filter_map(|p| other.file_ref(&p)),
+                    .filter_map(|p| other.file_ref(&p))
+                    .filter(|r| {
+                        !shared_snapshot
+                            || store
+                                .file_stamp(&r.file_path)
+                                .is_ok_and(|stamp| stamp != Some((r.mtime_ms, r.size)))
+                    }),
             );
         }
     }
@@ -324,9 +331,14 @@ pub fn start_watcher(
     let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
     let mut watcher = notify::recommended_watcher(tx).ok()?;
     let mut watched = std::collections::BTreeSet::new();
-    for (root, _) in &roots {
+    for (root, ix) in &roots {
         // 失败(常见:目录还不存在,如未同步的远程缓存)跳过不算挂上
-        if watcher.watch(root, RecursiveMode::Recursive).is_ok() {
+        let mode = if adapters[*ix].watch_recursive(root) {
+            RecursiveMode::Recursive
+        } else {
+            RecursiveMode::NonRecursive
+        };
+        if !watched.contains(root) && watcher.watch(root, mode).is_ok() {
             watched.insert(root.clone());
         }
     }

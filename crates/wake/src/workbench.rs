@@ -2064,6 +2064,18 @@ fn source_warning_text(text: &str) -> String {
         crate::tf!("Unreadable legacy message: {}", id)
     } else if text == "[Invalid legacy message reference]" {
         t("Invalid legacy message reference").to_string()
+    } else if let Some(error) = text.strip_prefix("[Side question failed] ") {
+        format!("{}: {}", t("Side question failed"), error)
+    } else if text.starts_with("[Side question incomplete]") {
+        t("Side question incomplete").to_string()
+    } else if let Some(count) = text
+        .strip_prefix("[Missing side-question images: ")
+        .and_then(|s| s.strip_suffix(']'))
+    {
+        crate::tf!(
+            "Side-question history did not store {} image attachment(s)",
+            count
+        )
     } else {
         text.to_string()
     }
@@ -7288,6 +7300,22 @@ impl Workbench {
                 }
                 MessageRole::System => centered_pill(one_line(&m.text, 120), cx).into_any_element(),
             }
+        };
+
+        let inner = if m.kind == MessageKind::Aside {
+            v_flex()
+                .gap(SPACE_XS)
+                .when(m.role == MessageRole::User, |d| d.items_end())
+                .child(
+                    div()
+                        .text_size(FONT_LABEL)
+                        .text_color(image_muted)
+                        .child(format!("{} · /btw", t("Side question"))),
+                )
+                .child(inner)
+                .into_any_element()
+        } else {
+            inner
         };
 
         div()
