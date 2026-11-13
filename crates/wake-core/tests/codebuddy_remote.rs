@@ -26,12 +26,22 @@ fn selected_sessions_and_assets_sync_atomically_and_keep_cache_offline() {
     fs::create_dir_all(&bin).unwrap();
     fs::create_dir_all(home.join(".codebuddy")).unwrap();
     fs::create_dir_all(&remote).unwrap();
+    // The simulated remote exposes only sh and rsync, even if the local
+    // developer/CI machine has Python, Node, jq, find or hash utilities.
+    let remote_bin = tmp.path().join("remote-bin");
+    fs::create_dir_all(&remote_bin).unwrap();
+    std::os::unix::fs::symlink("/bin/sh", remote_bin.join("sh")).unwrap();
+    let rsync = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|p| p.join("rsync"))
+        .find(|p| p.is_file())
+        .unwrap();
+    std::os::unix::fs::symlink(rsync, remote_bin.join("rsync")).unwrap();
     let ssh = bin.join("ssh");
     let offline = tmp.path().join("offline");
     let interrupted = tmp.path().join("interrupted");
     write(&ssh, &format!(
-        "#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in -*) shift;; *) break;; esac; done\nhost=$1; shift\nif [ -f '{offline}' ]; then exit 255; fi\nif [ -f '{interrupted}' ]; then case \"$*\" in *'rsync --server'*) exit 255;; esac; fi\ncd '{remote}' || exit 1\nexport HOME='{remote}'\nexec sh -c \"$*\"\n",
-        offline = offline.display(), interrupted = interrupted.display(), remote = remote.display()
+        "#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in -*) shift;; *) break;; esac; done\nhost=$1; shift\nif [ -f '{offline}' ]; then exit 255; fi\nif [ -f '{interrupted}' ]; then case \"$*\" in *'rsync --server'*) exit 255;; esac; fi\ncd '{remote}' || exit 1\nexport HOME='{remote}' PATH='{remote_bin}'\nexec /bin/sh -c \"$*\"\n",
+        offline = offline.display(), interrupted = interrupted.display(), remote = remote.display(), remote_bin = remote_bin.display()
     ));
     fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
     std::env::set_var(
@@ -482,6 +492,33 @@ fn selected_sessions_and_assets_sync_atomically_and_keep_cache_offline() {
         fs::read_to_string(cache.join(&session).join("messages/m1.json")).unwrap(),
         updated
     );
+    // A broken memory settings source freezes memory but must not block
+    // either selective images or imported history on the same host.
+    let protected_memory = fs::read(&cached_memory).unwrap();
+    write(&remote.join(".codebuddy/settings.json"), "{");
+    let history_update = json!({"role":"user","message":json!({"role":"user","content":[
+        {"type":"text","text":"history still syncs after a memory settings failure"}
+    ]}).to_string(),"extra":"{}"})
+    .to_string();
+    write(
+        &remote.join(&session).join("messages/m1.json"),
+        &history_update,
+    );
+    let image_update = b"\x89PNG\r\n\x1a\nnew-image-generation";
+    fs::write(remote.join(&blob_path), image_update).unwrap();
+    wake_core::remote::sync_hosts(&store, &hosts);
+    assert!(store.list_remote_hosts().unwrap()[0]
+        .last_sync_error
+        .is_some());
+    assert_eq!(fs::read(&cached_memory).unwrap(), protected_memory);
+    assert_eq!(
+        fs::read_to_string(cache.join(&session).join("messages/m1.json")).unwrap(),
+        history_update
+    );
+    assert_eq!(fs::read(cache.join(&blob_path)).unwrap(), image_update);
+    write(&remote.join(".codebuddy/settings.json"), "{}");
+    wake_core::remote::sync_hosts(&store, &hosts);
+    assert_eq!(store.list_remote_hosts().unwrap()[0].last_sync_error, None);
     let old = fs::read(cache.join(&session).join("messages/m1.json")).unwrap();
     let memory_before = fs::read(&cached_memory).unwrap();
     write(&remote.join(ide_memory), "changed memory while offline");

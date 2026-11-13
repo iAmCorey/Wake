@@ -465,9 +465,22 @@ pub fn sync_hosts(store: &Store, names: &[String]) {
                 // 已入库的 host 也再卡一道:老库可能被未来版本写入过更宽的名字
                 let error = if valid_host_name(name) {
                     sync_host(name, &dest)
-                        .and_then(|()| crate::remote_codebuddy::sync_memories(name, &dest))
-                        .and_then(|()| crate::remote_codebuddy::sync_blobs(name, &dest))
-                        .and_then(|()| crate::remote_codebuddy::sync_legacy(name, &dest))
+                        .and_then(|()| {
+                            // Each selective source keeps its own previous generation.
+                            // A failed memory probe must not prevent image/history sync.
+                            let memory = crate::remote_codebuddy::sync_memories(name, &dest);
+                            let blobs = crate::remote_codebuddy::sync_blobs(name, &dest);
+                            let legacy = crate::remote_codebuddy::sync_legacy(name, &dest);
+                            let errors: Vec<_> = [memory, blobs, legacy]
+                                .into_iter()
+                                .filter_map(Result::err)
+                                .collect();
+                            if errors.is_empty() {
+                                Ok(())
+                            } else {
+                                Err(errors.join("; "))
+                            }
+                        })
                         .err()
                 } else {
                     Some("invalid host name".to_string())
@@ -483,7 +496,7 @@ pub fn sync_hosts(store: &Store, names: &[String]) {
 /// 一次握手,远端 agent 恰好在这个空档退出会把 `-wal` 之类删掉,rsync 对
 /// 命令行源 link_stat 失败报 23 且整轮跳过 --delete——只含 ENOENT 的 23
 /// 重探一轮再镜像(第二轮拿到的源集合已经是消失后的),第二轮结果照实报。
-fn sync_host(host: &str, dest: &Path) -> Result<(), String> {
+pub(crate) fn sync_host(host: &str, dest: &Path) -> Result<(), String> {
     if let Err(e) = std::fs::create_dir_all(dest) {
         return Err(format!("cannot create cache dir {}: {e}", dest.display()));
     }

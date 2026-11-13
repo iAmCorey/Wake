@@ -155,7 +155,14 @@ impl Reader {
                 });
             }
             let value: serde_json::Value = serde_json::from_str(&safe_text(mirror, &path)?)?;
-            return Ok(serde_json::from_value(value["settings"].clone())?);
+            let mut settings: MemorySettings = serde_json::from_value(value["settings"].clone())?;
+            if let Some(ide) = ide {
+                let relative = ide.strip_prefix(mirror)?.to_string_lossy();
+                if let Some(enabled) = value["ide_settings"][relative.as_ref()].as_bool() {
+                    settings.global = enabled;
+                }
+            }
+            return Ok(settings);
         }
         let mut status = MemorySettings {
             cli: true,
@@ -455,7 +462,7 @@ pub(crate) fn project_id(path: &str) -> String {
     )
 }
 
-fn transcript_cwd(path: &Path) -> Result<Option<String>> {
+pub(crate) fn transcript_cwd(path: &Path) -> Result<Option<String>> {
     if fs::symlink_metadata(path)?.file_type().is_symlink() {
         bail!("symlink transcript: {}", path.display());
     }
