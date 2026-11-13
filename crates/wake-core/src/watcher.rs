@@ -147,6 +147,8 @@ pub(crate) fn process_batch(
     let mut gone: HashSet<PathBuf> = HashSet::new();
     let mut snapshot_agents: HashSet<AgentId> = HashSet::new();
     let mut rescan = false;
+    let mut memories_changed = false;
+    let mut memory_roots_changed = false;
     for ev in batch {
         let Ok(ev) = ev.inspect_err(|e| eprintln!("watcher: notify error: {e}")) else {
             continue;
@@ -159,6 +161,20 @@ pub(crate) fn process_batch(
             continue;
         }
         for path in ev.paths {
+            memories_changed |= adapters.iter().any(|a| a.is_memory_event(&path));
+            if !path.exists()
+                && roots.iter().any(|(root, _)| root == &path)
+                && adapters.iter().any(|a| a.is_memory_event(&path))
+            {
+                memory_roots_changed = true;
+            }
+            if path.is_dir() {
+                memory_roots_changed |= adapters
+                    .iter()
+                    .filter(|a| a.is_memory_event(&path))
+                    .flat_map(|a| a.memory_watch_paths())
+                    .any(|p| p.starts_with(&path) && !roots.iter().any(|(r, _)| r == &p));
+            }
             let owner_ix = resolve_watch_agent(roots, &path);
             if let Some(adapter) = owner_ix.and_then(|ix| adapters.get(ix)) {
                 if adapter.is_snapshot_event(&path) {
@@ -205,6 +221,38 @@ pub(crate) fn process_batch(
                 .is_ok_and(|stamp| stamp.is_some_and(|stamp| stamp != (r.mtime_ms, r.size)))
         })
         .collect();
+
+    // A newly created CBC transcript can replace an already indexed 4.x
+    // source even if the winner is malformed. Revisit the old source when the
+    // cross-source set changes so it remains available for fallback.
+    for (path, owner) in present
+        .iter()
+        .map(|(path, ix)| (path, *ix))
+        .chain(vanished.iter().copied())
+    {
+        if !matches!(store.file_stamp(&path.to_string_lossy()), Ok(None)) && path.exists() {
+            continue;
+        }
+        let source = &adapters[owner];
+        // A local catalog can own metadata for both local and mirrored hosts.
+        let shared_snapshot = source.is_snapshot_event(path);
+        for other in adapters.iter().filter(|other| {
+            other.agent() == source.agent() && (other.host() == source.host() || shared_snapshot)
+        }) {
+            dependents.extend(
+                other
+                    .cross_source_dependents(path)
+                    .into_iter()
+                    .filter_map(|p| other.file_ref(&p))
+                    .filter(|r| {
+                        !shared_snapshot
+                            || store
+                                .file_stamp(&r.file_path)
+                                .is_ok_and(|stamp| stamp != Some((r.mtime_ms, r.size)))
+                    }),
+            );
+        }
+    }
 
     // 装着好几个会话的文件(`sessions_in`,Grok Bot 的侧栏列表):库里挂在它名下的虚拟路径按它
     // 此刻的内容对账——新出现的收编,没了的出库,引用变了的重解析
@@ -273,6 +321,13 @@ pub(crate) fn process_batch(
         let agents: Vec<AgentId> = snapshot_agents.into_iter().collect();
         refresh_parent_links(adapters, store, events, &agents);
     }
+    if memories_changed {
+        let changed = crate::scanner::run_memory_sync(adapters, store);
+        // Also lets the UI rearm shallow parent watches after first creation.
+        if changed || memory_roots_changed {
+            events.on_sessions_changed();
+        }
+    }
     if rescan {
         events.on_rescan_needed();
     }
@@ -288,7 +343,7 @@ pub fn start_watcher(
     // 实例相对的判据按 agent 找第一个会拿默认实例跑偏
     let mut roots: Vec<(PathBuf, usize)> = Vec::new();
     for (ix, a) in adapters.iter().enumerate() {
-        for p in a.watch_paths() {
+        for p in a.watch_paths().into_iter().chain(a.memory_watch_paths()) {
             roots.push((p, ix));
         }
     }
@@ -299,9 +354,14 @@ pub fn start_watcher(
     let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
     let mut watcher = notify::recommended_watcher(tx).ok()?;
     let mut watched = std::collections::BTreeSet::new();
-    for (root, _) in &roots {
+    for (root, ix) in &roots {
         // 失败(常见:目录还不存在,如未同步的远程缓存)跳过不算挂上
-        if watcher.watch(root, RecursiveMode::Recursive).is_ok() {
+        let mode = if adapters[*ix].watch_recursive(root) {
+            RecursiveMode::Recursive
+        } else {
+            RecursiveMode::NonRecursive
+        };
+        if !watched.contains(root) && watcher.watch(root, mode).is_ok() {
             watched.insert(root.clone());
         }
     }

@@ -25,10 +25,10 @@ Your agent history is scattered across `~/.claude`, `~/.codex` and many other fo
 - **One-click resume** — back in your terminal (Terminal, iTerm, Warp, Ghostty, Kooky…) or in Claude / Codex Desktop, in the right project folder
 - **Manage** — star, pin, export to Markdown, hand a session to another agent, delete to the Trash
 - **Clean up** — find the sessions eating your disk and clear them out in one go
-- **Memory** — the notes and instruction files your agents keep (`CLAUDE.md`, `AGENTS.md`, auto-memory, Cursor rules, …), by agent and project
+- **Memory** — the notes and instruction files your agents keep (`CLAUDE.md`, `AGENTS.md`, auto-memory, Cursor rules, CodeBuddy CLI/IDE memory, …), by agent and project
 - **Skills** — every skill your agents have installed, which agents share each one, and which copies have drifted apart
 - **Insights** — activity heatmap, streaks, weekly trends, and your top agents, projects and models
-- **Remote hosts** — mirror the sessions on your other machines over SSH
+- **Remote hosts** — mirror sessions and supported memories on your other machines over SSH
 - **MCP and CLI** — `wake-mcp` and `wake-cli` let any agent search your history and read transcripts
 
 ![Full-text search across every agent's sessions](imgs/screenshot-2.webp)
@@ -54,7 +54,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex` and many other fo
 | DeepSeek Harness (`dsh`) | `~/.dsh/sessions/**/session*.jsonl[.zstd]` | ✅ | — |
 | Hermes Agent | `~/.hermes/state.db` + `profiles/*/state.db` | ✅ | ✅ |
 | OpenClaw | `~/.openclaw/agents/*/agent/openclaw-agent.sqlite` + `agents/*/sessions/*.jsonl` | ✅ | ✅ |
-| CodeBuddy | `~/.codebuddy/projects/*/*.jsonl` | ✅ | — |
+| CodeBuddy (Code CLI / IDE 5.x) | `~/.codebuddy/projects/*/*.jsonl` + imported IDE 4.x history and the 5.x conversation catalog | ✅ | ✅ |
 | WorkBuddy | `~/.workbuddy/projects/*/*.jsonl` | ✅ | — |
 | ZCode | `~/.zcode/cli/db/db.sqlite` | ✅ | — |
 | Craft Agents | `~/.craft-agent/workspaces/*/sessions/*/session.jsonl` | ✅ | ✅ |
@@ -71,6 +71,8 @@ Agents' own environment variables (`CODEX_HOME`, `XDG_DATA_HOME`, …) are respe
 - **Cursor** — chats are read from transcripts, or from Cursor's own database when there is no transcript
 - **Craft Agents** — on a Claude connection, Wake shows the Craft session and hides the duplicate Claude Code copy
 - **Kilo Code** — the new extension, CLI and JetBrains plugin share `kilo.db`; tasks from the legacy extension are listed too
+- **CodeBuddy** — CodeBuddy Code CLI and IDE 5.x share a chat system. Wake also reads IDE 4.x sessions imported into the 5.x catalog from their original history files, without a standalone integration for IDE 4.x. Missing messages are marked in the transcript; deleting an imported session in Wake only hides it. An unconverted 4.x session cannot be resumed through the CBC CLI.
+- CBC histories keep real input separate from injected context and agent notifications, display referenced images, and include catalog `/btw` side questions in reading, search, and export. Metadata-only session stubs stay out of the list. Remote sync downloads only referenced CBC image blobs and retains cached images when their source is unavailable.
 - **Grok Bot** — conversations live in Grok Bot's cloud; Wake reads the latest messages the desktop app keeps on this computer, a conversation it no longer keeps stays listed with its last message, and deleting one in Wake only hides it
 - **MiMo Code** — a session imported from Claude Code, Codex or OpenCode is listed once you continue it in MiMo Code, without the imported part
 
@@ -82,8 +84,10 @@ Add a machine in Settings → Remote hosts (an `~/.ssh/config` alias or `user@ho
 
 - SSH has to work without prompts: your key loaded in an agent, the host key already trusted
 - `rsync` is needed on both ends; on Windows, take `rsync` and `ssh` from the same Cygwin/cwRsync install and put it ahead of Windows OpenSSH in `PATH` ([why](https://cygwin.com/pipermail/cygwin/2022-March/251153.html))
-- Only session data is copied, never credentials, and nothing on the remote is ever written
+- Wake mirrors supported session locations and memory sources without writing to the remote host
 - Remotes are assumed to use default paths; Windows remotes aren't supported
+- CodeBuddy Code CLI and IDE 5.x memories are read-only: shared IDE/CLI project files under `~/.codebuddy/projects/<project>/memory/` (with the centralized `~/.codebuddy/memories/<project>/` fallback), CLI global files under `~/.codebuddy/memories/global/`, and IDE global `.md`/`.mdc` files in `CodeBuddyExtension/Data/Public/.memories/`. Project memories migrated by IDE 5.x into the shared location are included. Index files count as files and are marked as indexes; source and disabled-state badges distinguish IDE and CLI. Remote memory uses an isolated, verified snapshot; failed transfers retain the last successful copy. Remote discovery uses only a POSIX shell and rsync; no Python, Node.js, jq, or external hash utility is required.
+- For imported CodeBuddy 4.x sessions, add the same SSH alias used by CodeBuddy. Wake reads the local 5.x catalog and mirrors only those remote sessions' indexed messages and referenced attachments; a failed sync keeps the previous cache.
 
 ## Connect your agents
 

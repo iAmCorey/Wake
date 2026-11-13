@@ -166,6 +166,7 @@ CREATE TABLE IF NOT EXISTS memories (
   updated_at   INTEGER DEFAULT 0,
   size_bytes   INTEGER DEFAULT 0,
   source       TEXT NOT NULL DEFAULT '',
+  details      TEXT NOT NULL DEFAULT '{}',
   body         TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_memories_group ON memories(agent_id, host);
@@ -253,7 +254,10 @@ CREATE TABLE IF NOT EXISTS claimed_sessions (
 ///       首条提问);分支照抄来的标题与每一份更早的同根文件比,不只比原件——分支的分支抄的是
 ///       中间那份的名字;2.1 起的记账记录(agent-name、cost-state 等)不再计未知行。"18" 推上
 ///       main 时还没有这几条,跑过那时构建的库已经戳着它,所以另起一档
-pub const FTS_FORMAT: &str = "19";
+/// "20" = CodeBuddy 的 AskUserQuestion 真人回答进入搜索。
+/// "21" = CodeBuddy 真人回答保留多行内容,并刷新旧 usage 缺失时的 CBC 统计。
+/// "22" = CBC input blocks, framework events and catalog side questions.
+pub const FTS_FORMAT: &str = "22";
 
 /// 正文里中日韩字符的两字组索引(issue #79):trigram 对两个字的词 MATCH 不出东西,而中文最常搜的
 /// 恰恰是两字词。只收有两个以上相连中日韩字符的行,文本是 `cjk_bigrams` 切好、空格隔开的两字组,
@@ -395,6 +399,12 @@ fn open_conn(path: &Path) -> Result<Connection> {
             [],
         )?;
     }
+    if !table_has_column(&conn, "memories", "details")? {
+        conn.execute(
+            "ALTER TABLE memories ADD COLUMN details TEXT NOT NULL DEFAULT '{}'",
+            [],
+        )?;
+    }
     // 部分索引须在 host 列就位后建(放 DDL 里对未迁移老库会 no such column):
     // host_counts 的 GROUP BY 从全表扫降为远小于全表的索引扫
     conn.execute(
@@ -422,7 +432,7 @@ fn open_conn(path: &Path) -> Result<Connection> {
 /// 用它判断库够不够新。加了只读路径要读的新列就改这里,否则只读入口会放行老库、
 /// 深处查询才报 no such column;只有 GUI 读的表/列(如 wake_lookups)不算,否则
 /// 一次 GUI 侧的加表就让旁路二进制对所有老库拒开
-const NEWEST_COLUMN: (&str, &str) = ("memories", "source");
+const NEWEST_COLUMN: (&str, &str) = ("memories", "details");
 /// 最近一次迁移加的、只读读者会查的表(wake_list_memories 读 memories),与
 /// NEWEST_COLUMN 同一用途、同一维护规矩。可有可无的加速表不算:两字组表(messages_cjk)由只读读者
 /// 在查询时按库里记的切法版本判断能不能用(`cjk_index_ready`),用不了就照旧逐条 LIKE,不该因此拒开老库
@@ -852,10 +862,10 @@ impl Store {
     /// 先比副本所属实例的 `dedup_rank`(`rank_of` 按 file_path 给出,小者胜),
     /// 同级再比 mtime 新者、平局路径字典序——两条路径尺子不一,会话就会在两份
     /// 副本之间摇摆(2026-09-15 Codex review)。`supersedes` 是刚解析失败的那份
-    /// 副本(路径 + 枚举时看到的 mtime,scanner 回退分支传入):库里这条 key 的行
-    /// 若正是它——同路径,且 file_mtime 不晚于枚举时看到的 mtime(quick 阶段占位
-    /// 的 0、早先入库后来损坏的旧版本都算)——它已不是竞争者,本次写入直接接管;
-    /// 期间 watcher 已把修好的同路径文件成功入库(mtime 更新)则不让位,照常裁决。判定与写入必须
+    /// 副本(路径 + 扫描开始时索引内的 mtime,scanner 回退分支传入):库里这条 key 的行
+    /// 若仍是该版本或 quick 阶段的 0 占位,就让位给回退副本。指纹不一定按时间单调
+    /// (例如包含多个边车的哈希),必须比较相等而不是数值大小;期间 watcher 已写入
+    /// 另一版本则不让位。判定与写入必须
     /// 同一事务,先查再删再写会让并发写入的第三份副本被误删;单凭 file_mtime=0
     /// 推断占位也不行,真实文件同样可能给 0(Codex review 二、三、四轮)。
     /// 返回 false = 本次是败方副本,一字未写
@@ -866,6 +876,27 @@ impl Store {
         units: &[IndexUnit],
         lookups: &[WakeLookup],
         rank_of: &dyn Fn(&str) -> u8,
+        supersedes: Option<(&str, i64)>,
+    ) -> Result<bool> {
+        self.write_session_guarded_with_order(
+            meta,
+            file_mtime,
+            units,
+            lookups,
+            &|path, stamp| (rank_of(path), stamp),
+            supersedes,
+        )
+    }
+
+    /// Scanner variant: the stored stamp may be a fingerprint, so obtain
+    /// each copy's ordering timestamp separately from its change stamp.
+    pub(crate) fn write_session_guarded_with_order(
+        &self,
+        meta: &SessionMeta,
+        file_mtime: i64,
+        units: &[IndexUnit],
+        lookups: &[WakeLookup],
+        order_of: &dyn Fn(&str, i64) -> (u8, i64),
         supersedes: Option<(&str, i64)>,
     ) -> Result<bool> {
         let mut conn = self.write.lock().unwrap();
@@ -882,18 +913,18 @@ impl Store {
             )
             .optional()?;
         if let Some((cur_path, cur_mtime)) = cur {
-            // 让位只认"库里还是我们解析失败的那个版本或更旧的":同路径且行上的
-            // file_mtime ≤ 枚举时看到的 mtime(quick 占位的 0 自然包含;早先入库、
-            // 后来损坏的转录是"更旧");期间 watcher 已把修好的同路径文件成功入库
-            //(mtime 更新)就不让位,照常裁决(Codex review 第四轮)
-            let yields = supersedes
-                .is_some_and(|(failed, seen_mtime)| failed == cur_path && cur_mtime <= seen_mtime);
+            // 只认扫描快照里的旧版本或 quick 占位。指纹是哈希时不能比大小;
+            // 不等就说明并发写入接管了该路径,仍按位次裁决。
+            let yields = supersedes.is_some_and(|(failed, previous)| {
+                failed == cur_path && (cur_mtime == previous || cur_mtime == 0)
+            });
             if cur_path != meta.file_path && !yields {
-                let (cur_rank, new_rank) = (rank_of(&cur_path), rank_of(&meta.file_path));
+                let (cur_rank, cur_time) = order_of(&cur_path, cur_mtime);
+                let (new_rank, new_time) = order_of(&meta.file_path, file_mtime);
                 let loses = cur_rank < new_rank
                     || (cur_rank == new_rank
-                        && (cur_mtime > file_mtime
-                            || (cur_mtime == file_mtime
+                        && (cur_time > new_time
+                            || (cur_time == new_time
                                 && cur_path.as_str() < meta.file_path.as_str())));
                 if loses {
                     return Ok(false); // 事务未提交即弃
@@ -1433,6 +1464,111 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    /// A source can replace its runtime ID while retaining the same logical
+    /// conversation. Move Wake-owned state and retain any existing indexed
+    /// transcript under the new key until a readable source replaces it.
+    pub(crate) fn merge_session_alias(&self, old: &str, new: &str) -> Result<bool> {
+        if old == new {
+            return Ok(false);
+        }
+        let exists: bool = self.read.lock().unwrap().query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE key=?1)
+                 OR EXISTS(SELECT 1 FROM user_data WHERE session_key=?1)
+                 OR EXISTS(SELECT 1 FROM tombstones WHERE key=?1)",
+            [old],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Ok(false);
+        }
+        let mut conn = self.write.lock().unwrap();
+        let tx = conn.transaction()?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE key=?1)
+                 OR EXISTS(SELECT 1 FROM user_data WHERE session_key=?1)
+                 OR EXISTS(SELECT 1 FROM tombstones WHERE key=?1)",
+            [old],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO user_data(session_key,favorite,pinned,updated_at)
+             SELECT ?1,favorite,pinned,updated_at FROM user_data WHERE session_key=?2
+             ON CONFLICT(session_key) DO UPDATE SET
+               favorite=CASE WHEN COALESCE(excluded.updated_at,0)>COALESCE(user_data.updated_at,0)
+                             THEN excluded.favorite ELSE user_data.favorite END,
+               pinned=CASE WHEN COALESCE(excluded.updated_at,0)>COALESCE(user_data.updated_at,0)
+                           THEN excluded.pinned ELSE user_data.pinned END,
+               updated_at=MAX(COALESCE(excluded.updated_at,0),COALESCE(user_data.updated_at,0))",
+            params![new, old],
+        )?;
+        tx.execute("DELETE FROM user_data WHERE session_key=?1", [old])?;
+        tx.execute(
+            "UPDATE tombstones SET key=?1 WHERE key=?2",
+            params![new, old],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO claimed_sessions(key, claimant)
+             SELECT ?1, claimant FROM claimed_sessions WHERE key=?2",
+            params![new, old],
+        )?;
+        tx.execute("DELETE FROM claimed_sessions WHERE key=?1", [old])?;
+        let hidden: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tombstones WHERE key=?1)
+                 OR EXISTS(SELECT 1 FROM claimed_sessions WHERE key=?1)",
+            [new],
+            |r| r.get(0),
+        )?;
+        let old_indexed: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE key=?1)",
+            [old],
+            |r| r.get(0),
+        )?;
+        let new_indexed: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE key=?1)",
+            [new],
+            |r| r.get(0),
+        )?;
+        if old_indexed && !new_indexed && !hidden {
+            // Message FTS tables use message row IDs, so changing only the
+            // session key keeps those search entries valid without rebuilding.
+            tx.execute("UPDATE sessions SET key=?1 WHERE key=?2", params![new, old])?;
+            tx.execute(
+                "UPDATE messages SET session_key=?1 WHERE session_key=?2",
+                params![new, old],
+            )?;
+            tx.execute(
+                "UPDATE wake_lookups SET session_key=?1 WHERE session_key=?2",
+                params![new, old],
+            )?;
+            tx.execute(
+                "DELETE FROM titles_fts WHERE key IN (?1, ?2)",
+                params![new, old],
+            )?;
+            tx.execute(
+                "INSERT INTO titles_fts(key,title) SELECT key,title FROM sessions WHERE key=?1 AND title<>''",
+                [new],
+            )?;
+        } else {
+            delete_session_row(&tx, old)?;
+            if hidden {
+                delete_session_row(&tx, new)?;
+            }
+        }
+        tx.execute(
+            "UPDATE sessions SET parent_key=?1 WHERE parent_key=?2",
+            params![new, old],
+        )?;
+        tx.execute(
+            "UPDATE memories SET session_key=?1 WHERE session_key=?2",
+            params![new, old],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// 应用级 KV 偏好(Open In 目标记忆等 UI 状态)。value 语义由调用方定
@@ -2209,11 +2345,12 @@ impl Store {
         // key → (id, 指纹);指纹 = (updated_at, size, session_key, project_path, source, title):
         // 锚点换了(目录里来了更新的会话)同样要重写,否则项目归属定格在首次入库那一刻;
         // 来源换了(同一文件从自定义变成默认)也重写;标题也在指纹里——标题是从文件派生
-        // 的,派生规则换了(2026-09-21 改成文件名带扩展名)文件没变也要跟上,正文不比
-        type Stamp = (i64, i64, String, String, String, String);
+        // 的,派生规则换了文件没变也要跟上。details 包含来源状态及 CodeBuddy 正文版本,
+        // 即使源文件保留了相同的时间和大小,也能更新搜索与正在阅读的正文。
+        type Stamp = (i64, i64, String, String, String, String, String);
         let existing: HashMap<String, (i64, Stamp)> = {
             let mut stmt = tx.prepare_cached(
-                "SELECT key, id, updated_at, size_bytes, session_key, project_path, source, title
+                "SELECT key, id, updated_at, size_bytes, session_key, project_path, source, title, details
                  FROM memories WHERE agent_id = ?1 AND host = ?2",
             )?;
             let rows = stmt.query_map(params![agent.as_str(), host], |r| {
@@ -2228,6 +2365,7 @@ impl Store {
                             r.get(5)?,
                             r.get(6)?,
                             r.get(7)?,
+                            r.get(8)?,
                         ),
                     ),
                 ))
@@ -2241,6 +2379,7 @@ impl Store {
                 && s.3 == d.project_path
                 && s.4 == d.source
                 && s.5 == d.title
+                && serde_json::from_str::<MemoryDetails>(&s.6).unwrap_or_default() == d.details
         };
         // 同 key 重复**前者胜**:docs 按来源计划的顺序读入(默认来源 → 项目模式 → 自定义,
         // 默认实例 → 自定义实例),先到的是默认那份——自定义目录盖住默认文件(加 ~/.claude
@@ -3303,7 +3442,7 @@ macro_rules! memory_cols {
             "m.key, m.agent_id, m.host, m.scope,
     COALESCE(NULLIF(m.project_path, ''), s.project_path, ''),
     COALESCE(NULLIF(m.project_name, ''), s.project_name, ''),
-    m.session_key, m.path, m.title, m.updated_at, m.size_bytes, m.source, ",
+    m.session_key, m.path, m.title, m.updated_at, m.size_bytes, m.source, m.details, ",
             $body
         )
     };
@@ -3329,7 +3468,8 @@ fn row_to_memory(r: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryDoc> {
         updated_at: r.get(9)?,
         size_bytes: r.get(10)?,
         source: r.get(11)?,
-        body: r.get(12)?,
+        details: serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or_default(),
+        body: r.get(13)?,
     })
 }
 
@@ -3412,13 +3552,14 @@ fn upsert_memory(tx: &rusqlite::Transaction<'_>, d: &MemoryDoc) -> Result<()> {
     let id: i64 = tx
         .prepare_cached(
             "INSERT INTO memories(key, agent_id, host, scope, project_path, project_name,
-           session_key, path, title, updated_at, size_bytes, source, body)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+           session_key, path, title, updated_at, size_bytes, source, body, details)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
          ON CONFLICT(key) DO UPDATE SET agent_id = excluded.agent_id, host = excluded.host,
            scope = excluded.scope, project_path = excluded.project_path,
            project_name = excluded.project_name, session_key = excluded.session_key,
            path = excluded.path, title = excluded.title, updated_at = excluded.updated_at,
-           size_bytes = excluded.size_bytes, source = excluded.source, body = excluded.body
+           size_bytes = excluded.size_bytes, source = excluded.source, body = excluded.body,
+           details = excluded.details
          RETURNING id",
         )?
         .query_row(
@@ -3436,6 +3577,7 @@ fn upsert_memory(tx: &rusqlite::Transaction<'_>, d: &MemoryDoc) -> Result<()> {
                 d.size_bytes,
                 d.source,
                 d.body,
+                serde_json::to_string(&d.details)?,
             ],
             |r| r.get::<_, i64>(0),
         )?;
@@ -3738,7 +3880,7 @@ fn upsert_session(tx: &rusqlite::Transaction<'_>, m: &SessionMeta, file_mtime: i
            archived, file_path, file_size, file_mtime, unknown_lines, host, spawned)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,0,?18,?19)
          ON CONFLICT(key) DO UPDATE SET
-           title=excluded.title, project_path=excluded.project_path,
+           native_id=excluded.native_id, title=excluded.title, project_path=excluded.project_path,
            project_name=excluded.project_name, git_branch=excluded.git_branch,
            created_at=excluded.created_at, updated_at=excluded.updated_at,
            message_count=excluded.message_count, tokens_used=excluded.tokens_used,

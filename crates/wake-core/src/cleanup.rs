@@ -493,15 +493,21 @@ pub fn delete_plan(
         }
         cursor += 1;
     }
-    let paths = sessions.iter().flat_map(|s| {
-        adapter_for(adapters, s.agent, &s.file_path)
-            .map(|adapter| adapter.session_paths(s))
-            .unwrap_or_else(|| vec![s.file_path.clone()])
-    });
-    let targets = outermost(paths.map(PathBuf::from))
-        .into_iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect();
+    let targets = if crate::adapters::codebuddy_legacy::is_imported_legacy(root) {
+        // The entire imported tree is hidden in Wake; descendants may have
+        // their own CBC files, but none of them may be moved or removed.
+        Vec::new()
+    } else {
+        let paths = sessions.iter().flat_map(|s| {
+            adapter_for(adapters, s.agent, &s.file_path)
+                .map(|adapter| adapter.session_paths(s))
+                .unwrap_or_else(|| vec![s.file_path.clone()])
+        });
+        outermost(paths.map(PathBuf::from))
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect()
+    };
     Ok(DeletePlan {
         sessions,
         targets,
@@ -918,8 +924,8 @@ pub struct HiddenGroup {
     /// 取消隐藏时撤掉的墓碑:按 key(墓碑自己记的、各份副本的)也按墓碑的路径
     keys: Vec<String>,
     paths: Vec<String>,
-    /// 重新入库时交给扫描的来源(同一会话的几份副本都在,扫描照常按位次挑)
-    refs: Vec<SessionFileRef>,
+    /// Sources for each hidden session, ordered by the scanner's preference.
+    copies: Vec<Vec<SessionFileRef>>,
 }
 
 /// 被 Wake 藏起来、来源却还在的会话:墓碑压着、各家此刻还列得出来的。主要是存在别家自己数据里的
@@ -1019,7 +1025,7 @@ pub fn hidden_sessions(
             nested: members.len() - 1,
             keys: Vec::new(),
             paths: Vec::new(),
-            refs: Vec::new(),
+            copies: Vec::new(),
         };
         for (t, copies) in members {
             let tombstone = &tombstones[t];
@@ -1027,10 +1033,12 @@ pub fn hidden_sessions(
                 group.keys.push(tombstone.key.clone());
             }
             group.paths.push(tombstone.file_path.clone());
+            let mut sources = Vec::new();
             for (ix, r) in copies {
                 group.keys.push(key_of(ix, &r));
-                group.refs.push(r);
+                sources.push(r);
             }
+            group.copies.push(sources);
         }
         groups.push(group);
     }
@@ -1045,7 +1053,16 @@ pub fn unhide(
     group: HiddenGroup,
 ) -> Result<()> {
     store.release_tombstones(&group.keys, &group.paths)?;
-    scan_files(adapters, store, &NullEvents, group.refs);
+    // Restore only the selected sessions. Try their copies in scanner order,
+    // falling back if the preferred source cannot currently be parsed.
+    for copies in group.copies {
+        for reference in copies {
+            scan_files(adapters, store, &NullEvents, vec![reference.clone()]);
+            if store.key_for_path(&reference.file_path)?.is_some() {
+                break;
+            }
+        }
+    }
     Ok(())
 }
 

@@ -28,10 +28,20 @@ int main(int argc, char **argv) {
     require(arg < argc, "missing remote command");
 
     if (arg == argc - 1 && strncmp(argv[arg], "sh -c ", 6) == 0) {
+        /* The selective memory probe is outside this path test. */
+        if (strstr(argv[arg], "WAKE_MEMORY_V1") != NULL) {
+            static const char empty[] = "WAKE_MEMORY_V1\0E\0";
+            require(fwrite(empty, 1, sizeof(empty) - 1, stdout) == sizeof(empty) - 1,
+                    "cannot emit memory inventory");
+            return 0;
+        }
         require(strstr(argv[arg], ".claude/projects") != NULL, "unexpected probe");
         struct stat st;
         if (stat(".claude/projects", &st) == 0 && S_ISDIR(st.st_mode)) {
             puts(".claude/projects");
+        }
+        if (stat(".codebuddy/projects", &st) == 0 && S_ISDIR(st.st_mode)) {
+            puts(".codebuddy/projects");
         }
         return 0;
     }

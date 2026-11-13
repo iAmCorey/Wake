@@ -144,9 +144,9 @@ fn fs_ref(agent: AgentId, path: &Path, native_id: &str) -> SessionFileRef {
 
 /// 默认 roster 的实例数。**不等于 `AgentId::ALL.len()`**:Cursor 一家有两个
 /// 数据源(CLI 的 agent-transcripts 与 IDE 的 state.vscdb),Kilo Code 也是两个
-/// (新版的 kilo.db 与旧版扩展的任务目录),各占一个实例。新增 agent 或给某家
+/// (新版的 kilo.db 与旧版扩展的任务目录);CodeBuddy 也有 CBC 和 IDE 4.x 两源。新增 agent 或给某家
 /// 再加数据源时,这个数跟着加一——契约要卡的是"漏了实例就爆",而不是"每家恰好一个"
-const DEFAULT_INSTANCES: usize = AgentId::ALL.len() + 2;
+const DEFAULT_INSTANCES: usize = AgentId::ALL.len() + 3;
 
 /// SQLite 型 agent 的虚拟路径引用(`<db>#<id>`,与 sqlite_ro::virtual_path 同构)
 fn db_ref(agent: AgentId, db: &Path, id: &str) -> SessionFileRef {
@@ -3531,11 +3531,19 @@ fn watch_paths_derive_from_data_roots() {
         // git 仓库,见 adapters::kilo);它的新版实例是库文件,本来就没有监听目录。
         // Claude Code 的默认实例另听桌面端的会话记录(见 adapters::claude_desktop),假 HOME
         // 里没有那个目录,所以这里照常相等;它由 claude.rs 的单测卡着
-        let expect: Vec<std::path::PathBuf> = if a.agent() == AgentId::Kilo {
+        let mut expect: Vec<std::path::PathBuf> = if a.agent() == AgentId::Kilo {
             Vec::new()
         } else {
             a.data_roots().into_iter().filter(|p| p.is_dir()).collect()
         };
+        // CBC additionally watches the catalog's parent for WAL creation,
+        // non-recursively so plugin/cache trees are not watched.
+        if a.agent() == AgentId::Codebuddy {
+            for home in a.homes().into_iter().filter(|p| p.is_dir()) {
+                assert!(!a.watch_recursive(&home));
+                expect.push(home);
+            }
+        }
         assert_eq!(
             watched, expect,
             "[{tag}] watch_paths 必须等于 data_roots 的现存目录子集"
@@ -7084,8 +7092,8 @@ fn remote_adapters_stay_inside_cache_and_rewrite_keys() {
         wake_core::adapters::remote::create_remote_adapters(&templates, "devbox", empty.path());
     assert_eq!(
         adapters.len(),
-        wake_core::remote::REMOTE_LAYOUTS.len(),
-        "同步的每一家一个远程实例"
+        wake_core::remote::REMOTE_LAYOUTS.len() + 1,
+        "CodeBuddy 的 CBC 和 IDE 4.x 各占一个远程实例"
     );
     let cache_prefix = empty.path().to_string_lossy().to_string();
     for adapter in &adapters {
@@ -7262,7 +7270,7 @@ fn roster_appends_remote_instances_for_enabled_hosts() {
 
     store.add_remote_host("devbox").unwrap();
     let roster = wake_core::adapters::create_adapter_roster_for(&store);
-    let synced = wake_core::remote::REMOTE_LAYOUTS.len();
+    let synced = wake_core::remote::REMOTE_LAYOUTS.len() + 1;
     assert_eq!(
         roster.active.len(),
         local_n + synced,

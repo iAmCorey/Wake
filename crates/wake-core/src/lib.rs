@@ -5,6 +5,7 @@ pub mod db;
 pub mod mcp;
 pub mod models;
 pub mod remote;
+mod remote_codebuddy;
 pub mod scanner;
 pub mod services;
 pub mod skills;

@@ -264,9 +264,14 @@ impl Workbench {
                     // 选中项:还在且没变就不动;正文被 agent 改过(时间或大小变了)
                     // 重读,否则新标题配旧正文;没了就落到第一份
                     let stamp = |docs: &[MemoryDoc], key: &str| {
-                        docs.iter()
-                            .find(|d| d.key == key)
-                            .map(|d| (d.updated_at, d.size_bytes))
+                        docs.iter().find(|d| d.key == key).map(|d| {
+                            (
+                                d.updated_at,
+                                d.size_bytes,
+                                d.title.clone(),
+                                d.details.clone(),
+                            )
+                        })
                     };
                     let selected = this.memory.selected.clone();
                     let before = selected
@@ -282,7 +287,7 @@ impl Workbench {
                             pin_list_row(&this.memory.list, row);
                             this.select_memory(key, cx);
                         }
-                        (None, Some(key), Some(now)) if before != Some(now) => {
+                        (None, Some(key), Some(now)) if before.as_ref() != Some(&now) => {
                             this.select_memory(key, cx);
                         }
                         (None, Some(_), Some(_)) => {}
@@ -536,7 +541,22 @@ impl Workbench {
             ),
         ];
         lead.extend(memory_badges(doc, &theme));
-        let (actions, meta_rows) = file_reader_parts(&source_path, doc.updated_at);
+        let (actions, mut meta_rows) = file_reader_parts(&source_path, doc.updated_at);
+        let statuses = doc.details.status_labels();
+        if !statuses.is_empty() {
+            meta_rows.push(
+                div()
+                    .whitespace_normal()
+                    .child(
+                        statuses
+                            .into_iter()
+                            .map(|label| t(label).to_string())
+                            .collect::<Vec<_>>()
+                            .join(" · "),
+                    )
+                    .into_any_element(),
+            );
+        }
         let header = detail_header_frame(
             "memory-detail-header",
             lead,
@@ -700,7 +720,10 @@ pub(super) fn memory_group_label(d: &MemoryDoc) -> SharedString {
 /// 远程记忆的 @host。指令文件不另挂徽章——文件名(CLAUDE.md、AGENTS.md)已说明身份,
 /// 用户 2026-09-21 定不分
 fn memory_badges(d: &MemoryDoc, theme: &gpui_component::Theme) -> Vec<AnyElement> {
-    let mut out = Vec::with_capacity(2);
+    let mut out = Vec::with_capacity(6);
+    for label in d.details.labels() {
+        out.push(badge(t(label), theme.muted, theme.muted_foreground).into_any_element());
+    }
     if d.scope == MemoryScope::Thread {
         out.push(
             badge(t("session memory"), theme.muted, theme.muted_foreground).into_any_element(),

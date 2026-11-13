@@ -652,6 +652,22 @@ mod tests {
     /// 这里直接问那个 API,改了名就在这里红,而不是变成一条静默的死译文。开场上下文的两块
     /// 在 Windows 上不显示,但片段函数不分平台、语言包也不分平台,所以这里照列
     fn from_wake_core(key: &str) -> bool {
+        use wake_core::models::{MemoryDetails, MemoryOrigin};
+        for origin in [MemoryOrigin::Ide, MemoryOrigin::Cli, MemoryOrigin::Shared] {
+            for enabled in [true, false] {
+                let details = MemoryDetails {
+                    origin: Some(origin),
+                    is_index: true,
+                    enabled: Some(enabled),
+                    ide_enabled: Some(enabled),
+                    cli_enabled: Some(enabled),
+                    ..Default::default()
+                };
+                if details.labels().contains(&key) || details.status_labels().contains(&key) {
+                    return true;
+                }
+            }
+        }
         wake_core::mcp::setup_snippets(std::path::Path::new("x"))
             .into_iter()
             .chain([

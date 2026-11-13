@@ -66,8 +66,20 @@ pub fn create_remote_adapters(
         let Some(template) = super::custom_root_template(templates, layout.agent, &mount) else {
             continue;
         };
-        let inner = template.with_custom_root(mount);
+        let inner = template.with_remote_root(mount, host_cache, host);
         out.push(Box::new(RemoteAdapter::new(inner, host)));
+        if layout.agent == AgentId::Codebuddy {
+            let data = host_cache.join(super::codebuddy_legacy::REMOTE_DATA_ROOT);
+            if let Some(legacy) = templates
+                .iter()
+                .find(|a| a.agent() == AgentId::Codebuddy && a.claims_custom_root(&data))
+            {
+                out.push(Box::new(RemoteAdapter::new(
+                    legacy.with_remote_root(data, host_cache, host),
+                    host,
+                )));
+            }
+        }
     }
     out
 }
@@ -75,6 +87,18 @@ pub fn create_remote_adapters(
 impl AgentAdapter for RemoteAdapter {
     fn agent(&self) -> AgentId {
         self.inner.agent()
+    }
+
+    fn native_id_aliases(&self, r: &SessionFileRef) -> Vec<String> {
+        self.inner.native_id_aliases(r)
+    }
+
+    fn copy_mtime(&self, r: &SessionFileRef) -> i64 {
+        self.inner.copy_mtime(r)
+    }
+
+    fn scan_priority(&self, r: &SessionFileRef) -> i64 {
+        self.inner.scan_priority(r)
     }
 
     fn host(&self) -> &str {
@@ -95,6 +119,10 @@ impl AgentAdapter for RemoteAdapter {
 
     fn ref_dependents(&self, path: &Path) -> Vec<std::path::PathBuf> {
         self.inner.ref_dependents(path)
+    }
+
+    fn cross_source_dependents(&self, path: &Path) -> Vec<std::path::PathBuf> {
+        self.inner.cross_source_dependents(path)
     }
 
     fn sessions_in(&self, path: &Path) -> Option<Vec<SessionFileRef>> {
@@ -158,6 +186,13 @@ impl AgentAdapter for RemoteAdapter {
         Vec::new()
     }
 
+    fn memory_watch_paths(&self) -> Vec<std::path::PathBuf> {
+        self.inner.memory_watch_paths()
+    }
+    fn is_memory_event(&self, path: &Path) -> bool {
+        self.inner.is_memory_event(path)
+    }
+
     fn memory_sources(&self) -> Vec<MemorySource> {
         // inner 按缓存挂载点构造,它报的路径已经是缓存内的
         self.inner.memory_sources()
@@ -211,11 +246,27 @@ impl AgentAdapter for RemoteAdapter {
         self.inner.watch_paths()
     }
 
+    fn watch_recursive(&self, path: &Path) -> bool {
+        self.inner.watch_recursive(path)
+    }
+
     fn with_custom_root(&self, dir: std::path::PathBuf) -> Box<dyn AgentAdapter> {
         // 远程实例没有自定义 location 的产品入口;保持装饰不变量以防未来误用
         Box::new(Self::new(
             self.inner.with_custom_root(dir),
             self.host.clone(),
+        ))
+    }
+
+    fn with_remote_root(
+        &self,
+        dir: std::path::PathBuf,
+        host_cache: &Path,
+        host: &str,
+    ) -> Box<dyn AgentAdapter> {
+        Box::new(Self::new(
+            self.inner.with_remote_root(dir, host_cache, host),
+            host,
         ))
     }
 
@@ -245,6 +296,10 @@ impl AgentAdapter for RemoteAdapter {
 
     fn parent_in_path(&self) -> Option<super::ParentInPath> {
         self.inner.parent_in_path()
+    }
+
+    fn parent_id_for_path(&self, path: &Path) -> Option<String> {
+        self.inner.parent_id_for_path(path)
     }
 
     fn linked_children_are_spawned(&self) -> bool {
