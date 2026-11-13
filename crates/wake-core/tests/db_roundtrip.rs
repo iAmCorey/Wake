@@ -1932,6 +1932,7 @@ fn memory_limit_keeps_user_level_and_counts_and_snippets_agree() {
     let store = Store::open(&dir.path().join("t.db")).unwrap();
     let doc = |key: &str, scope: MemoryScope, project: &str, body: &str, updated: i64| MemoryDoc {
         key: key.to_string(),
+        details: Default::default(),
         agent: AgentId::ClaudeCode,
         host: String::new(),
         scope,
@@ -2137,6 +2138,7 @@ fn memories_replace_list_and_search() {
         |key: &str, scope: MemoryScope, project: &str, title: &str, body: &str, updated: i64| {
             MemoryDoc {
                 key: key.to_string(),
+                details: Default::default(),
                 agent: AgentId::ClaudeCode,
                 host: String::new(),
                 scope,
@@ -2277,6 +2279,7 @@ fn memories_resolve_their_project_through_the_anchor_session() {
     let (_dir, store) = temp_store();
     let anchored = MemoryDoc {
         key: "claude-code:/m/anchored.md".to_string(),
+        details: Default::default(),
         agent: AgentId::ClaudeCode,
         host: String::new(),
         scope: MemoryScope::Project,
@@ -2292,6 +2295,7 @@ fn memories_resolve_their_project_through_the_anchor_session() {
     };
     let orphan = MemoryDoc {
         key: "claude-code:/m/orphan.md".to_string(),
+        details: Default::default(),
         session_key: String::new(),
         path: "/m/orphan.md".to_string(),
         title: "Orphan".to_string(),

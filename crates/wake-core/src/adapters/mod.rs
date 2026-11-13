@@ -4,6 +4,7 @@ pub mod codebuddy;
 mod codebuddy_btw;
 pub(crate) mod codebuddy_content;
 pub mod codebuddy_legacy;
+pub(crate) mod codebuddy_memory;
 pub mod codex;
 pub mod copilot;
 pub mod craft;
@@ -174,6 +175,14 @@ pub trait AgentAdapter: Send + Sync {
     /// 停用 / 自定义由 scanner 按 store 的配置裁决后经 `list_memories` 交回。默认没有
     fn memory_sources(&self) -> Vec<MemorySource> {
         Vec::new()
+    }
+    /// Additional roots for memory-only changes; parents may be shallow watches
+    /// so an absent source can be discovered without watching unrelated caches.
+    fn memory_watch_paths(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+    fn is_memory_event(&self, _path: &Path) -> bool {
+        false
     }
     /// 本实例确认过的 home(装着这家配置与会话的目录:`~/.claude`、`$CODEX_HOME`……)。
     /// 只在构造时有结构证据才给——默认实例,或自定义根选的是 home 形态(里面有这家的数据
@@ -1110,7 +1119,7 @@ impl MemoryCache {
         Self(std::sync::Mutex::new(std::collections::HashMap::new()))
     }
 
-    fn get_or_build(
+    pub(crate) fn get_or_build(
         &self,
         key: &str,
         stamp: i64,
@@ -1274,6 +1283,7 @@ fn memory_doc_from_file(
     let path_str = path.to_string_lossy().to_string();
     Ok(Some(MemoryDoc {
         key: session_key(agent, "", &path_str),
+        details: Default::default(),
         agent,
         host: String::new(),
         scope: unit.scope,
@@ -1296,6 +1306,9 @@ fn memory_doc_from_file(
 /// 阅读一份记忆的正文:文件型现场读磁盘(agent 刚改过也能看到),读不到退库里那份;
 /// SQLite 型(虚拟路径)只有库里那份。MCP 的 wake_get_session 与 GUI 阅读面共用
 pub fn memory_body(doc: &MemoryDoc) -> String {
+    if doc.agent == AgentId::Codebuddy && doc.details.origin.is_some() {
+        return codebuddy_memory::body(doc);
+    }
     if session_source_path(&doc.path) != doc.path {
         return doc.body.clone();
     }

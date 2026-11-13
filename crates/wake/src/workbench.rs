@@ -5102,6 +5102,16 @@ impl Workbench {
                 note
             }
             BgEvent::Changed => {
+                let watched = self.watcher.as_ref().map(|w| w.watched_roots());
+                if watched.is_some_and(|w| w.iter().any(|p| !p.is_dir()))
+                    || self
+                        .adapters
+                        .iter()
+                        .flat_map(|a| a.memory_watch_paths())
+                        .any(|p| p.is_dir() && watched.is_none_or(|w| !w.contains(&p)))
+                {
+                    self.remount_watcher();
+                }
                 self.refresh(cx);
                 None
             }
@@ -5130,7 +5140,7 @@ impl Workbench {
                 let grown = self
                     .adapters
                     .iter()
-                    .flat_map(|a| a.watch_paths())
+                    .flat_map(|a| a.watch_paths().into_iter().chain(a.memory_watch_paths()))
                     .any(|p| watched.is_none_or(|w| !w.contains(&p)) && p.is_dir());
                 if grown {
                     self.remount_watcher();

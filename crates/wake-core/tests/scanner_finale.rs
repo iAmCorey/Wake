@@ -335,6 +335,7 @@ fn memories_of_sources_gone_from_the_roster_are_pruned() {
     let store = temp_store(dir.path());
     let doc = MemoryDoc {
         key: "codex:devbox:/home/me/.codex/memories/prefs.md".to_string(),
+        details: Default::default(),
         agent: AgentId::Codex,
         host: "devbox".to_string(),
         scope: MemoryScope::User,
@@ -1150,6 +1151,7 @@ fn mem_doc(path: &str, title: &str) -> MemoryDoc {
         .unwrap_or_default();
     MemoryDoc {
         key: format!("claude-code:{path}"),
+        details: Default::default(),
         agent: AgentId::ClaudeCode,
         host: String::new(),
         scope: MemoryScope::Project,

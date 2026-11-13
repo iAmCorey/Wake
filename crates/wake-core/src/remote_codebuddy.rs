@@ -41,6 +41,117 @@ impl Drop for Stage {
     }
 }
 
+/// Atomically mirror only the centralized memory files. Kept separate from
+/// the legacy Data generation, whose replacement must not remove global memory.
+pub(crate) fn sync_memories(host: &str, cache: &Path) -> Result<(), String> {
+    let inventory = memory_inventory(host)?;
+    install_memory_snapshot(cache, &inventory, |stage, current, paths| {
+        sync_files(host, stage, current, paths)?;
+        if inventory != memory_inventory(host)? {
+            return Err("CodeBuddy memory changed during sync; previous cache kept".into());
+        }
+        Ok(())
+    })
+}
+
+fn install_memory_snapshot(
+    cache: &Path,
+    inventory: &Value,
+    transfer: impl FnOnce(&Path, &Path, &[PathBuf]) -> Result<(), String>,
+) -> Result<(), String> {
+    use crate::adapters::codebuddy_memory::{MANIFEST, REMOTE_MIRROR};
+    fs::create_dir_all(cache).map_err(|e| e.to_string())?;
+    let current = cache.join(REMOTE_MIRROR);
+    let backup = current.with_file_name(".codebuddy-memory.wake-previous");
+    recover_interrupted_swap(&current, &backup)?;
+    let dirs = inventory["dirs"]
+        .as_array()
+        .ok_or("invalid memory directories")?;
+    let files = inventory["files"]
+        .as_object()
+        .ok_or("invalid memory files")?;
+    let stage = Stage::create(cache, &STAGE_ID).map_err(|e| e.to_string())?;
+    for dir in dirs {
+        let dir = dir.as_str().ok_or("invalid memory directory")?;
+        if !allowed_memory_path(dir, false) {
+            return Err("unsafe memory directory".into());
+        }
+        fs::create_dir_all(stage.0.join(dir)).map_err(|e| e.to_string())?;
+    }
+    let paths: Vec<PathBuf> = files.keys().map(PathBuf::from).collect();
+    if files.keys().any(|p| !allowed_memory_path(p, true)) {
+        return Err("unsafe memory file".into());
+    }
+    transfer(&stage.0, &current, &paths)?;
+    for (path, expected) in files {
+        use sha2::{Digest, Sha256};
+        let raw = crate::adapters::codebuddy_memory::safe_text(&stage.0, &stage.0.join(path))
+            .map_err(|e| e.to_string())?;
+        if Some(format!("{:x}", Sha256::digest(raw.as_bytes())).as_str()) != expected.as_str() {
+            return Err("CodeBuddy memory changed during transfer; previous cache kept".into());
+        }
+    }
+    fs::write(
+        stage.0.join(MANIFEST),
+        serde_json::to_vec(&inventory).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    replace_generation(&stage.0, &current, &backup)
+}
+
+fn memory_inventory(host: &str) -> Result<Value, String> {
+    let mut cmd = Command::new("ssh");
+    cmd.args(SSH_OPTS).arg(host).arg(format!(
+        "python3 -c {}",
+        sh_quote(include_str!("codebuddy_memory_manifest.py"))
+    ));
+    let output = run_with_input(cmd, Vec::new(), "ssh memory inventory")?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let payload = text
+        .lines()
+        .find_map(|l| l.strip_prefix("WAKE_MEMORY:"))
+        .ok_or("missing memory inventory")?;
+    let value: Value = serde_json::from_str(payload).map_err(|e| e.to_string())?;
+    let _: crate::adapters::codebuddy_memory::MemorySettings =
+        serde_json::from_value(value["settings"].clone()).map_err(|e| e.to_string())?;
+    Ok(value)
+}
+
+fn allowed_memory_path(raw: &str, file: bool) -> bool {
+    use crate::adapters::codebuddy_memory::{IDE_LINUX, IDE_MAC};
+    let path = Path::new(raw);
+    if raw.contains(['\n', '\r'])
+        || path
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return false;
+    }
+    let relative = if let Ok(p) = path.strip_prefix(".codebuddy/projects") {
+        let parts: Vec<_> = p.components().collect();
+        if parts.is_empty() {
+            return !file;
+        }
+        if parts.len() < 2 || parts[1].as_os_str() != "memory" {
+            return false;
+        }
+        p
+    } else if let Ok(p) = path.strip_prefix(".codebuddy/memories") {
+        p
+    } else if let Some(p) = [IDE_LINUX, IDE_MAC]
+        .iter()
+        .find_map(|r| path.strip_prefix(r).ok())
+    {
+        p
+    } else {
+        return false;
+    };
+    !relative
+        .components()
+        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+        && (!file || path.extension().is_some_and(|e| e == "md" || e == "mdc"))
+}
+
 /// Mirror only content-addressed images referenced by the cached CBC records.
 /// The source catalog and unrelated blobs are never copied from the host.
 pub(crate) fn sync_blobs(host: &str, cache: &Path) -> Result<(), String> {
@@ -836,5 +947,149 @@ mod verification {
         println!("source audit: incomplete_sessions={incomplete_sessions}, missing_messages={missing_files}, converted_token_samples={token_samples}, human_answers={answer_samples}, missing_answers={answer_missing}, repeated_answers={answer_duplicate}");
         assert_eq!(answer_missing, 0);
         assert_eq!(answer_duplicate, 0);
+    }
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+    use crate::adapters::codebuddy_memory::{IDE_MAC, MANIFEST, REMOTE_MIRROR};
+
+    fn inventory(body: &str) -> Value {
+        use sha2::{Digest, Sha256};
+        let path = format!("{IDE_MAC}/note.mdc");
+        serde_json::json!({"dirs":[IDE_MAC],"files":{path:format!("{:x}",Sha256::digest(body.as_bytes()))},"settings":{"cli":true,"project":true,"global":true},"projects":{}})
+    }
+
+    #[test]
+    fn memory_generation_is_atomic_on_transfer_failure_and_corruption() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rel = format!("{IDE_MAC}/note.mdc");
+        let initial = inventory("original");
+        install_memory_snapshot(tmp.path(), &initial, |stage, _, _| {
+            fs::write(stage.join(&rel), "original").map_err(|e| e.to_string())
+        })
+        .unwrap();
+        let current = tmp.path().join(REMOTE_MIRROR);
+        let next = inventory("replacement");
+        assert!(install_memory_snapshot(tmp.path(), &next, |stage, _, _| {
+            fs::write(stage.join(&rel), "partial").unwrap();
+            Err("offline".into())
+        })
+        .is_err());
+        assert_eq!(fs::read_to_string(current.join(&rel)).unwrap(), "original");
+        assert!(install_memory_snapshot(tmp.path(), &next, |stage, _, _| {
+            fs::write(stage.join(&rel), "wrong").map_err(|e| e.to_string())
+        })
+        .is_err());
+        assert_eq!(fs::read_to_string(current.join(&rel)).unwrap(), "original");
+        let mut empty = initial;
+        empty["files"] = serde_json::json!({});
+        install_memory_snapshot(tmp.path(), &empty, |_, _, _| Ok(())).unwrap();
+        assert!(!current.join(&rel).exists());
+        assert!(current.join(MANIFEST).is_file());
+        assert!(!allowed_memory_path(".codebuddy/settings.json", true));
+        assert!(!allowed_memory_path(
+            ".codebuddy/projects/p/memory/../../credentials.md",
+            true
+        ));
+        assert!(!allowed_memory_path(
+            ".codebuddy/projects/p/memory/.ide-memory-backups/a.md",
+            true
+        ));
+    }
+
+    #[test]
+    fn memory_inventory_reads_only_centralized_files_and_sanitizes_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = [
+            ".codebuddy/projects/project/memory/a.md",
+            ".codebuddy/projects/project/memory/.ide-memory-backups/a.md",
+            ".codebuddy/memories/project/old.md",
+            ".codebuddy/memories/global/global.md",
+            "workspace/.codebuddy/memory/old.md",
+        ];
+        for p in paths {
+            let path = tmp.path().join(p);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "body").unwrap();
+        }
+        fs::write(
+            tmp.path().join(".codebuddy/settings.json"),
+            r#"{"memory":{"autoMemoryEnabled":false},"secret":"DO_NOT_COPY"}"#,
+        )
+        .unwrap();
+        let result = Command::new("python3")
+            .args(["-c", include_str!("codebuddy_memory_manifest.py")])
+            .env("HOME", tmp.path())
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let output = String::from_utf8(result.stdout).unwrap();
+        assert!(!output.contains("DO_NOT_COPY"));
+        let v: Value =
+            serde_json::from_str(output.trim().strip_prefix("WAKE_MEMORY:").unwrap()).unwrap();
+        assert_eq!(v["files"].as_object().unwrap().len(), 3);
+        assert_eq!(v["settings"]["cli"], false);
+        assert_eq!(v["settings"]["project"], false);
+    }
+
+    #[test]
+    #[ignore = "read-only SSH memory mirror into an isolated cache"]
+    fn real_remote_memories_are_mirrored_in_isolation() {
+        use crate::adapters::{codebuddy::CodebuddyAdapter, remote::RemoteAdapter, AgentAdapter};
+        use crate::models::*;
+        let host = std::env::var("WAKE_VERIFY_CODEBUDDY_HOST").expect("host required");
+        let tmp = tempfile::tempdir().unwrap();
+        sync_memories(&host, tmp.path()).unwrap();
+        let adapter = RemoteAdapter::new(
+            Box::new(CodebuddyAdapter::remote(
+                tmp.path().join(".codebuddy/projects"),
+                tmp.path(),
+                &host,
+            )),
+            &host,
+        );
+        let docs = adapter
+            .list_memories(&adapter.memory_sources(), &[])
+            .unwrap();
+        assert!(!docs.is_empty());
+        let store = crate::db::Store::open(&tmp.path().join("audit.db")).unwrap();
+        store
+            .replace_memories(AgentId::Codebuddy, &host, &docs, &[])
+            .unwrap();
+        for doc in &docs {
+            assert_eq!(doc.host, host);
+            assert!(doc.key.starts_with(&format!("codebuddy:{host}:")));
+            if doc.scope == MemoryScope::Project {
+                assert!(!doc.project_path.is_empty(), "{}", doc.path);
+            }
+            let query: String = doc.title.chars().take(8).collect();
+            assert!(
+                store
+                    .search_memories(
+                        &query,
+                        &MemoryFilter {
+                            limit: 1000,
+                            ..Default::default()
+                        }
+                    )
+                    .unwrap()
+                    .iter()
+                    .any(|h| h.doc.key == doc.key),
+                "{}",
+                doc.title
+            );
+        }
+        eprintln!(
+            "Remote memory audit: host={host}, files={}, indexes={}, user={}",
+            docs.len(),
+            docs.iter().filter(|d| d.details.is_index).count(),
+            docs.iter().filter(|d| d.scope == MemoryScope::User).count()
+        );
     }
 }

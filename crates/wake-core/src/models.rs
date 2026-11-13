@@ -812,6 +812,76 @@ pub struct MemoryDoc {
     pub source: String,
     /// 正文原样(含 frontmatter);文件型阅读时先读磁盘,这份是索引与兜底
     pub body: String,
+    /// Source-specific presentation, independent of the memory's scope.
+    pub details: MemoryDetails,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryDetails {
+    pub revision: String,
+    pub origin: Option<MemoryOrigin>,
+    pub is_index: bool,
+    pub enabled: Option<bool>,
+    pub ide_enabled: Option<bool>,
+    pub cli_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MemoryOrigin {
+    Ide,
+    Cli,
+    Shared,
+}
+
+impl MemoryDetails {
+    pub fn status_labels(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        for (state, on, off) in [
+            (self.enabled, "Memory enabled", "Memory disabled"),
+            (
+                self.ide_enabled,
+                "IDE memory enabled",
+                "IDE memory disabled",
+            ),
+            (
+                self.cli_enabled,
+                "CLI memory enabled",
+                "CLI memory disabled",
+            ),
+        ] {
+            if let Some(enabled) = state {
+                out.push(if enabled { on } else { off });
+            }
+        }
+        out
+    }
+
+    /// Stable English labels; GUI translates them and MCP uses them verbatim.
+    pub fn labels(&self) -> Vec<&'static str> {
+        let mut labels = Vec::new();
+        if let Some(origin) = self.origin {
+            labels.push(match origin {
+                MemoryOrigin::Ide => "IDE memory",
+                MemoryOrigin::Cli => "CLI memory",
+                MemoryOrigin::Shared => "IDE / CLI memory",
+            });
+        }
+        if self.is_index {
+            labels.push("Memory index");
+        }
+        if self.enabled == Some(false) {
+            labels.push("Memory disabled");
+        }
+        if self.ide_enabled == Some(false) {
+            labels.push("IDE memory disabled");
+        }
+        if self.cli_enabled == Some(false) {
+            labels.push("CLI memory disabled");
+        }
+        labels
+    }
 }
 
 /// Memory 页侧栏的导航计数:总数、用户级、按 agent、按解析出的项目(用户级记忆计入

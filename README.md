@@ -25,7 +25,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex` and many other fo
 - **One-click resume** — back in your terminal (Terminal, iTerm, Warp, Ghostty, Kooky…) or in Claude / Codex Desktop, in the right project folder
 - **Manage** — star, pin, export to Markdown, hand a session to another agent, delete to the Trash
 - **Clean up** — find the sessions eating your disk and clear them out in one go
-- **Memory** — the notes and instruction files your agents keep (`CLAUDE.md`, `AGENTS.md`, auto-memory, Cursor rules, …), by agent and project
+- **Memory** — the notes and instruction files your agents keep (`CLAUDE.md`, `AGENTS.md`, auto-memory, Cursor rules, CodeBuddy 5.x memory, …), by agent and project
 - **Skills** — every skill your agents have installed, which agents share each one, and which copies have drifted apart
 - **Insights** — activity heatmap, streaks, weekly trends, and your top agents, projects and models
 - **Remote hosts** — mirror the sessions on your other machines over SSH
@@ -86,6 +86,7 @@ Add a machine in Settings → Remote hosts (an `~/.ssh/config` alias or `user@ho
 - `rsync` is needed on both ends; on Windows, take `rsync` and `ssh` from the same Cygwin/cwRsync install and put it ahead of Windows OpenSSH in `PATH` ([why](https://cygwin.com/pipermail/cygwin/2022-March/251153.html))
 - Only session data is copied, never credentials, and nothing on the remote is ever written
 - Remotes are assumed to use default paths; Windows remotes aren't supported
+- CodeBuddy 5.x memories are read-only: shared IDE/CLI project files under `~/.codebuddy/projects/<project>/memory/` (with the centralized `~/.codebuddy/memories/<project>/` fallback), CLI global files under `~/.codebuddy/memories/global/`, and IDE global `.md`/`.mdc` files in `CodeBuddyExtension/Data/Public/.memories/`. Index files count as files and are marked as indexes; source and disabled-state badges distinguish IDE and CLI. Project-local 4.x memory is excluded. Remote memory uses an isolated, verified snapshot; failed transfers retain the last successful copy. Remote hosts need Python 3 alongside SSH/rsync.
 - For imported CodeBuddy 4.x sessions, add the same SSH alias used by CodeBuddy. Wake reads the local 5.x catalog and mirrors only those remote sessions' indexed messages and referenced attachments; a failed sync keeps the previous cache.
 
 ## Connect your agents

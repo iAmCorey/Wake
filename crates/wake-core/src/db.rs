@@ -166,6 +166,7 @@ CREATE TABLE IF NOT EXISTS memories (
   updated_at   INTEGER DEFAULT 0,
   size_bytes   INTEGER DEFAULT 0,
   source       TEXT NOT NULL DEFAULT '',
+  details      TEXT NOT NULL DEFAULT '{}',
   body         TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_memories_group ON memories(agent_id, host);
@@ -398,6 +399,12 @@ fn open_conn(path: &Path) -> Result<Connection> {
             [],
         )?;
     }
+    if !table_has_column(&conn, "memories", "details")? {
+        conn.execute(
+            "ALTER TABLE memories ADD COLUMN details TEXT NOT NULL DEFAULT '{}'",
+            [],
+        )?;
+    }
     // 部分索引须在 host 列就位后建(放 DDL 里对未迁移老库会 no such column):
     // host_counts 的 GROUP BY 从全表扫降为远小于全表的索引扫
     conn.execute(
@@ -425,7 +432,7 @@ fn open_conn(path: &Path) -> Result<Connection> {
 /// 用它判断库够不够新。加了只读路径要读的新列就改这里,否则只读入口会放行老库、
 /// 深处查询才报 no such column;只有 GUI 读的表/列(如 wake_lookups)不算,否则
 /// 一次 GUI 侧的加表就让旁路二进制对所有老库拒开
-const NEWEST_COLUMN: (&str, &str) = ("memories", "source");
+const NEWEST_COLUMN: (&str, &str) = ("memories", "details");
 /// 最近一次迁移加的、只读读者会查的表(wake_list_memories 读 memories),与
 /// NEWEST_COLUMN 同一用途、同一维护规矩。可有可无的加速表不算:两字组表(messages_cjk)由只读读者
 /// 在查询时按库里记的切法版本判断能不能用(`cjk_index_ready`),用不了就照旧逐条 LIKE,不该因此拒开老库
@@ -2338,11 +2345,12 @@ impl Store {
         // key → (id, 指纹);指纹 = (updated_at, size, session_key, project_path, source, title):
         // 锚点换了(目录里来了更新的会话)同样要重写,否则项目归属定格在首次入库那一刻;
         // 来源换了(同一文件从自定义变成默认)也重写;标题也在指纹里——标题是从文件派生
-        // 的,派生规则换了(2026-09-21 改成文件名带扩展名)文件没变也要跟上,正文不比
-        type Stamp = (i64, i64, String, String, String, String);
+        // 的,派生规则换了文件没变也要跟上。details 包含来源状态及 CodeBuddy 正文版本,
+        // 即使源文件保留了相同的时间和大小,也能更新搜索与正在阅读的正文。
+        type Stamp = (i64, i64, String, String, String, String, String);
         let existing: HashMap<String, (i64, Stamp)> = {
             let mut stmt = tx.prepare_cached(
-                "SELECT key, id, updated_at, size_bytes, session_key, project_path, source, title
+                "SELECT key, id, updated_at, size_bytes, session_key, project_path, source, title, details
                  FROM memories WHERE agent_id = ?1 AND host = ?2",
             )?;
             let rows = stmt.query_map(params![agent.as_str(), host], |r| {
@@ -2357,6 +2365,7 @@ impl Store {
                             r.get(5)?,
                             r.get(6)?,
                             r.get(7)?,
+                            r.get(8)?,
                         ),
                     ),
                 ))
@@ -2370,6 +2379,7 @@ impl Store {
                 && s.3 == d.project_path
                 && s.4 == d.source
                 && s.5 == d.title
+                && serde_json::from_str::<MemoryDetails>(&s.6).unwrap_or_default() == d.details
         };
         // 同 key 重复**前者胜**:docs 按来源计划的顺序读入(默认来源 → 项目模式 → 自定义,
         // 默认实例 → 自定义实例),先到的是默认那份——自定义目录盖住默认文件(加 ~/.claude
@@ -3432,7 +3442,7 @@ macro_rules! memory_cols {
             "m.key, m.agent_id, m.host, m.scope,
     COALESCE(NULLIF(m.project_path, ''), s.project_path, ''),
     COALESCE(NULLIF(m.project_name, ''), s.project_name, ''),
-    m.session_key, m.path, m.title, m.updated_at, m.size_bytes, m.source, ",
+    m.session_key, m.path, m.title, m.updated_at, m.size_bytes, m.source, m.details, ",
             $body
         )
     };
@@ -3458,7 +3468,8 @@ fn row_to_memory(r: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryDoc> {
         updated_at: r.get(9)?,
         size_bytes: r.get(10)?,
         source: r.get(11)?,
-        body: r.get(12)?,
+        details: serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or_default(),
+        body: r.get(13)?,
     })
 }
 
@@ -3541,13 +3552,14 @@ fn upsert_memory(tx: &rusqlite::Transaction<'_>, d: &MemoryDoc) -> Result<()> {
     let id: i64 = tx
         .prepare_cached(
             "INSERT INTO memories(key, agent_id, host, scope, project_path, project_name,
-           session_key, path, title, updated_at, size_bytes, source, body)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+           session_key, path, title, updated_at, size_bytes, source, body, details)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
          ON CONFLICT(key) DO UPDATE SET agent_id = excluded.agent_id, host = excluded.host,
            scope = excluded.scope, project_path = excluded.project_path,
            project_name = excluded.project_name, session_key = excluded.session_key,
            path = excluded.path, title = excluded.title, updated_at = excluded.updated_at,
-           size_bytes = excluded.size_bytes, source = excluded.source, body = excluded.body
+           size_bytes = excluded.size_bytes, source = excluded.source, body = excluded.body,
+           details = excluded.details
          RETURNING id",
         )?
         .query_row(
@@ -3565,6 +3577,7 @@ fn upsert_memory(tx: &rusqlite::Transaction<'_>, d: &MemoryDoc) -> Result<()> {
                 d.size_bytes,
                 d.source,
                 d.body,
+                serde_json::to_string(&d.details)?,
             ],
             |r| r.get::<_, i64>(0),
         )?;

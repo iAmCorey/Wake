@@ -919,6 +919,9 @@ fn memory_label(d: &MemoryDoc) -> String {
         d.agent.display_name(),
         d.scope.label()
     );
+    for label in d.details.labels() {
+        s.push_str(&format!(" · {label}"));
+    }
     if !d.host.is_empty() {
         s.push_str(&format!(" · @{}", d.host));
     }
@@ -1021,6 +1024,14 @@ fn get_memory(ctx: &ToolContext, key: &str, args: &Value) -> ToolResult {
         out.push_str(&format!(" · project {}", doc.project_path));
     }
     out.push_str(&memory_session_note(&doc));
+    for label in doc
+        .details
+        .labels()
+        .into_iter()
+        .chain(doc.details.status_labels())
+    {
+        out.push_str(&format!(" · {label}"));
+    }
     if !doc.host.is_empty() {
         out.push_str(&format!(" · @{}", doc.host));
     }

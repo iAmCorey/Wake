@@ -147,6 +147,8 @@ pub(crate) fn process_batch(
     let mut gone: HashSet<PathBuf> = HashSet::new();
     let mut snapshot_agents: HashSet<AgentId> = HashSet::new();
     let mut rescan = false;
+    let mut memories_changed = false;
+    let mut memory_roots_changed = false;
     for ev in batch {
         let Ok(ev) = ev.inspect_err(|e| eprintln!("watcher: notify error: {e}")) else {
             continue;
@@ -159,6 +161,20 @@ pub(crate) fn process_batch(
             continue;
         }
         for path in ev.paths {
+            memories_changed |= adapters.iter().any(|a| a.is_memory_event(&path));
+            if !path.exists()
+                && roots.iter().any(|(root, _)| root == &path)
+                && adapters.iter().any(|a| a.is_memory_event(&path))
+            {
+                memory_roots_changed = true;
+            }
+            if path.is_dir() {
+                memory_roots_changed |= adapters
+                    .iter()
+                    .filter(|a| a.is_memory_event(&path))
+                    .flat_map(|a| a.memory_watch_paths())
+                    .any(|p| p.starts_with(&path) && !roots.iter().any(|(r, _)| r == &p));
+            }
             let owner_ix = resolve_watch_agent(roots, &path);
             if let Some(adapter) = owner_ix.and_then(|ix| adapters.get(ix)) {
                 if adapter.is_snapshot_event(&path) {
@@ -305,6 +321,13 @@ pub(crate) fn process_batch(
         let agents: Vec<AgentId> = snapshot_agents.into_iter().collect();
         refresh_parent_links(adapters, store, events, &agents);
     }
+    if memories_changed {
+        let changed = crate::scanner::run_memory_sync(adapters, store);
+        // Also lets the UI rearm shallow parent watches after first creation.
+        if changed || memory_roots_changed {
+            events.on_sessions_changed();
+        }
+    }
     if rescan {
         events.on_rescan_needed();
     }
@@ -320,7 +343,7 @@ pub fn start_watcher(
     // 实例相对的判据按 agent 找第一个会拿默认实例跑偏
     let mut roots: Vec<(PathBuf, usize)> = Vec::new();
     for (ix, a) in adapters.iter().enumerate() {
-        for p in a.watch_paths() {
+        for p in a.watch_paths().into_iter().chain(a.memory_watch_paths()) {
             roots.push((p, ix));
         }
     }

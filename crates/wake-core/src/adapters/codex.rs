@@ -1166,6 +1166,7 @@ fn read_thread_memories(db: &Path, source: &str) -> Option<Vec<MemoryDoc>> {
         );
         out.push(MemoryDoc {
             key: session_key(AgentId::Codex, "", &path),
+            details: Default::default(),
             agent: AgentId::Codex,
             host: String::new(),
             scope: MemoryScope::Thread,

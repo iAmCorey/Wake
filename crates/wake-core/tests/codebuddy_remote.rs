@@ -30,7 +30,7 @@ fn selected_sessions_and_assets_sync_atomically_and_keep_cache_offline() {
     let offline = tmp.path().join("offline");
     let interrupted = tmp.path().join("interrupted");
     write(&ssh, &format!(
-        "#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in -*) shift;; *) break;; esac; done\nhost=$1; shift\nif [ -f '{offline}' ]; then exit 255; fi\nif [ -f '{interrupted}' ]; then case \"$*\" in *'rsync --server'*) exit 255;; esac; fi\ncd '{remote}' || exit 1\nexec sh -c \"$*\"\n",
+        "#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in -*) shift;; *) break;; esac; done\nhost=$1; shift\nif [ -f '{offline}' ]; then exit 255; fi\nif [ -f '{interrupted}' ]; then case \"$*\" in *'rsync --server'*) exit 255;; esac; fi\ncd '{remote}' || exit 1\nexport HOME='{remote}'\nexec sh -c \"$*\"\n",
         offline = offline.display(), interrupted = interrupted.display(), remote = remote.display()
     ));
     fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
@@ -155,6 +155,32 @@ fn selected_sessions_and_assets_sync_atomically_and_keep_cache_offline() {
     );
     write(&remote.join(".codebuddy/auth.json"), "NOT A REAL SECRET");
 
+    let ide_memory = if cfg!(target_os = "macos") {
+        "Library/Application Support/CodeBuddyExtension/Data/Public/.memories/global.mdc"
+    } else {
+        ".local/share/CodeBuddyExtension/Data/Public/.memories/global.mdc"
+    };
+    write(
+        &remote.join(ide_memory),
+        "---\ntitle: IDE global preference\nenabled: true\n---\nremote-memory-initial",
+    );
+    write(
+        &remote.join(".codebuddy/memories/global/cli.md"),
+        "---\nname: CLI global preference\n---\ncli-global-fixture",
+    );
+    write(
+        &remote.join(".codebuddy/projects/opt-project/memory/MEMORY.md"),
+        "[Preference](topic.md)",
+    );
+    write(
+        &remote.join(".codebuddy/projects/opt-project/memory/topic.md"),
+        "---\nname: Project preference\ntype: user\n---\nproject-fixture",
+    );
+    write(
+        &remote.join(".codebuddy/projects/opt-project/memory/.ide-memory-backups/old.md"),
+        "excluded backup",
+    );
+
     let store = Arc::new(Store::open(&tmp.path().join("wake.db")).unwrap());
     store.add_remote_host("CVM").unwrap();
     let hosts = vec!["CVM".to_string()];
@@ -203,6 +229,33 @@ fn selected_sessions_and_assets_sync_atomically_and_keep_cache_offline() {
 
     let adapters = create_adapters_for(&store);
     run_scan(&adapters, &store, &NullEvents, false).unwrap();
+    let memories = store
+        .list_memories(&wake_core::models::MemoryFilter::default())
+        .unwrap();
+    assert_eq!(memories.len(), 4);
+    assert!(memories.iter().all(|d| d.host == "CVM"));
+    assert_eq!(memories.iter().filter(|d| d.details.is_index).count(), 1);
+    assert_eq!(
+        memories
+            .iter()
+            .find(|d| d.title == "Project preference")
+            .unwrap()
+            .project_path,
+        "/opt/project"
+    );
+    assert_eq!(
+        store
+            .search_memories("remote-memory-initial", &Default::default())
+            .unwrap()
+            .len(),
+        1
+    );
+    let cached_memory = cache.join(".codebuddy-memory").join(ide_memory);
+    assert!(
+        cached_memory.is_file(),
+        "legacy history sync must preserve the memory generation"
+    );
+
     let meta = store
         .get_session("codebuddy:CVM:remote-1")
         .unwrap()
@@ -430,12 +483,24 @@ fn selected_sessions_and_assets_sync_atomically_and_keep_cache_offline() {
         updated
     );
     let old = fs::read(cache.join(&session).join("messages/m1.json")).unwrap();
+    let memory_before = fs::read(&cached_memory).unwrap();
+    write(&remote.join(ide_memory), "changed memory while offline");
     write(&offline, "offline");
     write(
         &remote.join(&session).join("messages/m1.json"),
         "changed while offline",
     );
     wake_core::remote::sync_hosts(&store, &hosts);
+    assert_eq!(fs::read(&cached_memory).unwrap(), memory_before);
+    wake_core::scanner::run_memory_sync(&adapters, &store);
+    assert_eq!(
+        store
+            .search_memories("remote-memory-initial", &Default::default())
+            .unwrap()
+            .len(),
+        1
+    );
+
     assert!(store.list_remote_hosts().unwrap()[0]
         .last_sync_error
         .is_some());

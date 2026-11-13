@@ -186,6 +186,13 @@ impl AgentAdapter for RemoteAdapter {
         Vec::new()
     }
 
+    fn memory_watch_paths(&self) -> Vec<std::path::PathBuf> {
+        self.inner.memory_watch_paths()
+    }
+    fn is_memory_event(&self, path: &Path) -> bool {
+        self.inner.is_memory_event(path)
+    }
+
     fn memory_sources(&self) -> Vec<MemorySource> {
         // inner 按缓存挂载点构造,它报的路径已经是缓存内的
         self.inner.memory_sources()

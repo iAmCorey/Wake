@@ -215,6 +215,51 @@ fn has_conversion_marker(path: &Path) -> bool {
 }
 
 impl CodebuddyAdapter {
+    pub(crate) fn memory_reader(&self) -> Option<super::codebuddy_memory::Reader> {
+        use super::codebuddy_memory::{Reader, IDE_LINUX, IDE_MAC, REMOTE_MIRROR};
+        if self.agent != AgentId::Codebuddy {
+            return None;
+        }
+        let host = self.catalog.as_ref().and_then(|c| c.host.clone());
+        let mirror = host
+            .as_ref()
+            .and_then(|_| self.root.parent()?.parent().map(|p| p.join(REMOTE_MIRROR)));
+        let home = mirror
+            .as_ref()
+            .map(|m| m.join(".codebuddy"))
+            .or_else(|| self.home.clone());
+        let projects = mirror
+            .as_ref()
+            .map(|m| m.join(".codebuddy/projects"))
+            .unwrap_or_else(|| self.root.clone());
+        let ide = if let Some(m) = &mirror {
+            vec![m.join(IDE_LINUX), m.join(IDE_MAC)]
+        } else if self.catalog.as_ref().is_some_and(|c| c.protect_missing) {
+            let catalog_data = &self.catalog.as_ref().unwrap().legacy_data;
+            let data = if cfg!(target_os = "windows")
+                && *catalog_data == super::codebuddy_legacy::default_data_root()
+            {
+                super::home_dir()
+                    .unwrap_or_default()
+                    .join("AppData/Local/CodeBuddyExtension/Data")
+            } else {
+                catalog_data.clone()
+            };
+            vec![data.join("Public/.memories")]
+        } else {
+            Vec::new()
+        };
+        Some(Reader {
+            projects,
+            home,
+            ide,
+            transcripts: self.root.clone(),
+            catalog: self.catalog.as_ref().map(|c| c.path.clone()),
+            host,
+            mirror,
+        })
+    }
+
     pub fn new() -> Self {
         Self::twin(AgentId::Codebuddy, ".codebuddy", "CODEBUDDY_CONFIG_DIR")
     }
@@ -1168,6 +1213,9 @@ impl AgentAdapter for CodebuddyAdapter {
 
     fn watch_recursive(&self, path: &Path) -> bool {
         path == self.root
+            || self
+                .memory_reader()
+                .is_some_and(|r| r.watch_recursive(path))
     }
 
     fn is_snapshot_event(&self, path: &Path) -> bool {
@@ -1185,6 +1233,35 @@ impl AgentAdapter for CodebuddyAdapter {
             .into_iter()
             .map(|r| PathBuf::from(r.file_path))
             .collect()
+    }
+
+    fn memory_sources(&self) -> Vec<MemorySource> {
+        self.memory_reader()
+            .map(|r| r.sources())
+            .unwrap_or_default()
+    }
+    fn list_memories(
+        &self,
+        sources: &[MemorySource],
+        projects: &[PathBuf],
+    ) -> Result<Vec<MemoryDoc>> {
+        match self.memory_reader() {
+            Some(r) => r.list(sources, projects),
+            None => super::generic_memory_docs(
+                &super::SHARED_MEMORY_CACHE,
+                self.agent,
+                sources,
+                projects,
+            ),
+        }
+    }
+    fn memory_watch_paths(&self) -> Vec<PathBuf> {
+        self.memory_reader()
+            .map(|r| r.watch_paths())
+            .unwrap_or_default()
+    }
+    fn is_memory_event(&self, path: &Path) -> bool {
+        self.memory_reader().is_some_and(|r| r.is_event(path))
     }
 
     fn homes(&self) -> Vec<PathBuf> {

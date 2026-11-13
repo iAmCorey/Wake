@@ -465,6 +465,7 @@ pub fn sync_hosts(store: &Store, names: &[String]) {
                 // 已入库的 host 也再卡一道:老库可能被未来版本写入过更宽的名字
                 let error = if valid_host_name(name) {
                     sync_host(name, &dest)
+                        .and_then(|()| crate::remote_codebuddy::sync_memories(name, &dest))
                         .and_then(|()| crate::remote_codebuddy::sync_blobs(name, &dest))
                         .and_then(|()| crate::remote_codebuddy::sync_legacy(name, &dest))
                         .err()

@@ -553,5 +553,15 @@
   "Matches the titles and text of the notes your agents keep.": "匹配 agent 记下的笔记的标题与正文。",
   "Search installed skills": "搜索已装的技能",
   "Matches skill names and descriptions.": "匹配技能的名字与说明。",
-  "Other tabs have results. Press Tab to switch.": "别的栏有结果,按 Tab 切过去。"
+  "Other tabs have results. Press Tab to switch.": "别的栏有结果,按 Tab 切过去。",
+  "IDE memory": "IDE 记忆",
+  "CLI memory": "CLI 记忆",
+  "IDE / CLI memory": "IDE／CLI 共享记忆",
+  "Memory index": "记忆索引",
+  "Memory disabled": "此记忆已停用",
+  "IDE memory disabled": "IDE 记忆已关闭",
+  "CLI memory disabled": "CLI 记忆已关闭",
+  "Memory enabled": "此记忆已启用",
+  "IDE memory enabled": "IDE 记忆已开启",
+  "CLI memory enabled": "CLI 记忆已开启"
 }
