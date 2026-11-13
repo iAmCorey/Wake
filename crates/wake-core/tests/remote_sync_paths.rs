@@ -102,12 +102,21 @@ fn remote_sync_handles_native_cache_paths() {
     let parent_cwd = std::env::current_dir().unwrap();
     let session = ".claude/projects/demo/session.jsonl";
     let deleted = ".claude/projects/demo/deleted.jsonl";
+    let codebuddy_session = ".codebuddy/projects/demo/session.jsonl";
+    let codebuddy_memory = ".codebuddy/projects/demo/memory";
+    let codebuddy_blob = ".codebuddy/blobs/keep";
     let hosts = ["devbox".to_string(), "otherbox".to_string()];
     for host in &hosts {
         let source = remote.join(host).join(session);
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         fs::write(source, format!("synthetic session from {host}\n")).unwrap();
         fs::write(remote.join(host).join(deleted), "synthetic old session\n").unwrap();
+        let transcript = remote.join(host).join(codebuddy_session);
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::write(transcript, "{}\n").unwrap();
+        let memory = remote.join(host).join(codebuddy_memory);
+        fs::create_dir_all(&memory).unwrap();
+        fs::write(memory.join("MEMORY.md"), "synthetic memory").unwrap();
     }
 
     // On Windows this is an absolute drive-letter path, with spaces and Unicode.
@@ -116,6 +125,12 @@ fn remote_sync_handles_native_cache_paths() {
     let store = Store::open(&db_dir.join("wake.db")).unwrap();
     for host in &hosts {
         store.add_remote_host(host).unwrap();
+        let cache = host_cache_dir(&db_dir, host);
+        fs::create_dir_all(cache.join(codebuddy_memory)).unwrap();
+        fs::write(cache.join(codebuddy_memory).join("old.md"), "stale copy").unwrap();
+        let blob = cache.join(codebuddy_blob);
+        fs::create_dir_all(blob.parent().unwrap()).unwrap();
+        fs::write(blob, "retained blob").unwrap();
     }
     sync_hosts(&store, &hosts);
     assert_eq!(std::env::current_dir().unwrap(), parent_cwd);
@@ -129,6 +144,9 @@ fn remote_sync_handles_native_cache_paths() {
             "parallel hosts must keep separate cache trees"
         );
         assert!(cache.join(deleted).is_file());
+        assert!(cache.join(codebuddy_session).is_file());
+        assert!(!cache.join(codebuddy_memory).exists());
+        assert!(cache.join(codebuddy_blob).is_file());
     }
     assert!(!local_home.join(".claude").exists());
 

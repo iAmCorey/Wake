@@ -425,9 +425,13 @@ fn rsync_args(host: &str, paths: &[&str], checksum: bool) -> Vec<String> {
         args.push("--checksum".to_string());
     }
     if paths.contains(&CODEBUDDY_PROJECTS) {
-        // The selective mirror owns these siblings of projects. Protect its
-        // previous generation while the regular mirror applies deletions.
+        // Project memories have their own verified snapshot. Hide them from
+        // the ordinary sender so backups are not copied twice; the sender-only
+        // rule also lets --delete remove old copies from the ordinary cache.
+        // Keep the blob exclusions as receiver-side protection: unlike
+        // --delete-excluded, this must not delete the selective blob mirror.
         args.extend([
+            "--filter=-s /.codebuddy/projects/*/memory".into(),
             "--exclude=/.codebuddy/blobs".into(),
             "--exclude=/.codebuddy/blobs.wake-previous".into(),
         ]);

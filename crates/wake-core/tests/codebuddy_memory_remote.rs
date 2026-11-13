@@ -139,8 +139,19 @@ exec /bin/sh -c \"$*\"
         ".codebuddy/projects/opt-project/memory/.ide-memory-backups/hidden.md",
         "SECRET_NEVER_COPY",
     );
+    // A previous Wake version may already have copied the entire project
+    // memory tree. The normal sync must remove that redundant copy while the
+    // separately verified memory snapshot remains available.
+    put(
+        &cache,
+        ".codebuddy/projects/opt-project/memory/.ide-memory-backups/stale.md",
+        "old synthetic backup",
+    );
     assert_eq!(sync(), None);
     assert_eq!(scan().len(), 4);
+    assert!(!cache
+        .join(".codebuddy/projects/opt-project/memory")
+        .exists());
     assert!(!mirror
         .join(".codebuddy/projects/opt-project/memory/.ide-memory-backups")
         .exists());

@@ -890,6 +890,18 @@ mod memory_tests {
         let host = std::env::var("WAKE_VERIFY_CODEBUDDY_HOST").expect("host required");
         let tmp = tempfile::tempdir().unwrap();
         crate::remote::sync_host(&host, tmp.path()).unwrap();
+        let projects = tmp.path().join(".codebuddy/projects");
+        if projects.is_dir() {
+            for entry in fs::read_dir(projects).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    assert!(
+                        matches!(fs::symlink_metadata(entry.path().join("memory")), Err(e) if e.kind() == std::io::ErrorKind::NotFound),
+                        "regular session sync must not copy the memory tree"
+                    );
+                }
+            }
+        }
         sync_memories(&host, tmp.path()).unwrap();
         let adapter = RemoteAdapter::new(
             Box::new(CodebuddyAdapter::remote(
