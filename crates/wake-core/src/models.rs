@@ -30,13 +30,14 @@ pub enum AgentId {
     Devin,
     Kilo,
     MimoCode,
+    DoubaoWork,
 }
 
 impl AgentId {
     /// 全部 agent,**枚举声明序**(= Ord = 用户钉的侧栏展示序;面板成组、
     /// 表单下拉共用同一顺序)。曾误抄 create_adapters 的构造序,下拉与侧栏
     /// 排序当场对不上——契约测试现在卡它与 Ord 一致
-    pub const ALL: [AgentId; 24] = [
+    pub const ALL: [AgentId; 25] = [
         AgentId::ClaudeCode,
         AgentId::Codex,
         AgentId::Grok,
@@ -61,6 +62,7 @@ impl AgentId {
         AgentId::Devin,
         AgentId::Kilo,
         AgentId::MimoCode,
+        AgentId::DoubaoWork,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -89,6 +91,7 @@ impl AgentId {
             AgentId::Kilo => "kilo",
             AgentId::GrokBot => "grok-bot",
             AgentId::MimoCode => "mimo-code",
+            AgentId::DoubaoWork => "doubao-work",
         }
     }
 
@@ -118,6 +121,7 @@ impl AgentId {
             "kilo" => Some(AgentId::Kilo),
             "grok-bot" => Some(AgentId::GrokBot),
             "mimo-code" => Some(AgentId::MimoCode),
+            "doubao-work" => Some(AgentId::DoubaoWork),
             _ => None,
         }
     }
@@ -148,6 +152,7 @@ impl AgentId {
             AgentId::Kilo => "Kilo Code",
             AgentId::GrokBot => "Grok Bot",
             AgentId::MimoCode => "MiMo Code",
+            AgentId::DoubaoWork => "Doubao Work",
         }
     }
 
@@ -262,6 +267,8 @@ impl AgentId {
                     "brands/mimo-code-light.png"
                 }
             }
+            // lobe-icons 的 Doubao 彩色标志(蓝、青、紫三瓣,豆包 app 与官网同一个),两模式通用
+            AgentId::DoubaoWork => "brands/doubao-work.png",
         }
     }
 }

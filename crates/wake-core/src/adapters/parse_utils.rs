@@ -79,6 +79,31 @@ pub fn jsonl_rows<T: serde::de::DeserializeOwned, R: std::io::BufRead>(
     })
 }
 
+/// `jsonl_rows` 的预筛版:行里没有 `needle` 的不交给 serde、直接跳过(不给 `Ok(None)`)——在大文件里
+/// 只找少数几行时省掉逐行解析(豆包工作在转录里找 `create_agent` 的结果)。读错误规则相同
+pub fn jsonl_rows_containing<'a, T, R>(
+    reader: R,
+    needle: &'a str,
+) -> impl Iterator<Item = std::io::Result<Option<T>>> + 'a
+where
+    T: serde::de::DeserializeOwned + 'a,
+    R: std::io::BufRead + 'a,
+{
+    jsonl_lines(reader).filter_map(move |line| match line {
+        Ok(Some(line)) if !line.contains(needle) => None,
+        Ok(line) => Some(Ok(line.and_then(|line| serde_json::from_str(&line).ok()))),
+        Err(e) => Some(Err(e)),
+    })
+}
+
+/// 读不读得出:不存在(含"中间某段不是目录")是确定没有,别的是这一刻读不出
+pub fn is_absent(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
 /// `BufRead::lines` 加上上面那条读错误规则:坏 UTF-8 的行字节已经读过,交成 `Ok(None)` 接着读
 fn jsonl_lines<R: std::io::BufRead>(reader: R) -> JsonlLines<R> {
     JsonlLines {
@@ -1200,6 +1225,58 @@ pub fn strip_image_tags(text: &str) -> String {
     out.trim().to_string()
 }
 
+/// 按文件 (mtime, size) 缓存的读取结果,一个路径一格(`MtimeCache` 的按路径版;边车、会话头这类
+/// 每轮扫描、每批监听都要再问一遍的小文件)。`stamp` 是调用方刚 stat 到的戳,None = 文件不在,给空的;
+/// 戳没变给缓存;读的那一刻文件刚好没了也给空的。**读不出报错,不交回上次读到的**:调用方会拿刚 stat
+/// 到的新戳记进引用,旧内容配上新戳入库,文件不再变就再也不会重读(当成"没有"同理,2026-11-23
+/// Codex review)——报错让这一次解析失败,下一轮再来
+pub struct StampCache<T>(
+    std::sync::Mutex<
+        std::collections::HashMap<std::path::PathBuf, ((i64, i64), std::sync::Arc<T>)>,
+    >,
+);
+
+impl<T> Default for StampCache<T> {
+    fn default() -> Self {
+        Self(std::sync::Mutex::new(std::collections::HashMap::new()))
+    }
+}
+
+impl<T: Default> StampCache<T> {
+    pub fn get(
+        &self,
+        path: &std::path::Path,
+        stamp: Option<(i64, i64)>,
+        read: impl FnOnce(&std::path::Path) -> std::io::Result<T>,
+    ) -> std::io::Result<std::sync::Arc<T>> {
+        let Some(stamp) = stamp else {
+            return Ok(std::sync::Arc::default());
+        };
+        if let Some((seen, value)) = self.0.lock().unwrap().get(path) {
+            if *seen == stamp {
+                return Ok(value.clone());
+            }
+        }
+        match read(path) {
+            Ok(value) => {
+                let value = std::sync::Arc::new(value);
+                self.0
+                    .lock()
+                    .unwrap()
+                    .insert(path.to_path_buf(), (stamp, value.clone()));
+                Ok(value)
+            }
+            Err(e) if is_absent(&e) => Ok(std::sync::Arc::default()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// 只留 `keep` 认的路径(全量列会话时修剪掉已经不在的)
+    pub fn retain(&self, keep: impl Fn(&std::path::Path) -> bool) {
+        self.0.lock().unwrap().retain(|path, _| keep(path));
+    }
+}
+
 /// 按 mtime 失效的单值缓存(边车映射/SQLite 全表在一轮扫描内的重复调用)。
 /// build 返回 None 时不缓存失败结果,mtime 不变也会在下次重试。
 pub struct MtimeCache<T: Clone>(std::sync::Mutex<Option<(i64, T)>>);
@@ -1547,6 +1624,39 @@ pub fn make_preview(input: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 戳没变给缓存;读不出报错、不交回旧内容(旧内容配上新戳入库就再也不会重读);文件不在给空的
+    #[test]
+    fn stamp_cache_rereads_on_change_and_never_serves_stale_content() {
+        let cache: StampCache<String> = StampCache::default();
+        let path = std::path::Path::new("/x/assignment.md");
+        let reads = std::cell::Cell::new(0);
+        let read = |text: &'static str| {
+            let reads = &reads;
+            move |_: &std::path::Path| {
+                reads.set(reads.get() + 1);
+                Ok(text.to_string())
+            }
+        };
+        assert_eq!(
+            *cache.get(path, Some((1, 5)), read("first")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            *cache.get(path, Some((1, 5)), read("unused")).unwrap(),
+            "first"
+        );
+        assert_eq!(reads.get(), 1, "戳没变不重读");
+        let denied = |_: &std::path::Path| -> std::io::Result<String> {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        };
+        assert!(cache.get(path, Some((2, 9)), denied).is_err());
+        let gone = |_: &std::path::Path| -> std::io::Result<String> {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        };
+        assert_eq!(*cache.get(path, Some((3, 9)), gone).unwrap(), "");
+        assert_eq!(*cache.get(path, None, read("unused")).unwrap(), "");
+    }
 
     /// Claude Code 后台任务结束的通知是注入内容,不是提问;正文里提到这个词的照算人话
     #[test]

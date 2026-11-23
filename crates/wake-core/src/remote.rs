@@ -285,6 +285,9 @@ pub const NOT_SYNCED: &[AgentId] = &[
     // 会话只在 mimocode.db 里,同一个库还有存 access / refresh token 的 account 表;SQLite 是
     // 整文件,拉会话就得连凭证一起拷到本机(Kilo 新版的 kilo.db 与 OpenClaw 的库同样因此不拉)
     AgentId::MimoCode,
+    // 豆包电脑版只有 macOS / Windows 版,远程 host 上没有它;会话目录又在 Chromium profile 里,
+    // 旁边就是 Cookies、Login Data
+    AgentId::DoubaoWork,
 ];
 
 /// host 名合法性:进 session key 作中段(不能有 ':')、直接作为 ssh/rsync

@@ -1,0 +1,6 @@
+{"role":"system","content":"你是豆包的办公助手。"}
+{"role":"assistant","content":"好的。"}
+{"role":"user","content":[{"type":"text","text":"配一张产品图"},{"type":"image_url","image_url":{"url":"https://example.com/product.png"}}]}
+this line is not json
+{"role":"developer","content":"x"}
+{"role":"assistant","content":"PPT 已生成：product.pptx"}

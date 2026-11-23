@@ -1644,6 +1644,76 @@ fn dsh_subagents_nest_under_the_session_that_started_them() {
     assert_eq!(store.child_counts(&filter).unwrap().get(parent), Some(&1));
 }
 
+/// 豆包工作:会话里主代理之外的 agent 挂在主代理那条下面,顶层只有主代理、只有一个 agent 的与
+/// 认不出主代理的。主代理后来才认出来(assignment.md 后写下 Role: main)时,各条的 key 不变(id 只由
+/// 路径定)、关系跟着挂上
+#[test]
+fn doubao_work_agents_nest_under_the_main_agent() {
+    use wake_core::adapters::doubao::DoubaoAdapter;
+    let data = tempfile::tempdir().unwrap();
+    let profile = data.path().join("Default");
+    common::copy_tree(&common::fixture("doubao/Default"), &profile);
+    let adapters: Vec<Box<dyn AgentAdapter>> =
+        vec![DoubaoAdapter::new().with_custom_root(profile.clone())];
+    let dir = tempfile::tempdir().unwrap();
+    let store = temp_store(dir.path());
+    run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
+
+    let key = |id: &str| format!("doubao-work:{id}");
+    let parent = |id: &str| store.parent_key_of(&key(id)).unwrap();
+    // 主代理 → 组织者 → 助手:关系按 Assigned by 报,scanner 压到主代理上
+    let main = "38455902111943939/m_main01";
+    assert_eq!(parent(main), None);
+    assert_eq!(parent("38455902111943939/o_org01"), Some(key(main)));
+    assert_eq!(parent("38455902111943939/s_merge01"), Some(key(main)));
+    assert_eq!(parent("38455902111943939/s_redo01"), Some(key(main)));
+    let (a, b) = ("38455902111943941/a_one", "38455902111943941/a_two");
+    assert_eq!((parent(a), parent(b)), (None, None));
+    let filter = SessionFilter {
+        roots_only: true,
+        limit: 10,
+        ..Default::default()
+    };
+    let (roots, total) = store.list_sessions(&filter).unwrap();
+    assert_eq!(
+        total,
+        5,
+        "{:?}",
+        roots.iter().map(|s| &s.key).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        store.child_counts(&filter).unwrap().get(&key(main)),
+        Some(&3)
+    );
+    // 第一句提问在 assignment.md 里,标题与正文都有它
+    let real = store
+        .get_session(&key("38455902111943938/m_0cweC6udWVG"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(real.title, "你是谁");
+
+    // 会话 4 后来认出了主代理:b 挂到 a 下面,两条都还是原来的 key
+    let assignment = common::doubao_agent_file(data.path(), "Default", a, "assignment.md");
+    std::fs::write(&assignment, "- Role: main\n").unwrap();
+    run_scan(&adapters, &store, &Recorder::new(), false).unwrap();
+    assert_eq!(parent(a), None);
+    assert_eq!(parent(b), Some(key(a)));
+    // b 的文件没动、不会重解析:派出去的这一位靠关系同步补标(spawned 只写不读,直接查库)
+    let db = rusqlite::Connection::open(dir.path().join("scan.db")).unwrap();
+    let spawned = |id: &str| -> bool {
+        db.query_row(
+            "SELECT spawned FROM sessions WHERE key = ?1",
+            [key(id)],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert!(spawned(b));
+    assert!(!spawned(a));
+    assert!(spawned("38455902111943939/o_org01"));
+    assert!(spawned("38455902111943939/s_merge01"));
+}
+
 /// MiMo Code 同会话子代理的道是子会话:父会话写在 id 里,停在直接父会话上——peer 子会话自己派的
 /// 道挂在 peer 子会话下、不往上压到根(peer 子会话经 parent_id 挂在根下);顶层只有根
 #[test]

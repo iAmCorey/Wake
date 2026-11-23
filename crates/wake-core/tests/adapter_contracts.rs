@@ -22,6 +22,7 @@ use wake_core::adapters::craft::CraftAdapter;
 use wake_core::adapters::cursor::CursorAdapter;
 use wake_core::adapters::cursor_ide::CursorIdeAdapter;
 use wake_core::adapters::devin::DevinAdapter;
+use wake_core::adapters::doubao::DoubaoAdapter;
 use wake_core::adapters::dsh::DshAdapter;
 use wake_core::adapters::gemini::GeminiAdapter;
 use wake_core::adapters::grok::GrokAdapter;
@@ -62,6 +63,8 @@ struct TestEnv {
     mimo_db: PathBuf,
     /// Grok Bot 的缓存目录(`<userData>/sand-client-persistence`)
     grok_bot_store: PathBuf,
+    /// 豆包电脑版的用户数据目录(profile 在它下面一层)
+    doubao_user_data: PathBuf,
     /// 假 HOME 目录本体,持有 TempDir 保证整个测试进程期间不被清理
     _home: tempfile::TempDir,
 }
@@ -98,6 +101,7 @@ fn setup() -> &'static TestEnv {
         let sc = common::stage_sidecars(home.path());
         // Grok Bot 单独摆:cli / mcp / remote_sync 也用 stage_sidecars,不往它们的索引里塞会话
         let grok_bot_store = common::stage_grok_bot(home.path());
+        let doubao_user_data = common::stage_doubao(home.path());
 
         common::isolate_home(home.path());
         TestEnv {
@@ -117,6 +121,7 @@ fn setup() -> &'static TestEnv {
             kilo_cursor_tasks: sc.kilo_cursor_tasks,
             mimo_db: sc.mimo_db,
             grok_bot_store,
+            doubao_user_data,
             _home: home,
         }
     })
@@ -3660,6 +3665,7 @@ fn data_roots_contract() {
         "dsh",
         "kilo",
         "mimo-code",
+        "doubao-work",
     ] {
         assert!(
             detected.contains(&expect),
@@ -4145,6 +4151,11 @@ fn seq_contract_holds_for_all_agents() {
             Box::new(MimoAdapter::new()),
             db_ref(AgentId::MimoCode, &env.mimo_db, id),
         ));
+    }
+    // 豆包工作:列出来的每一条(主代理、组织者、助手、只有一个 agent 的、另一个 profile 的)
+    let doubao = DoubaoAdapter::new();
+    for r in doubao.list_session_files().unwrap() {
+        checks.push((Box::new(DoubaoAdapter::new()), r));
     }
     for (adapter, r) in &checks {
         assert_seq_contract(adapter.as_ref(), r);
@@ -5714,6 +5725,325 @@ const KILO_T2: &str = "01944f77-3500-7abc-8def-0123456789ab";
 const KILO_T3: &str = "01944f78-bba0-7abc-8def-0123456789ac";
 
 /// 旧版任务的引用:native id 是新版扩展导入它时给的 `ses_migrated_…`
+// ---------------------------------------------------------------- 豆包工作
+
+/// 豆包电脑版 2.37.16 真实形状的那个会话(内容合成)
+const DB_REAL: &str = "38455902111943938/m_0cweC6udWVG";
+/// 派了组织者的任务:主代理 → 组织者 → 在本地跑的助手(另一个助手在云端跑,本地没有转录)
+const DB_MAIN: &str = "38455902111943939/m_main01";
+const DB_ORGANIZER: &str = "38455902111943939/o_org01";
+const DB_HELPER: &str = "38455902111943939/s_merge01";
+/// 先在云端跑、后来被组织者叫回来在本地返工的助手(assignment.md 没有头)
+const DB_REDO: &str = "38455902111943939/s_redo01";
+
+/// 列出来的各条,按原生 id(引用并着 assignment.md 与指纹,与 fs_ref 的不一样)
+fn doubao_refs(adapter: &DoubaoAdapter) -> std::collections::HashMap<String, SessionFileRef> {
+    adapter
+        .list_session_files()
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.native_id.clone(), r))
+        .collect()
+}
+
+#[test]
+fn doubao_work_parse_contract() {
+    setup();
+    let adapter = DoubaoAdapter::new();
+    // 两个用过任务模式的 profile 各一个根(Crashpad 不是 profile),可以单独停用
+    assert_eq!(adapter.data_roots().len(), 2);
+    assert!(adapter.supports_individual_root_removal());
+
+    // 每个 agent 一条,id 是路径上的 <会话>/<agent>;没有 agents/ 的目录不是会话
+    let refs = doubao_refs(&adapter);
+    let mut ids: Vec<&str> = refs.keys().map(String::as_str).collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        [
+            DB_REAL,
+            DB_MAIN,
+            DB_ORGANIZER,
+            DB_HELPER,
+            DB_REDO,
+            "38455902111943940/a_solo",
+            "38455902111943941/a_one",
+            "38455902111943941/a_two",
+            "38455902111943950/x_helper",
+            "38455902111943950/x_lead",
+        ]
+    );
+    let parse = |id: &str| adapter.parse_transcript(&refs[id]).unwrap();
+
+    // 2.37.16 的真实形状:第一句提问只在 assignment.md 里、排在最前,追问是转录里的 user 行;
+    // 两句都拿 assignment.md 那一节的时间,标题是第一句
+    let real = parse(DB_REAL);
+    assert_eq!(real.meta.key, format!("doubao-work:{DB_REAL}"));
+    assert_eq!(real.meta.agent, AgentId::DoubaoWork);
+    assert_eq!(real.meta.title, "你是谁");
+    assert_eq!(real.meta.project_path, "");
+    assert_eq!(real.meta.created_at, ms("2026-11-23T08:17:14.767Z"));
+    assert_eq!(
+        roles_kinds(&real.mainline),
+        [
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+        ]
+    );
+    assert_eq!(real.mainline[0].text, "你是谁");
+    assert_eq!(
+        real.mainline[0].timestamp,
+        Some(ms("2026-11-23T08:17:14.767Z"))
+    );
+    assert_eq!(
+        real.mainline[2].timestamp,
+        Some(ms("2026-11-23T08:18:58.115Z"))
+    );
+    // 工具调用之间的几行助手并成一条,工具结果回填到调用上
+    let reply = &real.mainline[3];
+    let calls: Vec<(&str, bool)> = reply
+        .tool_calls
+        .iter()
+        .map(|c| (c.name.as_str(), c.output.is_some()))
+        .collect();
+    assert_eq!(
+        calls,
+        [("Read", true), ("Bash", true), ("present_files", true)]
+    );
+    assert!(reply.tool_calls[1]
+        .input
+        .as_deref()
+        .is_some_and(|input| input.contains("make_poem_docx.py")));
+    assert_eq!(reply.text, "完成了，文件已生成并交付：**秋信.docx**");
+    assert_eq!(real.unknown_line_count, 0);
+    assert_eq!(real.meta.message_count, 4);
+
+    // 派了组织者的任务:头里写着谁是主代理、谁派的谁;子会话的标题取派它时起的标题,派它的那次
+    // create_agent 能点进去(云端跑的助手本地没有转录,不列出来)
+    let main = parse(DB_MAIN);
+    assert_eq!(
+        main.meta.title,
+        "帮我整理 Q3 销售数据，按区域汇总后生成一份报告"
+    );
+    assert_eq!(main.meta.created_at, ms("2026-11-22T09:00:00Z"));
+    let dispatch = &main.mainline[1].tool_calls[0];
+    assert_eq!(dispatch.name, "create_agent");
+    assert_eq!(dispatch.child_id.as_deref(), Some(DB_ORGANIZER));
+    let organizer = parse(DB_ORGANIZER);
+    assert_eq!(organizer.meta.title, "Q3 销售汇总");
+    // 组织者收到的是一段 <system-reminder>(用户原话加主代理的提示),不是人打的字
+    assert_eq!(
+        roles_kinds(&organizer.mainline),
+        [
+            (Role::User, MessageKind::Meta),
+            (Role::Assistant, MessageKind::Text),
+        ]
+    );
+    let children: Vec<Option<&str>> = organizer.mainline[1]
+        .tool_calls
+        .iter()
+        .filter(|c| c.name == "create_agent")
+        .map(|c| c.child_id.as_deref())
+        .collect();
+    assert_eq!(
+        children,
+        [
+            Some("38455902111943939/s_cloud01"),
+            Some(DB_REDO),
+            Some(DB_HELPER)
+        ]
+    );
+    let helper = parse(DB_HELPER);
+    assert_eq!(helper.meta.title, "合并汇总表");
+    assert_eq!(
+        helper.mainline[0].text,
+        "任务：把各区域的数字合并成一张汇总表"
+    );
+    // arguments 写成 JSON 字符串的也解开,工具结果是 part 数组的也读
+    let search = &helper.mainline[1].tool_calls[0];
+    assert_eq!(search.name, "web_search");
+    assert!(search
+        .input
+        .as_deref()
+        .is_some_and(|input| input.contains("华南 三季度 促销")));
+    assert_eq!(search.output.as_deref(), Some("找到 3 条结果"));
+    // 没有头的返工助手:谁派的、叫什么都从组织者的 create_agent 认;它收到的执行模式说明是注入的
+    let redo = parse(DB_REDO);
+    assert_eq!(redo.meta.title, "华南促销调研");
+    assert_eq!(
+        roles_kinds(&redo.mainline),
+        [
+            (Role::User, MessageKind::Meta),
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+        ]
+    );
+    assert_eq!(
+        sorted_links(&adapter),
+        [
+            edge(
+                &format!("doubao-work:{DB_ORGANIZER}"),
+                &format!("doubao-work:{DB_MAIN}")
+            ),
+            edge(
+                &format!("doubao-work:{DB_HELPER}"),
+                &format!("doubao-work:{DB_ORGANIZER}")
+            ),
+            edge(
+                &format!("doubao-work:{DB_REDO}"),
+                &format!("doubao-work:{DB_ORGANIZER}")
+            ),
+            edge(
+                "doubao-work:38455902111943950/x_helper",
+                "doubao-work:38455902111943950/x_lead"
+            ),
+        ],
+        "认不出主代理的会话 38455902111943941 不挂父子"
+    );
+    // 派出去的就是挂上的那几条;只有一个 agent 的、认不出主代理的都不算
+    assert_eq!(
+        spawned_ids(&adapter),
+        [
+            DB_ORGANIZER,
+            DB_HELPER,
+            DB_REDO,
+            "38455902111943950/x_helper"
+        ]
+    );
+
+    // 只有一个 agent:它就是主代理,没有 assignment.md 就用转录里的提问
+    let solo = parse("38455902111943940/a_solo");
+    assert_eq!(solo.meta.title, "把下载文件夹里的发票按月份归档");
+
+    // 另一个 profile:assignment.md 写着 Role: Main 的是主代理;没见过的 system / developer 行与坏行
+    // 计未知行(格式变了的信号)
+    let lead = parse("38455902111943950/x_lead");
+    assert_eq!(lead.meta.title, "做一页 PPT 介绍新产品");
+    assert_eq!(
+        roles_kinds(&lead.mainline),
+        [
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+        ]
+    );
+    assert!(lead.mainline[2].text.starts_with("配一张产品图"));
+    assert_eq!(lead.unknown_line_count, 3);
+
+    // 删除只隐藏,没有能接着聊的命令
+    assert!(adapter.session_paths(&real.meta).is_empty());
+    assert_eq!(
+        wake_core::services::terminal::agent_bin(AgentId::DoubaoWork),
+        None
+    );
+}
+
+#[test]
+fn doubao_work_assignments_reach_the_ref() {
+    let env = setup();
+    let adapter = DoubaoAdapter::new();
+    let file = |id: &str, file: &str| {
+        common::doubao_agent_file(&env.doubao_user_data, "Default", id, file)
+    };
+    let trajectory = file(DB_REAL, "trajectory.jsonl");
+    let assignment = file(DB_REAL, "assignment.md");
+    let listed = &doubao_refs(&adapter)[DB_REAL];
+
+    // 第一句提问在 assignment.md 里:它并进引用(再加上认法的指纹),它的事件换成同目录的转录
+    let plain = fs::metadata(&trajectory).unwrap().len() + fs::metadata(&assignment).unwrap().len();
+    assert!(listed.size > plain as i64);
+    let from_assignment = adapter.file_ref(&assignment).unwrap();
+    assert_eq!(from_assignment.file_path, trajectory.to_string_lossy());
+    assert_eq!(
+        (from_assignment.mtime_ms, from_assignment.size),
+        (listed.mtime_ms, listed.size)
+    );
+    assert!(adapter.is_snapshot_event(&assignment));
+    assert!(!adapter.is_snapshot_event(&trajectory));
+    // 会话里别的文件都不是会话:看板、agent 自己写的脚本、socket、记忆
+    let agent_dir = trajectory.parent().unwrap().parent().unwrap();
+    let session = agent_dir.parent().unwrap().parent().unwrap();
+    for other in [
+        session.join("board.md"),
+        session.join("memory").join("MEMORY.md"),
+        agent_dir.join("make_poem_docx.py"),
+        agent_dir.join("socket").join("findings.jsonl"),
+    ] {
+        assert!(adapter.file_ref(&other).is_none(), "{}", other.display());
+    }
+    // 多了 / 少了一个 agent,同会话别的 agent 要重比引用(谁是主代理、挂在谁下面可能变);
+    // assignment.md 每轮追问都会写,不为它重比
+    let helper = file(DB_HELPER, "trajectory.jsonl");
+    assert_eq!(
+        adapter.ref_dependents(&helper),
+        [
+            file(DB_MAIN, "trajectory.jsonl"),
+            file(DB_ORGANIZER, "trajectory.jsonl"),
+            file(DB_REDO, "trajectory.jsonl"),
+        ]
+    );
+    assert!(adapter
+        .ref_dependents(&file(DB_HELPER, "assignment.md"))
+        .is_empty());
+}
+
+/// 读不出不等于没有:某个会话的 agents/ 列不出时整家报错(scanner 冻结这一轮)、父子关系交 None,
+/// 而不是少列几条、被当成磁盘上已删(Codex review 2026-11-23)
+#[cfg(unix)]
+#[test]
+fn doubao_work_unreadable_sessions_freeze_instead_of_vanishing() {
+    use std::os::unix::fs::PermissionsExt;
+    setup();
+    let tmp = tempfile::tempdir().unwrap();
+    common::copy_tree(&fixture("doubao/Default"), &tmp.path().join("Default"));
+    let adapter = DoubaoAdapter::new().with_custom_root(tmp.path().join("Default"));
+    assert!(adapter.list_session_files().is_ok());
+    // trajectory.jsonl → system → <agent> → agents
+    let agents = common::doubao_agent_file(tmp.path(), "Default", DB_MAIN, "trajectory.jsonl")
+        .ancestors()
+        .nth(3)
+        .unwrap()
+        .to_path_buf();
+    fs::set_permissions(&agents, fs::Permissions::from_mode(0o000)).unwrap();
+    let listed = adapter.list_session_files();
+    let links = adapter.parent_links();
+    fs::set_permissions(&agents, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(listed.is_err(), "列不出的会话让这一家冻结,不是从列表里消失");
+    assert!(links.is_none());
+}
+
+#[test]
+fn doubao_work_profiles_can_be_located_and_removed_one_by_one() {
+    let env = setup();
+    let base = DoubaoAdapter::new();
+    // 选单个 profile 作 location:只列它的会话
+    let one = base.with_custom_root(env.doubao_user_data.join("Profile 1"));
+    let mut ids: Vec<String> = one
+        .list_session_files()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.native_id)
+        .collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        ["38455902111943950/x_helper", "38455902111943950/x_lead"]
+    );
+    // 停用一个 profile 剩下另一个
+    let kept = base
+        .excluding_data_roots(&one.data_roots())
+        .expect("profiles can be removed individually");
+    assert_eq!(kept.data_roots().len(), 1);
+    assert!(kept
+        .list_session_files()
+        .unwrap()
+        .iter()
+        .all(|r| !r.native_id.starts_with("38455902111943950")));
+}
+
 fn kilo_task_ref(tasks: &Path, task_id: &str) -> SessionFileRef {
     fs_ref(
         AgentId::Kilo,

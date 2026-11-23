@@ -7,6 +7,7 @@ pub mod craft;
 pub mod cursor;
 pub mod cursor_ide;
 pub mod devin;
+pub mod doubao;
 pub mod dsh;
 pub mod gemini;
 pub mod grok;
@@ -418,6 +419,7 @@ pub fn create_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(kilo::KiloLegacyAdapter::new()),
         Box::new(grok_bot::GrokBotAdapter::new()),
         Box::new(mimo::MimoAdapter::new()),
+        Box::new(doubao::DoubaoAdapter::new()),
     ]
 }
 

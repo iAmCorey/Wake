@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- New: Doubao Work tasks you run on your computer are indexed from the Doubao desktop app (`Doubao/<profile>/.doubao/agent_mode/workspace/.sessions`, read-only), with every request you made and the agent's tool calls. The organizer and helpers a task hands work to are listed under it, and the tool call that started one opens it. Tasks and helpers that run on Doubao's cloud computer aren't stored on your computer, so they aren't listed. There is no Open In, since Doubao Work has no command line, and deleting a session in Wake only hides it (#86, thanks @WingSky2022)
+
 ## [0.10.2] — 2026-10-25
 
 - New: ⌘K / Ctrl+K searches your memory files and skills too, each in its own tab next to sessions; press Tab to switch. The Memory and Skills pages get the same search box in the sidebar

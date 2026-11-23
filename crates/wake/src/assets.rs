@@ -70,6 +70,7 @@ brands!(
     "grok-bot",
     "mimo-code",
     "mimo-code-light",
+    "doubao-work",
 );
 
 fn lookup_product(path: &str) -> Option<&'static [u8]> {

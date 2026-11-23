@@ -228,7 +228,8 @@ fn kooky_cli_path() -> Option<&'static Path> {
 /// 注册就退 0,Wake 这边看不出失败——所以名单外必须改走 kooky-cli 的哑管道。
 /// 注意 Antigravity 不在里面:kooky 的 stores 表注释写明其 CLI 数据布局未经
 /// 核实、"Absent by design"。新增 agent 时按 kooky 那张表核对,别默认落进深链
-/// (2026-10 Kilo Code、MiMo Code 加入时核对过:kooky 都不认,走 kooky-cli)
+/// (2026-10 Kilo Code、MiMo Code 加入时核对过:kooky 都不认,走 kooky-cli;豆包工作没有命令行,
+/// 不给 Open In,也就用不到这里)
 const KOOKY_ROSTER: &[AgentId] = &[
     AgentId::ClaudeCode,
     AgentId::Codex,
