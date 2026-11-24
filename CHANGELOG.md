@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+- Fix: CodeBuddy Code no longer hides a question that arrives with editor context in front of it, and no longer counts teammate reports, hook follow-ups or compaction summaries as your messages (#88, thanks @XYZliang)
+- Fix: CodeBuddy Code shows the images you pasted, and sessions where nothing was said are no longer listed (#88, thanks @XYZliang)
+
 ## [0.10.3] — 2026-11-24
 
 - New: Doubao Work tasks you run on your computer are indexed from the Doubao desktop app (`Doubao/<profile>/.doubao/agent_mode/workspace/.sessions`, read-only), with every request you made and the agent's tool calls. The organizer and helpers a task hands work to are listed under it, and the tool call that started one opens it. Tasks and helpers that run on Doubao's cloud computer aren't stored on your computer, so they aren't listed. There is no Open In, since Doubao Work has no command line, and deleting a session in Wake only hides it (#86, thanks @WingSky2022)

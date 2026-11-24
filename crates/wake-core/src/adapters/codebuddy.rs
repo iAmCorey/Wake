@@ -28,8 +28,14 @@ use std::path::{Path, PathBuf};
 /// 已知的元数据行见 `KNOWN_SKIP`,表外计 unknown。`CODEBUDDY_CONFIG_DIR` 覆盖数据根(与 Qoder 的 QODER_CONFIG_DIR
 /// 同款:探到会话才采信)。
 ///
+/// 用户行不全是人打的字:IDE 上下文垫在提问前面(`row_content` 切开)、压缩摘要与各种内部
+/// 回灌也写成用户行(`internal_kind`);贴进来的图片按内容寻址存在 `<home>/blobs`(`blob_file`),
+/// 没有 home 的根(只选了 projects 目录、远程镜像)照旧占位;只有元数据的文件不列
+/// (`has_conversation`)。
+///
 /// 格式来源:官方 CLI 文档 + 三家独立实现(cc-switch / codex-host / codeg)
-/// 交叉核对,本机零会话,**未经真机验证**;fixture 合成。
+/// 交叉核对,本机零会话,**未经真机验证**;fixture 合成。上面那段用户行的规则来自
+/// PR #88(@XYZliang)在真实会话上的发现,由我们重写,同样没在本机核对过。
 ///
 /// WorkBuddy(腾讯的桌面 agent,与 CodeBuddy 同一内核)是本适配器的孪生实例
 /// (与 pi / omp 同款):`~/.workbuddy/projects` 同构树、`WORKBUDDY_CONFIG_DIR`
@@ -83,14 +89,182 @@ const KNOWN_SKIP: &[&str] = &[
     "model-usage",
     "credit-usage",
     "session-meta",
+    "context-usage",
+    "request-recovery",
 ];
+
+/// 不是对话内容的行:`KNOWN_SKIP` 加三种标题行
+fn is_metadata_row(typ: &str) -> bool {
+    KNOWN_SKIP.contains(&typ) || matches!(typ, "custom-title" | "ai-title" | "topic")
+}
+
+/// 判断有没有对话只看每行的 `type`,不建整棵 Value
+#[derive(serde::Deserialize)]
+struct RowType {
+    #[serde(rename = "type", default)]
+    typ: String,
+}
+
+/// 文件里有没有对话:读到第一条不是元数据的行就停。整份读完都只有元数据(开了会话没说话就
+/// 关了)才算没有;读不出来、有解不开的行(正在写的半行)都按有算——宁可多列一条空会话,
+/// 也不把正在写的会话藏起来
+fn has_conversation(path: &Path) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return true;
+    };
+    for row in jsonl_rows::<RowType, _>(BufReader::new(file)) {
+        let Ok(Some(row)) = row else {
+            return true;
+        };
+        if !is_metadata_row(&row.typ) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 图片旁边那块 `<image_local_path>…</image_local_path>`:写下它那台机器上的临时路径。只认
+/// 整块恰好是一个标签的;标签之间夹着话的不算,整块丢掉会连话一起丢
+fn is_image_label(text: &str) -> bool {
+    text.trim()
+        .strip_prefix("<image_local_path>")
+        .and_then(|rest| rest.strip_suffix("</image_local_path>"))
+        .is_some_and(|path| !path.contains('<'))
+}
 
 /// CodeBuddy 的 isGeneratedPlaceholderTitle:自动标题没东西可总结时写的占位,
 /// 显示它比回退到首条用户消息更糟
 fn is_placeholder_title(text: &str) -> bool {
-    text == "(No content)"
-        || text == "/compact"
-        || (text.starts_with("<image_local_path>") && text.ends_with("</image_local_path>"))
+    text == "(No content)" || text == "/compact" || is_image_label(text)
+}
+
+/// 开头那几段 `<system-reminder …>…</system-reminder>`(可以带属性)与其后的话,切成两截。
+/// 只切开头的,后面夹着的照旧留在话里;没有闭合标签的不切,整块仍按注入内容算
+fn split_leading_reminders(text: &str) -> (&str, &str) {
+    const OPEN: &str = "<system-reminder";
+    const CLOSE: &str = "</system-reminder>";
+    let text = text.trim_start();
+    let mut rest = text;
+    while let Some(after) = rest.strip_prefix(OPEN) {
+        // 标签名到这里为止,后面是 `>` 或属性,不是名字更长的别的标签
+        if !after.starts_with(|c: char| c == '>' || c.is_whitespace()) {
+            break;
+        }
+        let Some(end) = after.find(CLOSE) else {
+            break;
+        };
+        rest = after[end + CLOSE.len()..].trim_start();
+    }
+    (text[..text.len() - rest.len()].trim_end(), rest)
+}
+
+fn is_blob(block: &Value) -> bool {
+    block.get("type").and_then(Value::as_str) == Some("image_blob_ref")
+}
+
+/// `image_blob_ref` 在 blob 目录里的相对路径 `<id 前两位>/<id>.<扩展名>`。id 是内容的 sha256
+/// (64 位十六进制),扩展名取 blob_path 的文件名;blob_path 本身是写下它那台机器上的绝对路径,
+/// 不解引用。是不是图片由 `image_from_session_file` 按字节认
+fn blob_file(block: &Value) -> Option<PathBuf> {
+    let id = block.get("blob_id")?.as_str()?;
+    if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let name = path_tail(block.get("blob_path")?.as_str()?);
+    let ext = name.strip_prefix(id)?.strip_prefix('.')?;
+    (!ext.is_empty()).then(|| Path::new(&id[..2]).join(name))
+}
+
+/// 一行的内容块。blob 里的图片按 id 在 `blobs` 里解(解不出来、不解码时 `content_parts` 照常
+/// 占位,两种解析的消息条数一样)。用户行(`user`)每块开头的 IDE 上下文切出来另交(调用方单独
+/// 记一条 Meta——上下文里可能有用户选中的代码,别丢),有 blob 时去掉旁边的路径标签
+fn row_content(
+    row: &Value,
+    decode_images: bool,
+    blobs: Option<&Path>,
+    user: bool,
+) -> (String, ParsedContent) {
+    let blocks = match row.get("content").unwrap_or(&Value::Null) {
+        Value::Array(blocks) => blocks.as_slice(),
+        other => std::slice::from_ref(other),
+    };
+    let blobs = blobs.filter(|_| decode_images);
+    let has_blob = blocks.iter().any(is_blob);
+    let mut context = String::new();
+    let mut out = ParsedContent::default();
+    for block in blocks {
+        let decoded = match blobs {
+            Some(root) if is_blob(block) => {
+                blob_file(block).and_then(|file| image_from_session_file(root, &root.join(file)))
+            }
+            _ => None,
+        };
+        if let Some(image) = decoded {
+            out.push_image(image);
+            continue;
+        }
+        let mut part = content_parts(block, decode_images);
+        if user && part.images.is_empty() {
+            let (lead, said) = split_leading_reminders(&part.text);
+            if !lead.is_empty() {
+                if !context.is_empty() {
+                    context.push_str("\n\n");
+                }
+                context.push_str(lead);
+            }
+            if has_blob && is_image_label(said) {
+                continue;
+            }
+            if !lead.is_empty() {
+                part.text = said.to_string();
+            }
+        }
+        out.append(part);
+    }
+    (context, out)
+}
+
+/// 分类看的话:跳过开头的图片占位——扫描时不解码,图片是 `[image]`;详情里解码,图片没有字。
+/// 两种解析要判成同一种
+fn after_images(text: &str) -> &str {
+    let mut text = text;
+    while let Some(rest) = text.strip_prefix(IMAGE_PLACEHOLDER) {
+        text = rest.trim_start();
+    }
+    text
+}
+
+/// 记成用户行、却不是人打的字:压缩摘要归 CompactSummary,队友(别的 agent)的汇报、hook 的
+/// 回灌、后台任务通知、本地命令的输出归 Meta。providerData 上的标记优先,其次看剥掉 IDE 上下文
+/// 之后的开头
+fn internal_kind(row: &Value, text: &str) -> Option<MessageKind> {
+    let flag = |key: &str| {
+        row.get("providerData")
+            .and_then(|pd| pd.get(key))
+            .is_some_and(|v| !v.is_null() && *v != Value::Bool(false))
+    };
+    let starts = |prefixes: &[&str]| prefixes.iter().any(|p| text.starts_with(p));
+    if flag("isSummary") || starts(&["<cb_summary>", "<conversation_history_summary>"]) {
+        Some(MessageKind::CompactSummary)
+    } else if [
+        "isMeta",
+        "isCompactInternal",
+        "backgroundTaskNotification",
+        "teammateMessage",
+    ]
+    .into_iter()
+    .any(flag)
+        || starts(&[
+            "<teammate-message",
+            "<local-command-stdout>",
+            "A session-scoped Stop hook",
+            "Stop hook feedback:",
+        ])
+    {
+        Some(MessageKind::Meta)
+    } else {
+        None
+    }
 }
 
 /// providerData 里的模型名:优先人类可读的 requestModelName,回退 model id;
@@ -207,7 +381,12 @@ fn assistant_slot<'a>(
     p
 }
 
-fn parse_codebuddy_jsonl(path: &Path, decode_images: bool) -> Result<ParseResult> {
+/// `blobs`:贴进来的图片所在的 blob 目录(`<home>/blobs`),没有 home 的根给 None
+fn parse_codebuddy_jsonl(
+    path: &Path,
+    decode_images: bool,
+    blobs: Option<&Path>,
+) -> Result<ParseResult> {
     let _budget = transcript_image_decode_budget(decode_images);
     let file = fs::File::open(path)?;
     let reader = BufReader::with_capacity(1 << 20, file);
@@ -273,17 +452,30 @@ fn parse_codebuddy_jsonl(path: &Path, decode_images: bool) -> Result<ParseResult
                 match row.get("role").and_then(Value::as_str).unwrap_or("") {
                     "user" => {
                         flush_assistant(&mut pending, &mut out.messages, &mut tool_index);
-                        let ParsedContent { text, images } = content_of(&row, decode_images);
-                        if text.is_empty() && images.is_empty() {
+                        let (context, ParsedContent { text, images }) =
+                            row_content(&row, decode_images, blobs, true);
+                        let said = !text.is_empty() || !images.is_empty();
+                        if context.is_empty() && !said {
                             continue;
                         }
-                        let mut msg = text_msg(Role::User, &text, ts);
-                        msg.images = images;
-                        out.messages.push(msg);
+                        if !context.is_empty() {
+                            // 垫在前面的 IDE 上下文:单独一条 Meta,不当提问、不进搜索,内容照留
+                            let mut msg = text_msg(Role::User, &context, ts);
+                            msg.kind = MessageKind::Meta;
+                            out.messages.push(msg);
+                        }
+                        if said {
+                            let lead = after_images(&text);
+                            let mut msg = text_msg(Role::User, &text, ts);
+                            msg.kind = internal_kind(&row, lead).unwrap_or_else(|| user_kind(lead));
+                            msg.images = images;
+                            out.messages.push(msg);
+                        }
                     }
                     "assistant" => {
                         let p = assistant_slot(&mut out, &mut pending, &mut tool_index, ts, &row);
-                        p.content.append(content_of(&row, decode_images));
+                        p.content
+                            .append(row_content(&row, decode_images, blobs, false).1);
                     }
                     "system" => {
                         // 系统行折叠为 Meta,不参与计数
@@ -424,10 +616,14 @@ fn build_meta(agent: AgentId, r: &SessionFileRef, parsed: &ParseResult) -> Sessi
 }
 
 impl CodebuddyAdapter {
+    fn blobs(&self) -> Option<PathBuf> {
+        self.home.as_ref().map(|home| home.join("blobs"))
+    }
+
     /// 会话或子代理(子代理是 agent 派出去的,标题取边车记的任务说明)
     fn parse(&self, r: &SessionFileRef, decode_images: bool) -> Result<(SessionMeta, ParseResult)> {
         let path = Path::new(&r.file_path);
-        let parsed = parse_codebuddy_jsonl(path, decode_images)?;
+        let parsed = parse_codebuddy_jsonl(path, decode_images, self.blobs().as_deref())?;
         let mut meta = build_meta(self.agent, r, &parsed);
         mark_subagent(&mut meta, path);
         Ok((meta, parsed))
@@ -440,11 +636,16 @@ impl AgentAdapter for CodebuddyAdapter {
     }
 
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
-        Ok(list_project_tree_refs(&self.root, self.agent))
+        Ok(list_project_tree_refs(&self.root, self.agent)
+            .into_iter()
+            .filter(|r| has_conversation(Path::new(&r.file_path)))
+            .collect())
     }
 
     fn file_ref(&self, path: &Path) -> Option<SessionFileRef> {
+        // 判的是引用指向的转录:子代理边车(`.meta.json`)的事件也换成它的转录
         project_tree_file_ref(&self.root, self.agent, path)
+            .filter(|r| has_conversation(Path::new(&r.file_path)))
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
@@ -471,8 +672,9 @@ impl AgentAdapter for CodebuddyAdapter {
         r: &SessionFileRef,
         sidechain_id: &str,
     ) -> Result<Vec<TranscriptMessage>> {
+        let blobs = self.blobs();
         load_subagent(r, sidechain_id, |file| {
-            Ok(parse_codebuddy_jsonl(file, true)?.messages)
+            Ok(parse_codebuddy_jsonl(file, true, blobs.as_deref())?.messages)
         })
     }
 
@@ -523,5 +725,88 @@ impl AgentAdapter for CodebuddyAdapter {
 
     fn homes(&self) -> Vec<PathBuf> {
         self.home.iter().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn only_leading_reminders_are_split_off() {
+        let attr = "<system-reminder data-role=\"user-context\">open file</system-reminder>";
+        for (text, context, said) in [
+            (&*format!("{attr}\n问题\n  第二行"), attr, "问题\n  第二行"),
+            (
+                "<system-reminder>a</system-reminder> <system-reminder>b</system-reminder>x",
+                "<system-reminder>a</system-reminder> <system-reminder>b</system-reminder>",
+                "x",
+            ),
+            (
+                "<system-reminder>only</system-reminder>",
+                "<system-reminder>only</system-reminder>",
+                "",
+            ),
+            // 后面夹着的、没闭合的、名字更长的别的标签都不动
+            (
+                "问题 <system-reminder>c</system-reminder>",
+                "",
+                "问题 <system-reminder>c</system-reminder>",
+            ),
+            ("<system-reminder>unclosed", "", "<system-reminder>unclosed"),
+            (
+                "<system-reminders>x</system-reminders>",
+                "",
+                "<system-reminders>x</system-reminders>",
+            ),
+        ] {
+            assert_eq!(split_leading_reminders(text), (context, said), "{text}");
+        }
+    }
+
+    #[test]
+    fn image_labels_are_whole_blocks_only() {
+        assert!(is_image_label(
+            " <image_local_path>/tmp/a.png</image_local_path>\n"
+        ));
+        for text in [
+            "<image_local_path>a.png</image_local_path>\n请比较两张图片\n<image_local_path>b.png</image_local_path>",
+            "<image_local_path>a.png</image_local_path> 这张图",
+            "看 <image_local_path>a.png</image_local_path>",
+        ] {
+            assert!(!is_image_label(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn blob_paths_come_from_the_id_not_the_recorded_path() {
+        const ID: &str = "aa0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd";
+        let expected = |ext: &str| Some(Path::new("aa").join(format!("{ID}.{ext}")));
+        for (id, path, want) in [
+            (
+                ID,
+                format!("/remote/home/.codebuddy/blobs/aa/{ID}.PNG"),
+                expected("PNG"),
+            ),
+            (
+                ID,
+                format!(r"C:\Users\x\.codebuddy\blobs\aa\{ID}.jpg"),
+                expected("jpg"),
+            ),
+            // id 不是 64 位十六进制、文件名不是 <id>.<扩展名>,一律不认
+            ("../../outside", "outside.png".into(), None),
+            (&*ID.replace('a', "g"), "x.png".into(), None),
+            (ID, "/b/other.png".into(), None),
+            (ID, format!("/b/{ID}"), None),
+            (ID, format!("/b/{ID}."), None),
+        ] {
+            let block = json!({"type": "image_blob_ref", "blob_id": id, "blob_path": path});
+            assert_eq!(blob_file(&block), want, "{id} {path}");
+        }
+        assert_eq!(
+            blob_file(&json!({"type": "image_blob_ref", "blob_id": ID})),
+            None
+        );
     }
 }

@@ -7881,6 +7881,159 @@ fn codebuddy_lists_transcripts_and_their_subagents() {
     }
 }
 
+const CODEBUDDY_IDE_SESSION: &str = "cb000003-aaaa-bbbb-cccc-000000000003";
+
+fn codebuddy_ide_path(root: &Path, id: &str) -> PathBuf {
+    root.join("projects/Users-fixture-src-wakefx")
+        .join(format!("{id}.jsonl"))
+}
+
+/// 从 IDE 发起的会话(PR #88 的发现,我们重写):编辑器上下文垫在提问前面,切下来单独一条
+/// Meta(内容照留、不进搜索),提问照样是正文、进搜索、当标题;队友汇报、hook 回灌、Stop hook
+/// 反馈、本地命令输出都不算人说的话,压缩摘要归摘要;context-usage / request-recovery 是已知行
+#[test]
+fn codebuddy_ide_context_and_internal_rows() {
+    let _env = setup();
+    let root = fixture("codebuddy-ide");
+    let adapter = CodebuddyAdapter::new().with_custom_root(root.clone());
+    let r = adapter
+        .file_ref(&codebuddy_ide_path(&root, CODEBUDDY_IDE_SESSION))
+        .expect("an IDE session with messages is listed");
+    let s = adapter.parse_session(&r).unwrap();
+    let t = adapter.parse_transcript(&r).unwrap();
+    assert_seq_contract(adapter.as_ref(), &r);
+
+    use MessageKind::{CompactSummary, Meta, Text};
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        [
+            (Role::User, Meta), // 垫在提问前面的 IDE 上下文
+            (Role::User, Text),
+            (Role::Assistant, Text),
+            (Role::User, Meta),           // 队友汇报
+            (Role::User, Meta),           // hook 回灌(providerData.isMeta)
+            (Role::User, Meta),           // Stop hook feedback
+            (Role::User, CompactSummary), // <cb_summary>,isCompactInternal 也压不过它
+            (Role::User, Meta),           // 本地命令输出
+            (Role::User, Meta),           // 上下文
+            (Role::User, Text),           // slash 命令
+            (Role::User, Meta),           // 上下文
+            (Role::User, Text),           // 图片 + 话
+            (Role::User, Text),           // 只有图片
+            (Role::Assistant, Text),
+        ]
+    );
+    assert!(t.mainline[0].text.contains("QrCode.tsx open"), "上下文照留");
+    assert_eq!(
+        t.mainline[1].text,
+        "把二维码组件的轮询改成可取消的\n  顺便补一个测试"
+    );
+    assert!(t.mainline[9].text.starts_with("<command-message>goal"));
+    assert_eq!(s.meta.message_count, 6);
+    assert!(
+        s.meta.title.starts_with("把二维码组件的轮询改成可取消的"),
+        "{}",
+        s.meta.title
+    );
+    assert_eq!(s.meta.project_path, "/Users/fixture/src/wakefx");
+    assert_eq!(s.meta.tokens_used, Some(800 + 100 + 900 + 50));
+    assert_eq!(
+        s.unknown_line_count, 0,
+        "context-usage / request-recovery 是已知行"
+    );
+
+    let indexed: String = s
+        .units
+        .iter()
+        .map(|u| u.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(indexed.contains("把二维码组件的轮询改成可取消的"));
+    assert!(indexed.contains("ship the poll fix"));
+    for hidden in [
+        "QrCode.tsx open",
+        "another context",
+        "worker finished",
+        "hook follow-up",
+        "Stop hook feedback",
+        "stops on unmount",
+        "Goal set",
+        "image_local_path",
+    ] {
+        assert!(!indexed.contains(hidden), "{hidden} 不该进搜索");
+    }
+}
+
+/// 贴进来的图片按 blob id 在 `<home>/blobs` 里找:找得到就解码、旁边的路径标签去掉;只选了
+/// projects 目录的根没有 home,不解;文件没了或者链到 blob 目录外面,退回占位、消息条数不变
+#[test]
+fn codebuddy_blob_images_stay_inside_the_blob_store() {
+    let _env = setup();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    common::copy_tree(&fixture("codebuddy-ide"), root);
+    let session = codebuddy_ide_path(root, CODEBUDDY_IDE_SESSION);
+    let adapter = CodebuddyAdapter::new().with_custom_root(root.to_path_buf());
+    let r = adapter.file_ref(&session).unwrap();
+    let t = adapter.parse_transcript(&r).unwrap();
+    assert_eq!(t.mainline[11].images.len(), 1);
+    assert_eq!(t.mainline[11].images[0].media_type, "image/png");
+    assert_eq!(t.mainline[11].text, "这个截图里的按钮还是旧的");
+    assert_eq!(t.mainline[12].images.len(), 1);
+    assert!(t.mainline[12].text.is_empty());
+    let s = adapter.parse_session(&r).unwrap();
+    assert!(s
+        .units
+        .iter()
+        .any(|u| u.seq == 12 && u.text.contains("[image]")));
+
+    let bare = CodebuddyAdapter::new().with_custom_root(root.join("projects"));
+    let bare_ref = bare.file_ref(&session).unwrap();
+    assert!(bare.parse_transcript(&bare_ref).unwrap().mainline[12]
+        .images
+        .is_empty());
+
+    let blob =
+        root.join("blobs/aa/aa0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd.png");
+    let outside = root.join("outside.png");
+    fs::rename(&blob, &outside).unwrap();
+    let t = adapter.parse_transcript(&r).unwrap();
+    assert_eq!(t.mainline.len(), 14);
+    assert!(t.mainline[12].images.is_empty());
+    assert_eq!(t.mainline[12].text, "[image]");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&outside, &blob).unwrap();
+        let t = adapter.parse_transcript(&r).unwrap();
+        assert!(t.mainline[12].images.is_empty(), "链到 blob 目录外面的不读");
+    }
+}
+
+/// 只有元数据、一句话都没说的会话文件不列,列表与 file_ref 同一个判据;末尾半行没写完的照样列
+/// ——那可能是正在写的第一句
+#[test]
+fn codebuddy_metadata_only_files_are_not_sessions() {
+    let _env = setup();
+    let root = fixture("codebuddy-ide");
+    let adapter = CodebuddyAdapter::new().with_custom_root(root.clone());
+    let listed: Vec<String> = adapter
+        .list_session_files()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.native_id)
+        .collect();
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    for (id, is_session) in [
+        (CODEBUDDY_IDE_SESSION, true),
+        ("cb000004-aaaa-bbbb-cccc-000000000004", false),
+        ("cb000005-aaaa-bbbb-cccc-000000000005", true),
+    ] {
+        assert_eq!(listed.iter().any(|l| l == id), is_session, "list {id}");
+        let file_ref = adapter.file_ref(&codebuddy_ide_path(&root, id));
+        assert_eq!(file_ref.is_some(), is_session, "file_ref {id}");
+    }
+}
+
 /// WorkBuddy 是 CodeBuddy 的孪生实例(pi / omp 同款):同一解析核心,只有 agent
 /// 身份、key 前缀与数据根不同;没有 CLI,所以不给任何 resume 目标
 #[test]

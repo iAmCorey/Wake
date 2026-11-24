@@ -766,7 +766,7 @@ impl ParsedContent {
         self.images.extend(other.images);
     }
 
-    fn push_image(&mut self, mut image: ImageAttachment) {
+    pub fn push_image(&mut self, mut image: ImageAttachment) {
         image.text_offset = self.text.len();
         self.images.push(image);
     }
@@ -1081,8 +1081,9 @@ pub fn decode_data_uri(uri: &str) -> Option<ImageAttachment> {
 }
 
 /// 会话自己目录里的图片文件(Antigravity 的 `.user_uploaded/`)→ 图片附件。只给 adapter 自己
-/// 枚举出来的文件用,**不要拿转录内容里写的路径来调**——那条路一律不解引用本地路径(见
-/// `image_parser_never_dereferences_local_paths`)。解开符号链接后必须仍在 `session` 目录里:
+/// 枚举出来的文件、或按内容寻址的 id 在自己数据目录里拼出的路径用(CodeBuddy 的 blobs:
+/// 只认十六进制 id 与图片扩展名),**不要拿转录内容里写的路径来调**——那条路一律不解引用
+/// 本地路径(见 `image_parser_never_dereferences_local_paths`)。解开符号链接后必须仍在 `session` 目录里:
 /// 远程镜像原样保留符号链接,指到外面的会读到本机的文件(中间哪一层目录是链接都一样)。
 /// 类型按字节嗅探;解码预算与 base64 那条路同一份(调用方的解析要开着
 /// `transcript_image_decode_budget`),按 stat 到的大小先问预算再读
