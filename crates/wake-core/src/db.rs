@@ -252,8 +252,15 @@ CREATE TABLE IF NOT EXISTS claimed_sessions (
 /// "19" = Claude Code 命令行自己起的标题(`ai-title`,#74)在没有 custom-title 时当标题(原先退回
 ///       首条提问);分支照抄来的标题与每一份更早的同根文件比,不只比原件——分支的分支抄的是
 ///       中间那份的名字;2.1 起的记账记录(agent-name、cost-state 等)不再计未知行。"18" 推上
-///       main 时还没有这几条,跑过那时构建的库已经戳着它,所以另起一档
-pub const FTS_FORMAT: &str = "19";
+///       main 时还没有这几条,跑过那时构建的库已经戳着它,所以另起一档;
+/// "23" = CodeBuddy / WorkBuddy 的用户行先剥开头的 IDE 上下文再判(提问不再跟着上下文成 Meta),
+///       压缩摘要、队友汇报、hook 回灌、本地命令输出不算提问(PR #88 的发现),老行靠这轮重解析
+///       写对。"20"–"22" 是没合入的 PR #88 分支各提交用过的值,跑过它的库可能戳着其中任一个,
+///       换代判据是精确不等,所以都跳过;
+/// "24" = 垫在用户提问前面的 `<system-reminder>`(Claude 桌面端的 "Linked sessions now…"、Qoder 同款)
+///       切下来单独一条 Meta,提问不再跟着成 Meta、照常进搜索与提问数;CodeBuddy 改用同一个切法。
+///       "23" 推上 main 时还没有这条,所以另起一档
+pub const FTS_FORMAT: &str = "24";
 
 /// 正文里中日韩字符的两字组索引(issue #79):trigram 对两个字的词 MATCH 不出东西,而中文最常搜的
 /// 恰恰是两字词。只收有两个以上相连中日韩字符的行,文本是 `cjk_bigrams` 切好、空格隔开的两字组,
@@ -671,6 +678,12 @@ impl IndexLock {
             Err(TryLockError::WouldBlock) => Ok(true),
             Err(TryLockError::Error(e)) => Err(e),
         }
+    }
+
+    /// 有没有一个活着的 Wake 窗口用着这个库:只探 `.lock.app`,不碰主锁、不写自述。Windows /
+    /// Linux 上点开的 `wake://` 链接据此决定交给它还是自己起(`links`);探不出来按没有算
+    pub fn app_running(db: &Path) -> bool {
+        Self::app_lock_is_held(&Self::path_for(db)).unwrap_or(false)
     }
 
     /// 等着拿(GUI 启动用,阻塞调用方,放在开窗之前):持有者是 CLI 写命令就隔 100ms

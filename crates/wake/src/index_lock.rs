@@ -48,6 +48,12 @@ pub fn take(db: &Path) -> Option<Arc<IndexLock>> {
             }
         }
     };
+    // 点了 wake:// 链接时 Wake 恰好正在启动:两个进程都以为自己是第一个,后拿锁的这个把链接
+    // 交给先拿到的、安静退出,别弹"另一个进程在用"(#82;持有者是 CLI 时 forward_to_running
+    // 探不到 GUI 锁,照常报)
+    if crate::links::forward_to_running(db) {
+        std::process::exit(0);
+    }
     wake_core::services::terminal::show_fatal_alert(&crate::tf!(
         "Wake couldn't open its index at {}: another process is using it ({}). Wait for it to finish or quit it, then open Wake again.",
         db.display(),

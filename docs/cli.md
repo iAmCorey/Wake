@@ -394,13 +394,14 @@ Numeric options outside their range are clamped, not rejected: `--limit 999` on 
 
 ## Agent ids
 
-`claude-code`, `codex`, `grok`, `grok-bot`, `dsh`, `cursor`, `opencode`, `pi`, `omp`, `kiro`, `kimi`, `gemini`, `copilot`, `antigravity`, `qoder`, `hermes`, `openclaw`, `codebuddy`, `workbuddy`, `zcode`, `craft-agents`, `devin`, `kilo`, `mimo-code`, `qwenwork`. Display names (`"Claude Code"`) and a few aliases (`claude`, `deepseek`, `craft`, `mimo`) work too.
+`claude-code`, `codex`, `grok`, `grok-bot`, `dsh`, `cursor`, `opencode`, `pi`, `omp`, `kiro`, `kimi`, `gemini`, `copilot`, `antigravity`, `qoder`, `hermes`, `openclaw`, `codebuddy`, `workbuddy`, `zcode`, `craft-agents`, `devin`, `kilo`, `mimo-code`, `doubao-work`, `qwenwork`. Display names (`"Claude Code"`) and a few aliases (`claude`, `deepseek`, `craft`, `mimo`, `doubao`) work too.
 
 ## Session keys and references
 
 - Local sessions: `<agent>:<native id>`, for example `codex:0195c2a1-…`.
 - Sessions mirrored from a remote host: `<agent>:<host>:<native id>`.
 - References: `wake://session/<key>#<seq>` point at one message; `show` accepts them and starts the page there.
+- References are also links: opening one (clicking it in a terminal, or `open 'wake://session/…'`) shows that session in Wake scrolled to that message. `wake://session/<key>` without `#<seq>` opens it at its latest messages, and `wake://memory/…` opens a memory file.
 
 The native id is the one the agent's own `--resume` flag expects.
 

@@ -2,6 +2,7 @@ pub mod adapters;
 pub mod cleanup;
 pub mod cli;
 pub mod db;
+pub mod links;
 pub mod mcp;
 pub mod models;
 pub mod remote;

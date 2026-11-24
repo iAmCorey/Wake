@@ -79,6 +79,31 @@ pub fn jsonl_rows<T: serde::de::DeserializeOwned, R: std::io::BufRead>(
     })
 }
 
+/// `jsonl_rows` 的预筛版:行里没有 `needle` 的不交给 serde、直接跳过(不给 `Ok(None)`)——在大文件里
+/// 只找少数几行时省掉逐行解析(豆包工作在转录里找 `create_agent` 的结果)。读错误规则相同
+pub fn jsonl_rows_containing<'a, T, R>(
+    reader: R,
+    needle: &'a str,
+) -> impl Iterator<Item = std::io::Result<Option<T>>> + 'a
+where
+    T: serde::de::DeserializeOwned + 'a,
+    R: std::io::BufRead + 'a,
+{
+    jsonl_lines(reader).filter_map(move |line| match line {
+        Ok(Some(line)) if !line.contains(needle) => None,
+        Ok(line) => Some(Ok(line.and_then(|line| serde_json::from_str(&line).ok()))),
+        Err(e) => Some(Err(e)),
+    })
+}
+
+/// 读不读得出:不存在(含"中间某段不是目录")是确定没有,别的是这一刻读不出
+pub fn is_absent(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
 /// `BufRead::lines` 加上上面那条读错误规则:坏 UTF-8 的行字节已经读过,交成 `Ok(None)` 接着读
 fn jsonl_lines<R: std::io::BufRead>(reader: R) -> JsonlLines<R> {
     JsonlLines {
@@ -741,7 +766,7 @@ impl ParsedContent {
         self.images.extend(other.images);
     }
 
-    fn push_image(&mut self, mut image: ImageAttachment) {
+    pub fn push_image(&mut self, mut image: ImageAttachment) {
         image.text_offset = self.text.len();
         self.images.push(image);
     }
@@ -1056,8 +1081,9 @@ pub fn decode_data_uri(uri: &str) -> Option<ImageAttachment> {
 }
 
 /// 会话自己目录里的图片文件(Antigravity 的 `.user_uploaded/`)→ 图片附件。只给 adapter 自己
-/// 枚举出来的文件用,**不要拿转录内容里写的路径来调**——那条路一律不解引用本地路径(见
-/// `image_parser_never_dereferences_local_paths`)。解开符号链接后必须仍在 `session` 目录里:
+/// 枚举出来的文件、或按内容寻址的 id 在自己数据目录里拼出的路径用(CodeBuddy 的 blobs:
+/// 只认十六进制 id 与图片扩展名),**不要拿转录内容里写的路径来调**——那条路一律不解引用
+/// 本地路径(见 `image_parser_never_dereferences_local_paths`)。解开符号链接后必须仍在 `session` 目录里:
 /// 远程镜像原样保留符号链接,指到外面的会读到本机的文件(中间哪一层目录是链接都一样)。
 /// 类型按字节嗅探;解码预算与 base64 那条路同一份(调用方的解析要开着
 /// `transcript_image_decode_budget`),按 stat 到的大小先问预算再读
@@ -1198,6 +1224,58 @@ pub fn strip_image_tags(text: &str) -> String {
     }
     out.push_str(rest);
     out.trim().to_string()
+}
+
+/// 按文件 (mtime, size) 缓存的读取结果,一个路径一格(`MtimeCache` 的按路径版;边车、会话头这类
+/// 每轮扫描、每批监听都要再问一遍的小文件)。`stamp` 是调用方刚 stat 到的戳,None = 文件不在,给空的;
+/// 戳没变给缓存;读的那一刻文件刚好没了也给空的。**读不出报错,不交回上次读到的**:调用方会拿刚 stat
+/// 到的新戳记进引用,旧内容配上新戳入库,文件不再变就再也不会重读(当成"没有"同理,2026-11-23
+/// Codex review)——报错让这一次解析失败,下一轮再来
+pub struct StampCache<T>(
+    std::sync::Mutex<
+        std::collections::HashMap<std::path::PathBuf, ((i64, i64), std::sync::Arc<T>)>,
+    >,
+);
+
+impl<T> Default for StampCache<T> {
+    fn default() -> Self {
+        Self(std::sync::Mutex::new(std::collections::HashMap::new()))
+    }
+}
+
+impl<T: Default> StampCache<T> {
+    pub fn get(
+        &self,
+        path: &std::path::Path,
+        stamp: Option<(i64, i64)>,
+        read: impl FnOnce(&std::path::Path) -> std::io::Result<T>,
+    ) -> std::io::Result<std::sync::Arc<T>> {
+        let Some(stamp) = stamp else {
+            return Ok(std::sync::Arc::default());
+        };
+        if let Some((seen, value)) = self.0.lock().unwrap().get(path) {
+            if *seen == stamp {
+                return Ok(value.clone());
+            }
+        }
+        match read(path) {
+            Ok(value) => {
+                let value = std::sync::Arc::new(value);
+                self.0
+                    .lock()
+                    .unwrap()
+                    .insert(path.to_path_buf(), (stamp, value.clone()));
+                Ok(value)
+            }
+            Err(e) if is_absent(&e) => Ok(std::sync::Arc::default()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// 只留 `keep` 认的路径(全量列会话时修剪掉已经不在的)
+    pub fn retain(&self, keep: impl Fn(&std::path::Path) -> bool) {
+        self.0.lock().unwrap().retain(|path, _| keep(path));
+    }
 }
 
 /// 按 mtime 失效的单值缓存(边车映射/SQLite 全表在一轮扫描内的重复调用)。
@@ -1462,6 +1540,78 @@ pub(crate) fn tag_inner(text: &str, tag: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// 开头那几段 `<system-reminder …>…</system-reminder>`(可以带属性)与其后的话,切成两截。
+/// 只切开头的,后面夹着的照旧留在话里;没有闭合标签的不切
+fn split_leading_reminders(text: &str) -> (&str, &str) {
+    const OPEN: &str = "<system-reminder";
+    const CLOSE: &str = "</system-reminder>";
+    let text = text.trim_start();
+    let mut rest = text;
+    while let Some(after) = rest.strip_prefix(OPEN) {
+        // 标签名到这里为止,后面是 `>` 或属性,不是名字更长的别的标签
+        if !after.starts_with(|c: char| c == '>' || c.is_whitespace()) {
+            break;
+        }
+        let Some(end) = after.find(CLOSE) else {
+            break;
+        };
+        rest = after[end + CLOSE.len()..].trim_start();
+    }
+    (text[..text.len() - rest.len()].trim_end(), rest)
+}
+
+/// 人说的话开头垫着的宿主状态与上下文(Claude 桌面端的 "Linked sessions now…"、CodeBuddy IDE 的
+/// 编辑器上下文,都是 `<system-reminder>`)。整条以 `<system-` 开头会被 `is_injected_user_content`
+/// 判成注入内容,话跟着不见——切下来单独推一条 Meta(内容照留)进 `messages`,交回剩下的再判;
+/// 图片的正文偏移随之平移。开头的图片占位先跳过(`after_image_placeholders`):不然图片在前时,扫描
+/// (不解码,图片是 `[image]`)不切、详情(解码,图片没有字)切,两边消息条数对不上、seq 错位。
+/// 宿主自己合成的消息开头也垫着它(桌面端的 "Background (from the session that started this
+/// one)…"),那种整条照旧是注入内容,调用方别对它调(Claude 系看 `from_human`)
+pub fn push_leading_context(
+    mut content: ParsedContent,
+    ts: i64,
+    messages: &mut Vec<TranscriptMessage>,
+) -> ParsedContent {
+    let rest = after_image_placeholders(&content.text);
+    let (lead, said) = split_leading_reminders(rest);
+    if lead.is_empty() {
+        return content;
+    }
+    let mut context = text_msg(Role::User, lead, ts);
+    context.kind = MessageKind::Meta;
+    messages.push(context);
+    let start = content.text.len() - rest.len();
+    let end = content.text.len() - said.len();
+    content.text.replace_range(start..end, "");
+    for image in &mut content.images {
+        image.text_offset = match image.text_offset {
+            offset if offset >= end => offset - (end - start),
+            offset => offset.min(start),
+        };
+    }
+    content
+}
+
+/// 跳过开头的图片占位。扫描不解码时图片是 `[image]`,详情解码时图片没有字:按开头判断的地方
+/// (分类、切上下文)两种解析要判成一样
+pub fn after_image_placeholders(text: &str) -> &str {
+    let mut text = text.trim_start();
+    while let Some(rest) = text.strip_prefix(IMAGE_PLACEHOLDER) {
+        text = rest.trim_start();
+    }
+    text
+}
+
+/// Claude Code 系转录(Claude、Qoder)的一行是不是人说的:`turnOrigin` / `origin.kind` 记了 human
+/// 以外的来源(桌面端合成的 host_synthetic、经 SDK 塞进来的 sdk)就不是;都没记的(老版本)算人说的
+pub fn from_human(row: &Value) -> bool {
+    ["/turnOrigin", "/origin/kind"].iter().all(|key| {
+        row.pointer(key)
+            .and_then(Value::as_str)
+            .is_none_or(|origin| origin == "human")
+    })
+}
+
 /// IDE/CLI 注入型"用户"消息:非用户手打,详情里应归 Meta 折叠,不参与标题推导。
 pub fn is_injected_user_content(text: &str) -> bool {
     let t = text.trim_start();
@@ -1547,6 +1697,39 @@ pub fn make_preview(input: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 戳没变给缓存;读不出报错、不交回旧内容(旧内容配上新戳入库就再也不会重读);文件不在给空的
+    #[test]
+    fn stamp_cache_rereads_on_change_and_never_serves_stale_content() {
+        let cache: StampCache<String> = StampCache::default();
+        let path = std::path::Path::new("/x/assignment.md");
+        let reads = std::cell::Cell::new(0);
+        let read = |text: &'static str| {
+            let reads = &reads;
+            move |_: &std::path::Path| {
+                reads.set(reads.get() + 1);
+                Ok(text.to_string())
+            }
+        };
+        assert_eq!(
+            *cache.get(path, Some((1, 5)), read("first")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            *cache.get(path, Some((1, 5)), read("unused")).unwrap(),
+            "first"
+        );
+        assert_eq!(reads.get(), 1, "戳没变不重读");
+        let denied = |_: &std::path::Path| -> std::io::Result<String> {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        };
+        assert!(cache.get(path, Some((2, 9)), denied).is_err());
+        let gone = |_: &std::path::Path| -> std::io::Result<String> {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        };
+        assert_eq!(*cache.get(path, Some((3, 9)), gone).unwrap(), "");
+        assert_eq!(*cache.get(path, None, read("unused")).unwrap(), "");
+    }
 
     /// Claude Code 后台任务结束的通知是注入内容,不是提问;正文里提到这个词的照算人话
     #[test]
@@ -1639,6 +1822,114 @@ mod tests {
         // 到上限后不再拼接,也不再反复 clip
         merge_into_last_assistant(&mut messages, 4, content(""), "more");
         assert_eq!(messages[1].thinking.as_deref(), Some(thinking.as_str()));
+    }
+
+    #[test]
+    fn only_leading_reminders_are_split_off() {
+        let attr = "<system-reminder data-role=\"user-context\">open file</system-reminder>";
+        for (text, context, said) in [
+            (&*format!("{attr}\n问题\n  第二行"), attr, "问题\n  第二行"),
+            (
+                "<system-reminder>a</system-reminder> <system-reminder>b</system-reminder>x",
+                "<system-reminder>a</system-reminder> <system-reminder>b</system-reminder>",
+                "x",
+            ),
+            (
+                "<system-reminder>only</system-reminder>",
+                "<system-reminder>only</system-reminder>",
+                "",
+            ),
+            // 后面夹着的、没闭合的、名字更长的别的标签都不动
+            (
+                "问题 <system-reminder>c</system-reminder>",
+                "",
+                "问题 <system-reminder>c</system-reminder>",
+            ),
+            ("<system-reminder>unclosed", "", "<system-reminder>unclosed"),
+            (
+                "<system-reminders>x</system-reminders>",
+                "",
+                "<system-reminders>x</system-reminders>",
+            ),
+        ] {
+            assert_eq!(split_leading_reminders(text), (context, said), "{text}");
+        }
+    }
+
+    /// 切下来的上下文成一条 Meta,剩下的话交回、图片的正文偏移跟着平移;没有上下文时原样交回
+    #[test]
+    fn leading_context_becomes_its_own_meta_message() {
+        let mut content = ParsedContent::default();
+        content.push_text("<system-reminder>status</system-reminder>");
+        content.push_image(ImageAttachment {
+            media_type: "image/png".into(),
+            bytes: vec![1],
+            text_offset: 0,
+        });
+        content.push_text("看下部署成功没有");
+        let mut messages = Vec::new();
+        let said = push_leading_context(content, 7, &mut messages);
+        assert_eq!(said.text, "看下部署成功没有");
+        assert_eq!(said.images[0].text_offset, 0);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MessageKind::Meta);
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(
+            messages[0].text,
+            "<system-reminder>status</system-reminder>"
+        );
+        assert_eq!(messages[0].timestamp, Some(7));
+
+        let mut plain = ParsedContent::default();
+        plain.push_text("问题");
+        let said = push_leading_context(plain, 7, &mut messages);
+        assert_eq!(said.text, "问题");
+        assert_eq!(messages.len(), 1);
+    }
+
+    /// 图片在前:不解码(扫描,图片是 `[image]`)与解码(详情,图片没有字)切法一样,上下文都单独
+    /// 一条,剩下的话里图片占位或图片照留
+    #[test]
+    fn leading_context_ignores_leading_image_placeholders() {
+        let text = "<system-reminder>status</system-reminder>\n截图里这个按钮对吗";
+        let mut scanned = ParsedContent::default();
+        scanned.push_text(IMAGE_PLACEHOLDER);
+        scanned.push_text(text);
+        let mut shown = ParsedContent::default();
+        shown.push_image(ImageAttachment {
+            media_type: "image/png".into(),
+            bytes: vec![1],
+            text_offset: 0,
+        });
+        shown.push_text(text);
+
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        let scanned = push_leading_context(scanned, 1, &mut a);
+        let shown = push_leading_context(shown, 1, &mut b);
+        assert_eq!((a.len(), b.len()), (1, 1));
+        assert_eq!(a[0].text, b[0].text);
+        assert_eq!(scanned.text, "[image]\n\n截图里这个按钮对吗");
+        assert_eq!(shown.text, "截图里这个按钮对吗");
+        assert_eq!(shown.images[0].text_offset, 0);
+    }
+
+    #[test]
+    fn rows_are_human_unless_an_origin_says_otherwise() {
+        for (row, human) in [
+            (serde_json::json!({}), true),
+            (
+                serde_json::json!({"turnOrigin": "human", "origin": {"kind": "human"}}),
+                true,
+            ),
+            (serde_json::json!({"turnOrigin": "host_synthetic"}), false),
+            (serde_json::json!({"turnOrigin": "sdk"}), false),
+            (
+                serde_json::json!({"origin": {"kind": "task-notification"}}),
+                false,
+            ),
+        ] {
+            assert_eq!(from_human(&row), human, "{row}");
+        }
     }
 
     #[test]

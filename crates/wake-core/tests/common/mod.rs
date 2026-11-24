@@ -485,6 +485,48 @@ pub fn electron_user_data(home: &Path, app: &str) -> PathBuf {
     base.join(app)
 }
 
+/// 豆包电脑版的用户数据目录,与 adapter 的 `doubao::user_data_dirs()` 第一处同一个位置(那个函数读
+/// 进程的 HOME,摆 fixture 时还没指到假 HOME)
+pub fn doubao_user_data(home: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        home.join("AppData")
+            .join("Local")
+            .join("Doubao")
+            .join("User Data")
+    } else {
+        electron_user_data(home, "Doubao")
+    }
+}
+
+/// 豆包工作:检入的明文树(两个用过任务模式的 profile)原样拷进用户数据目录,另放一个不是
+/// profile 的 Chromium 目录。返回用户数据目录
+pub fn stage_doubao(home: &Path) -> PathBuf {
+    let user_data = doubao_user_data(home);
+    copy_tree(&fixture("doubao"), &user_data);
+    fs::create_dir_all(user_data.join("Crashpad")).expect("mkdir doubao crashpad");
+    user_data
+}
+
+/// 豆包工作一个 agent 的文件:`<用户数据>/<profile>/.doubao/agent_mode/workspace/.sessions/<会话>/
+/// agents/<agent>/system/<文件>`,`id` 是会话那条的原生 id `<会话>/<agent>`;逐段拼(Windows 上是
+/// 反斜杠路径)
+pub fn doubao_agent_file(user_data: &Path, profile: &str, id: &str, file: &str) -> PathBuf {
+    let (session, agent) = id.split_once('/').expect("doubao id is <session>/<agent>");
+    let mut path = user_data.join(profile);
+    path.extend([
+        ".doubao",
+        "agent_mode",
+        "workspace",
+        ".sessions",
+        session,
+        "agents",
+        agent,
+        "system",
+        file,
+    ]);
+    path
+}
+
 /// `<home>/…/<编辑器>/User/globalStorage`:VS Code 系编辑器的 globalStorage
 pub fn vscode_global_storage(home: &Path, editor: &str) -> PathBuf {
     electron_user_data(home, editor)

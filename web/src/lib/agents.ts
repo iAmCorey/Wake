@@ -35,6 +35,7 @@ export const AGENTS: Agent[] = [
   { id: 'devin', name: 'Devin', icon: 'devin', color: '#3BB3F1', where: '~/.local/share/devin' },
   { id: 'kilo', name: 'Kilo Code', icon: 'kilo', color: '#C8C035', where: '~/.local/share/kilo + globalStorage' },
   { id: 'mimo-code', name: 'MiMo Code', icon: 'mimo-code', color: '#FF6900', where: '~/.local/share/mimocode' },
+  { id: 'doubao-work', name: 'Doubao Work', icon: 'doubao-work', color: '#367B7D', where: 'Doubao/<profile>/.doubao/agent_mode' },
   { id: 'qwenwork', name: '千问办公', icon: 'qwenwork', color: '#0B8A4C', where: '~/.qwenworkcn/projects' },
 ];
 

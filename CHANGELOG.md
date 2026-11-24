@@ -4,6 +4,18 @@
 
 - New: 千问办公 (Qwen Work) sessions are indexed from `~/.qwenworkcn/projects`, together with the ones its predecessor QoderWork CN left in `~/.qoderworkcn/projects`; a session that exists in both is listed once. Prompts and titles show what you typed, not the system reminder the app puts in front of it, and the app's background memory-compaction and command-check runs are left out. No Open In, since it has no command line (#81, thanks @245678000000)
 - New: Tasks you ran in the Qoder IDE or Qoder CN (`~/.qoder/projects/*/transcript`) are listed under Qoder CLI with their full messages and tool calls (#81, thanks @245678000000)
+- New: The transcript shows where system messages such as injected context and hook output were hidden; open the note to read them
+- Fix: Questions you sent from the Claude app's Code tab no longer disappear when the app puts a status note in front of them; they show in the transcript, search and Insights again
+- Fix: CodeBuddy Code no longer hides a question that arrives with editor context in front of it, and no longer counts teammate reports, hook follow-ups or compaction summaries as your messages (#88, thanks @XYZliang)
+- Fix: CodeBuddy Code shows the images you pasted, and sessions where nothing was said are no longer listed (#88, thanks @XYZliang)
+
+## [0.10.3] — 2026-11-24
+
+- New: Doubao Work tasks you run on your computer are indexed from the Doubao desktop app (`Doubao/<profile>/.doubao/agent_mode/workspace/.sessions`, read-only), with every request you made and the agent's tool calls. The organizer and helpers a task hands work to are listed under it, and the tool call that started one opens it. Tasks and helpers that run on Doubao's cloud computer aren't stored on your computer, so they aren't listed. There is no Open In, since Doubao Work has no command line, and deleting a session in Wake only hides it (#86, thanks @WingSky2022)
+- New: `wake://session/<key>` links open that session in Wake, so other tools can send you straight to it; add `#<seq>` to jump to a message, and `wake://memory/<key>` opens a memory file. The references Wake's MCP server and `wake-cli` print are these links, so you can click them. A link opened while Wake is running goes to the open window (#82, thanks @suiyun08)
+- Fix: Open In → Warp resumes the session in a new Warp window instead of doing nothing (#84, thanks @adnabb)
+- Fix: Open In resumes Codex sessions from another Codex folder you added in Session locations (one you start Codex with through `CODEX_HOME`) using that folder, instead of Codex not finding them. Codex Desktop isn't offered for these sessions, since it only opens its own folder (#83, thanks @adnabb)
+- Fix: On Windows, Open In no longer breaks on folder names with a curly apostrophe (’) when it opens PowerShell
 
 ## [0.10.2] — 2026-10-25
 

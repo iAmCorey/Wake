@@ -25,16 +25,18 @@ cp "$TARGET_DIR/release/wake-mcp" "$STAGE/wake-mcp"
 cp "$TARGET_DIR/release/wake-cli" "$STAGE/wake-cli"
 cp "$ASSETS/icon.svg" "$STAGE/wake.svg"
 
-# 2. .desktop(StartupWMClass 对齐 main.rs 的 app_id = "wake")
+# 2. .desktop(StartupWMClass 对齐 main.rs 的 app_id = "wake")。MimeType 把 wake:// 链接
+# 登记给 Wake(#82),系统打开链接时以 `wake <链接>` 起它(%u),已在跑就由它转给那个窗口
 cat > "$STAGE/wake.desktop" <<'DESKTOP'
 [Desktop Entry]
 Type=Application
 Name=Wake
 Comment=Browse, search and resume your coding agent sessions
-Exec=wake
+Exec=wake %u
 Icon=wake
 Terminal=false
 Categories=Development;Utility;
+MimeType=x-scheme-handler/wake;
 StartupWMClass=wake
 DESKTOP
 
@@ -48,10 +50,12 @@ install -Dm755 wake-mcp "$HOME/.local/bin/wake-mcp"
 install -Dm755 wake-cli "$HOME/.local/bin/wake-cli"
 # 桌面项写绝对路径:~/.local/bin 若是本次新建的,图形会话的 PATH 里还没有它,
 # Exec=wake 会找不到程序直到重新登录(deb 装 /usr/bin 不受此累,保持裸名)
-sed "s|^Exec=wake$|Exec=\"$HOME/.local/bin/wake\"|" wake.desktop \
+sed "s|^Exec=wake %u$|Exec=\"$HOME/.local/bin/wake\" %u|" wake.desktop \
   | install -Dm644 /dev/stdin "$HOME/.local/share/applications/wake.desktop"
 install -Dm644 wake.svg "$HOME/.local/share/icons/hicolor/scalable/apps/wake.svg"
 command -v update-desktop-database >/dev/null && update-desktop-database "$HOME/.local/share/applications" || true
+# wake:// 链接交给 Wake(deb 装的由系统按 .desktop 的 MimeType 自己认)
+command -v xdg-mime >/dev/null && xdg-mime default wake.desktop x-scheme-handler/wake || true
 echo "Installed. Make sure ~/.local/bin is on your PATH, then run: wake (or wake-cli --help)"
 INSTALL
 chmod +x "$STAGE/install.sh"

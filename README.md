@@ -30,6 +30,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex` and many other fo
 - **Insights** — activity heatmap, streaks, weekly trends, and your top agents, projects and models
 - **Remote hosts** — mirror the sessions on your other machines over SSH
 - **MCP and CLI** — `wake-mcp` and `wake-cli` let any agent search your history and read transcripts
+- **Links** — `wake://session/…` opens that session in Wake from a terminal, your notes or a chat; the MCP and CLI print them
 
 ![Full-text search across every agent's sessions](imgs/screenshot-2.webp)
 
@@ -62,6 +63,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex` and many other fo
 | Kilo Code | `~/.local/share/kilo/kilo.db` + the legacy extension's `globalStorage/kilocode.kilo-code/tasks` | ✅ | ✅ |
 | Grok Bot | the desktop app's cache (`Grok Bot/sand-client-persistence`) | — | — |
 | MiMo Code | `~/.local/share/mimocode/mimocode.db` | ✅ | — |
+| Doubao Work | the Doubao desktop app's agent mode (`Doubao/<profile>/.doubao/agent_mode/workspace/.sessions`) | — | — |
 | 千问办公 (Qwen Work) | `~/.qwenworkcn/projects/*/*.jsonl` + the QoderWork CN folder it migrated from (`~/.qoderworkcn/projects`) | ✅ | — |
 
 Agents' own environment variables (`CODEX_HOME`, `XDG_DATA_HOME`, …) are respected, and Settings → Session locations adds folders anywhere else.
@@ -75,6 +77,7 @@ Agents' own environment variables (`CODEX_HOME`, `XDG_DATA_HOME`, …) are respe
 - **Grok Bot** — conversations live in Grok Bot's cloud; Wake reads the latest messages the desktop app keeps on this computer, a conversation it no longer keeps stays listed with its last message, and deleting one in Wake only hides it
 - **千问办公** — runs the Qoder engine; its background memory-compaction and command-check runs are skipped, and sessions are titled by the first thing you typed
 - **MiMo Code** — a session imported from Claude Code, Codex or OpenCode is listed once you continue it in MiMo Code, without the imported part
+- **Doubao Work** — tasks run on your computer are indexed, with the helpers they hand work to listed under them; tasks and helpers that run on Doubao's cloud computer aren't stored locally. Deleting one in Wake only hides it
 
 Not supported: Windsurf and Trae (encrypted), Amp, Factory and Warp (cloud only).
 

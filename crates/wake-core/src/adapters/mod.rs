@@ -7,6 +7,7 @@ pub mod craft;
 pub mod cursor;
 pub mod cursor_ide;
 pub mod devin;
+pub mod doubao;
 pub mod dsh;
 pub mod gemini;
 pub mod grok;
@@ -42,6 +43,9 @@ use std::path::Path;
 
 /// 从子会话转录的路径推它父会话的原生 id(`AgentAdapter::parent_in_path`)
 pub type ParentInPath = fn(&Path) -> Option<String>;
+
+/// 在终端里恢复会话时要设的一个环境变量:(变量名, 值)(`AgentAdapter::resume_env`)
+pub type EnvVar = (&'static str, String);
 
 /// agent 数据源适配器。列表扫描与详情解析共用同一核心解析器,
 /// 保证 FTS 的 seq 与详情页消息序号一致(搜索跳转依赖)。
@@ -172,6 +176,12 @@ pub trait AgentAdapter: Send + Sync {
     /// 子目录);直接选了数据目录本身的给空,不越界摸父目录(不变量 8⑨)。Hermes 每个档案
     /// 一个。Skills 总览按它找各家的 skill 文件夹(`skills::scan`)。默认空;远程实例给空
     fn homes(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+    /// 在终端里恢复本实例的会话要额外设的环境变量:agent 的命令行只认环境变量指定的数据
+    /// 目录(`CODEX_HOME` 一类),而本实例不在它的默认位置时给,否则命令行找不到会话、用的也
+    /// 是默认目录的登录与配置(#83)。默认空;远程实例给空
+    fn resume_env(&self) -> Vec<EnvVar> {
         Vec::new()
     }
     /// 一轮扫描开始前刷新 adapter 的跨会话快照。默认 adapter 没有这类状态。
@@ -418,6 +428,7 @@ pub fn create_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(kilo::KiloLegacyAdapter::new()),
         Box::new(grok_bot::GrokBotAdapter::new()),
         Box::new(mimo::MimoAdapter::new()),
+        Box::new(doubao::DoubaoAdapter::new()),
         // 千问办公一家两个数据源(Kilo 同款):现用的目录在前,前身 QoderWork 国内版的在后
         Box::new(qoder::QoderAdapter::qwenwork()),
         Box::new(qoder::QoderAdapter::qwenwork_legacy()),
@@ -644,6 +655,13 @@ pub fn resumable(adapters: &[Box<dyn AgentAdapter>], meta: &SessionMeta) -> bool
     adapter_for(adapters, meta.agent, &meta.file_path)
         .and_then(|a| a.parent_in_path())
         .is_none_or(|parent| parent(std::path::Path::new(&meta.file_path)).is_none())
+}
+
+/// 在终端里恢复这条会话要额外设的环境变量,问它所在的实例(`AgentAdapter::resume_env`)
+pub fn resume_env(adapters: &[Box<dyn AgentAdapter>], meta: &SessionMeta) -> Vec<EnvVar> {
+    adapter_for(adapters, meta.agent, &meta.file_path)
+        .map(|a| a.resume_env())
+        .unwrap_or_default()
 }
 
 /// `parent_links` 的边:(子会话 id, 父会话 id) 拼成两个本地 key。指向自己的不要——scanner

@@ -9,6 +9,7 @@
 //! probe_clis / compose_command / launch_shell 三个接缝按平台各取一份,
 //! 策略流程本身不分叉。
 
+use crate::adapters::{AgentAdapter, EnvVar};
 use crate::models::{AgentId, SessionMeta};
 use std::collections::HashMap;
 use std::path::Path;
@@ -44,6 +45,9 @@ mod windows;
 use windows as platform;
 #[cfg(target_os = "windows")]
 use windows::{compose_command, probe_clis};
+// Win32 宽字符串的唯一实现,`links` 的注册表登记经这里取用
+#[cfg(target_os = "windows")]
+pub(crate) use windows::wide;
 
 // 新平台必须给出自己的模块并接上 probe_clis / compose_command /
 // launch_shell 三个接缝(windows.rs 是完整先例)——POSIX 共享层是正向
@@ -161,6 +165,8 @@ pub fn agent_bin(agent: AgentId) -> Option<&'static str> {
         AgentId::GrokBot => None,
         // 官方安装脚本装进 ~/.mimocode/bin 并写进 shell 的 PATH;npm 包同名
         AgentId::MimoCode => Some("mimo"),
+        // 豆包工作是豆包电脑版里的模式,没有命令行
+        AgentId::DoubaoWork => None,
     }
 }
 
@@ -242,6 +248,8 @@ fn resume_args(meta: &SessionMeta) -> Option<(Vec<String>, bool)> {
         AgentId::GrokBot => None,
         // MiMo Code(OpenCode 分支)与 OpenCode 同形制;会话按项目目录记,在原目录启动
         AgentId::MimoCode => Some((vec!["--session".into(), id.into()], true)),
+        // 豆包工作:只有桌面 app,没有能按会话接着聊的命令或深链——不画 Open In
+        AgentId::DoubaoWork => None,
         // Kiro / Gemini CLI 没有按会话 id 续会话的形制
         AgentId::Kiro | AgentId::Gemini => None,
     }
@@ -261,13 +269,24 @@ pub(crate) fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// `cd <cwd> && <bin> <args…>` 全 quote 的一条 POSIX 命令行——本地终端启动
+/// `cd <cwd> && <VAR=值…> <bin> <args…>` 全 quote 的一条 POSIX 命令行——本地终端启动
 /// (posix::compose_command)、kooky CLI 管道、远程 ssh 内层命令共用的唯一
-/// 拼装点。与 sh_quote 同理不设 cfg。
-pub(crate) fn sh_command_line(bin: &str, args: &[String], cwd: Option<&str>) -> String {
-    let core = std::iter::once(bin)
-        .chain(args.iter().map(|s| s.as_str()))
-        .map(sh_quote)
+/// 拼装点。环境变量只作用于这一条命令(`AgentAdapter::resume_env`,变量名是写死的
+/// 标识符,只 quote 值)。与 sh_quote 同理不设 cfg。
+pub(crate) fn sh_command_line(
+    bin: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    env: &[EnvVar],
+) -> String {
+    let core = env
+        .iter()
+        .map(|(name, value)| format!("{name}={}", sh_quote(value)))
+        .chain(
+            std::iter::once(bin)
+                .chain(args.iter().map(|s| s.as_str()))
+                .map(sh_quote),
+        )
         .collect::<Vec<_>>()
         .join(" ");
     match cwd {
@@ -290,7 +309,7 @@ pub fn ssh_resume_command(meta: &SessionMeta) -> Option<String> {
     let bin = session_bin(meta)?;
     // cwd 是远程路径,本地 is_dir 判据无意义:非空就 cd,空则落 ssh 默认 home
     let cwd = (!meta.project_path.is_empty()).then_some(meta.project_path.as_str());
-    let inner = sh_command_line(bin, &args, cwd);
+    let inner = sh_command_line(bin, &args, cwd, &[]);
     // sshd 给远端起的是非交互 shell:zsh 只读 .zshenv,bash 的 .bashrc 开头就对
     // 非交互 return——nvm/volta/fnm 装的 claude、codex 全靠那些 rc 文件进 PATH,
     // 直接跑就是 command not found(0.4.0 已知,用远程的人第一条就撞)。所以让
@@ -317,13 +336,16 @@ pub enum ResumeTarget {
     CopySshCommand,
 }
 
-pub fn resume_targets(meta: &SessionMeta) -> Vec<ResumeTarget> {
+/// `adapters` 是 roster,用来问会话所在的 location:放在父会话目录里的子代理不能单独恢复
+/// (`adapters::resumable`);要设环境变量的会话(`adapters::resume_env`,#83)只列能把
+/// 变量带进去的目标——深链类 app 只认它们自己的数据目录
+pub fn resume_targets(adapters: &[Box<dyn AgentAdapter>], meta: &SessionMeta) -> Vec<ResumeTarget> {
     // 不支持恢复或 id 不安全的会话不列目标;本地/远程同源于 resume_args。
-    if resume_args(meta).is_none() {
+    if resume_args(meta).is_none() || !crate::adapters::resumable(adapters, meta) {
         return Vec::new();
     }
     if meta.host.is_empty() {
-        terminals_for(meta.agent)
+        terminals_for(meta.agent, &crate::adapters::resume_env(adapters, meta))
             .into_iter()
             .map(ResumeTarget::App)
             .collect()
@@ -332,9 +354,16 @@ pub fn resume_targets(meta: &SessionMeta) -> Vec<ResumeTarget> {
     }
 }
 
-pub fn resume_target(meta: &SessionMeta, target: ResumeTarget) -> ResumeOutcome {
+/// 环境变量与 resume_targets 同一个来源:命令要带上会话所在 location 的目录(#83)
+pub fn resume_target(
+    adapters: &[Box<dyn AgentAdapter>],
+    meta: &SessionMeta,
+    target: ResumeTarget,
+) -> ResumeOutcome {
     match target {
-        ResumeTarget::App(term) => resume_session_in(meta, term),
+        ResumeTarget::App(term) => {
+            resume_session_in(meta, term, &crate::adapters::resume_env(adapters, meta))
+        }
         ResumeTarget::CopySshCommand => copy_ssh_outcome(meta),
     }
 }
@@ -375,15 +404,24 @@ fn resume_unavailable(meta: &SessionMeta) -> ResumeOutcome {
     }
 }
 
-pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome {
+pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp, env: &[EnvVar]) -> ResumeOutcome {
     // Reject before any deep-link dispatch, CLI lookup or clipboard fallback.
     if !is_resume_id(&meta.id) {
         return resume_unavailable(meta);
     }
+    // 只开这条会话列得出的目标:Kooky 认不认、两家桌面版收不收(自家 agent、不用设环境
+    // 变量)都在 terminals_for 一处,列表与启动不会各说各的
+    if !terminals_for(meta.agent, env).contains(&term) {
+        return ResumeOutcome {
+            ok: false,
+            command: String::new(),
+            error: Some(format!("{} can't open this session", term.display_name())),
+        };
+    }
     // 深链类目标(macOS 的 Kooky / Claude Desktop / Codex Desktop)由平台
     // 整锅接管,不走 shell 命令构建;新增非 shell 目标在平台的
     // deep_link_resume 里声明,这里无需加旁路
-    if let Some(outcome) = platform::deep_link_resume(meta, term) {
+    if let Some(outcome) = platform::deep_link_resume(meta, term, env) {
         return outcome;
     }
     let Some((args, requires_cwd)) = resume_args(meta) else {
@@ -401,7 +439,7 @@ pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome
     let cwd = cwd_ok.then(|| meta.project_path.as_str());
     // 按用户选的宿主取方言:command 既是成功 toast 的展示面,也是失败时
     // 塞进剪贴板的那条,必须与真正跑的一致(Windows 的 cmd 宿主方言不同)
-    let command = match compose_command(term, &cli, &args, cwd) {
+    let command = match compose_command(term, &cli, &args, cwd, env) {
         Ok(command) => command,
         Err(e) => {
             // An unsafe command must never become the manual/clipboard fallback.
@@ -429,7 +467,7 @@ pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome
     #[cfg(not(target_os = "windows"))]
     let result = platform::launch_shell(term, &command);
     #[cfg(target_os = "windows")]
-    let result = platform::launch_shell(term, &cli, &args, cwd, &command);
+    let result = platform::launch_shell(term, &cli, &args, cwd, env, &command);
     match result {
         Ok(()) => ResumeOutcome {
             ok: true,
@@ -675,17 +713,17 @@ mod tests {
             ] {
                 let mut meta = remote_meta(agent, id, "");
                 assert!(super::resume_args(&meta).is_none(), "{agent:?}: {id:?}");
-                assert!(super::resume_targets(&meta).is_empty());
+                assert!(super::resume_targets(&[], &meta).is_empty());
                 assert!(super::ssh_resume_command(&meta).is_none());
-                let copied = super::resume_target(&meta, ResumeTarget::CopySshCommand);
+                let copied = super::resume_target(&[], &meta, ResumeTarget::CopySshCommand);
                 assert!(!copied.ok);
                 assert!(copied.command.is_empty());
                 assert!(copied.error.unwrap().contains("invalid session id"));
 
                 meta.host.clear();
-                assert!(super::resume_targets(&meta).is_empty());
+                assert!(super::resume_targets(&[], &meta).is_empty());
                 for term in terminals {
-                    let outcome = super::resume_session_in(&meta, term);
+                    let outcome = super::resume_session_in(&meta, term, &[]);
                     assert!(!outcome.ok);
                     assert!(outcome.command.is_empty());
                     assert!(outcome.error.unwrap().contains("invalid session id"));
@@ -729,7 +767,7 @@ mod tests {
             assert_eq!(args, expected, "{agent:?}");
             assert_eq!(cwd, requires_cwd, "{agent:?}");
             assert_eq!(
-                super::resume_targets(&meta),
+                super::resume_targets(&[], &meta),
                 vec![super::ResumeTarget::CopySshCommand]
             );
             assert!(super::ssh_resume_command(&meta).is_some());
@@ -749,7 +787,7 @@ mod tests {
             "/h/.vscode-server/data/User/globalStorage/kilocode.kilo-code/tasks/t1/api_conversation_history.json"
                 .into();
         assert!(super::resume_args(&meta).is_none());
-        assert!(super::resume_targets(&meta).is_empty());
+        assert!(super::resume_targets(&[], &meta).is_empty());
         meta.file_path =
             "/h/.local/share/kilo/kilo.db#ses_migrated_0123456789abcdef0123456789".into();
         assert!(super::resume_args(&meta).is_some());
@@ -785,6 +823,44 @@ mod tests {
         let remote = unquote(cmd.strip_prefix("ssh -t devbox ").unwrap());
         let inner = unquote(remote.strip_prefix("exec $SHELL -lic ").unwrap());
         assert_eq!(inner, "cd '/home/dev/my project' && codex resume abc-123");
+    }
+
+    /// 恢复要带的环境变量(#83)写在 cd 之后、命令之前,值按 POSIX 规则 quote
+    /// (sh_quote 过 sh 的往返见 ssh_resume_command_unquotes_layer_by_layer)
+    #[test]
+    fn resume_env_goes_between_cd_and_the_cli() {
+        assert_eq!(
+            super::sh_command_line(
+                "/opt/bin/codex",
+                &["resume".into(), "abc-123".into()],
+                Some("/w/my project"),
+                &[("CODEX_HOME", "/Users/o'neil/.codex api".into())],
+            ),
+            r"cd '/w/my project' && CODEX_HOME='/Users/o'\''neil/.codex api' /opt/bin/codex resume abc-123"
+        );
+    }
+
+    /// 要带环境变量的会话(#83)不列两家桌面版——它们只在自己的数据目录里找会话——直接
+    /// 点名也不打开:resume_session_in 只开这条会话列得出的目标
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sessions_that_need_an_environment_skip_the_desktop_apps() {
+        use super::TerminalApp;
+        let env = [("CODEX_HOME", "/Users/me/.codex-api".to_string())];
+        for (agent, app) in [
+            (AgentId::Codex, TerminalApp::CodexDesktop),
+            (AgentId::ClaudeCode, TerminalApp::ClaudeDesktop),
+        ] {
+            assert!(
+                !super::terminals_for(agent, &env).contains(&app),
+                "{agent:?}"
+            );
+            let mut meta = remote_meta(agent, "01937a56-3a2c-43af-af68-a8d4e00d60ed", "");
+            meta.host.clear();
+            let outcome = super::resume_session_in(&meta, app, &env);
+            assert!(!outcome.ok, "{agent:?}");
+            assert!(outcome.command.is_empty(), "must not send a link");
+        }
     }
 
     #[test]

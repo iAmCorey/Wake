@@ -70,6 +70,7 @@ brands!(
     "grok-bot",
     "mimo-code",
     "mimo-code-light",
+    "doubao-work",
     "qwenwork",
 );
 

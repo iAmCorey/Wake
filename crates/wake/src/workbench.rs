@@ -52,6 +52,7 @@ use wake_core::adapters::{
     AgentAdapter,
 };
 use wake_core::db::Store;
+use wake_core::links::WakeRef;
 use wake_core::models::Role as MessageRole;
 use wake_core::models::*;
 use wake_core::scanner::{run_scan, ScanEvents, ScanProgress};
@@ -2016,16 +2017,23 @@ fn load_visible_transcript(
         )
     })?;
 
+    // 系统内容(Meta)也留着:阅读视图在原位置画"已隐藏 N 条系统内容"的折叠卡(render_msg_row)。
+    // 卡里只有文字,它们的图片不解码、不占图片预算
     Ok(transcript
         .mainline
         .into_iter()
+        .map(|mut message| {
+            if message.kind == MessageKind::Meta {
+                message.images.clear();
+            }
+            message
+        })
         .filter(|message| {
-            message.kind != MessageKind::Meta
-                && (!message.text.trim().is_empty()
-                    || !message.tool_calls.is_empty()
-                    || message.thinking.is_some()
-                    || !message.images.is_empty()
-                    || message.kind == MessageKind::CompactSummary)
+            !message.text.trim().is_empty()
+                || !message.tool_calls.is_empty()
+                || message.thinking.is_some()
+                || !message.images.is_empty()
+                || message.kind == MessageKind::CompactSummary
         })
         .collect())
 }
@@ -2034,6 +2042,31 @@ fn toggle_expanded_row(rows: &mut HashSet<usize>, ix: usize) {
     if !rows.insert(ix) {
         rows.remove(&ix);
     }
+}
+
+/// 折叠卡(工具簇、Thinking、隐藏的系统内容)的点击:翻转这一行的展开状态,行高随之变化,让 list
+/// 重测这一行
+fn fold_toggle<'a>(
+    ix: usize,
+    expanded: fn(&mut DetailState) -> &mut HashSet<usize>,
+    cx: &'a mut Context<Workbench>,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static + use<'a> {
+    cx.listener(move |this, _, _window, cx| {
+        if let Some(detail) = &mut this.detail {
+            toggle_expanded_row(expanded(detail), ix);
+            detail.msg_list.splice(ix..ix + 1, 1);
+        }
+        cx.notify();
+    })
+}
+
+/// 紧挨在下标 `ix` 前面的那一串隐藏的系统内容(Meta)从哪条开始,前面不是隐藏的就是 `ix` 本身。
+/// 折叠卡画在一串的第一条:渲染按它判断这一行画卡还是不占高度,搜索跳转按它把卡一起露出来
+fn hidden_run_start(rows: &[TranscriptMessage], ix: usize) -> usize {
+    rows[..ix]
+        .iter()
+        .rposition(|m| m.kind != MessageKind::Meta)
+        .map_or(0, |prev| prev + 1)
 }
 
 struct DetailState {
@@ -2054,6 +2087,8 @@ struct DetailState {
     expanded_tools: HashSet<usize>,
     /// 展开的 Thinking。与工具簇分开存，避免其中一个把另一个一起展开。
     expanded_thinking: HashSet<usize>,
+    /// 展开的"已隐藏的系统内容"(按那一串里第一条的下标)
+    expanded_hidden: HashSet<usize>,
     /// 搜索跳转目标(FTS seq,契约=消息 seq);解析完成后滚到该消息并保持高亮
     jump_seq: Option<i64>,
     /// 与 transcript 同下标；原始字节只保留在 Arc<Image> 内，避免双份内存。
@@ -2082,6 +2117,7 @@ impl DetailState {
             msg_list: gpui::ListState::new(0, gpui::ListAlignment::Bottom, zpx(512.)),
             expanded_tools: HashSet::new(),
             expanded_thinking: HashSet::new(),
+            expanded_hidden: HashSet::new(),
             jump_seq,
             images: Vec::new(),
             zoom: None,
@@ -2568,6 +2604,9 @@ pub struct Workbench {
     /// 新根不收录、被移根不出清,要等手动 ⌘R(2026-08-24 Codex review)。
     /// 终态事件到达后由 on_bg_event 消费,用新 roster 补一轮增量
     pending_rescan: bool,
+    /// 打开时还没进索引的 wake:// 链接(#82)在等扫描收尾:终态事件发一下,`open_link` 起的
+    /// 那个任务再找一次。新链接替掉旧的,旧任务收到 Canceled 作罢
+    link_after_scan: Option<futures::channel::oneshot::Sender<()>>,
     /// rsync 线程正在同步的 host(空 = 空闲);与 scan 正交。侧栏文案与
     /// Sync now 的 busy 态都从这个**事实**派生,render 现算文案——不变量 6
     /// 的教训:别把展示句存成状态
@@ -3069,6 +3108,7 @@ impl Workbench {
             },
             refreshing: false,
             pending_rescan: false,
+            link_after_scan: None,
             syncing_hosts,
             pending_sync: Vec::new(),
             bg_tx,
@@ -5046,6 +5086,10 @@ impl Workbench {
                 if !self.scan.scanning {
                     self.reload_page(cx);
                     self.drain_pending_memory_sync(cx);
+                    // 等着这轮扫描收尾的 wake:// 链接:再找一次(`open_link`)
+                    if let Some(scanned) = self.link_after_scan.take() {
+                        let _ = scanned.send(());
+                    }
                 }
                 cx.notify();
                 note
@@ -5366,7 +5410,7 @@ impl Workbench {
         };
         window.close_dialog(cx);
         match target {
-            PaletteTarget::Session { key, seq } => self.open_detail(&key, Some(seq), window, cx),
+            PaletteTarget::Session { key, seq } => self.reveal_session(&key, Some(seq), window, cx),
             PaletteTarget::Memory(key) => self.reveal_memory(key, cx),
             PaletteTarget::Skill { name, dir } => self.reveal_skill(&name, dir, cx),
         }
@@ -5427,6 +5471,71 @@ impl Workbench {
         cx.notify();
     }
 
+    /// 打开一条 `wake://` 链接(#82):会话就打开它、带序号就跳到那条消息(与 ⌘K 打开搜索命中
+    /// 同一条路),记忆就落到 Memory 页选中它。刚开始的会话、刚写下的记忆可能还没进索引:等
+    /// 正在跑的那轮(没有就补一轮)增量扫描收尾(`on_bg_event` 的终态)再找一次,还没有就说一声。
+    /// 新链接(在不在索引里都一样)顶掉还在等的旧链接:进门先丢掉旧的发送端,那份等待收到
+    /// Canceled 就此作罢——不然扫描收尾时会跳回旧链接,或弹一句过期的"找不到"
+    pub(crate) fn open_link(&mut self, link: WakeRef, window: &mut Window, cx: &mut Context<Self>) {
+        self.link_after_scan = None;
+        if self.link_indexed(&link) {
+            self.show_link(link, window, cx);
+            return;
+        }
+        let (scanned, scan_done) = futures::channel::oneshot::channel();
+        self.link_after_scan = Some(scanned);
+        if !self.scan.scanning {
+            self.kick_incremental_scan(cx);
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            if scan_done.await.is_err() {
+                return;
+            }
+            this.update_in(cx, |this, window, cx| {
+                if this.link_indexed(&link) {
+                    this.show_link(link, window, cx);
+                } else {
+                    let missing = match link {
+                        WakeRef::Session { .. } => t("Wake couldn't find that session"),
+                        WakeRef::Memory { .. } => t("Wake couldn't find that memory file"),
+                    };
+                    window.push_notification(Notification::warning(missing), cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn link_indexed(&self, link: &WakeRef) -> bool {
+        match link {
+            WakeRef::Session { key, .. } => matches!(self.store.get_session(key), Ok(Some(_))),
+            WakeRef::Memory { key } => matches!(self.store.get_memory(key), Ok(Some(_))),
+        }
+    }
+
+    fn show_link(&mut self, link: WakeRef, window: &mut Window, cx: &mut Context<Self>) {
+        match link {
+            WakeRef::Session { key, seq } => self.reveal_session(&key, seq, window, cx),
+            WakeRef::Memory { key } => self.reveal_memory(key, cx),
+        }
+    }
+
+    /// 从别处跳到一条会话(⌘K 的搜索命中、wake:// 链接):离开清理模式——要在打开之前,离开时
+    /// 会把进入清理前的那条会话恢复回来——打开它,落回会话页、在中栏列表里选中并滚到可见。
+    /// 列表里点的只走 open_detail:List 点击自带选中,再滚会跳视口
+    fn reveal_session(
+        &mut self,
+        key: &str,
+        seq: Option<i64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.leave_cleanup(cx);
+        self.open_detail(key, seq, window, cx);
+        self.sync_list_selection(key, window, cx);
+    }
+
     fn open_detail(
         &mut self,
         key: &str,
@@ -5434,9 +5543,6 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if jump_seq.is_some() {
-            self.leave_cleanup(cx);
-        }
         let Ok(Some(meta)) = self.store.get_session(key) else {
             return;
         };
@@ -5446,11 +5552,6 @@ impl Workbench {
             .map(|parent| (parent.key, parent.title.into()));
         let load_id = detail.load_id;
         self.detail = Some(detail);
-        // 搜索路径:中栏列表同步选中并滚到该会话。
-        // 列表点击路径(jump=None)不走——List 点击自带选中,再滚会跳视口
-        if jump_seq.is_some() {
-            self.sync_list_selection(key, window, cx);
-        }
         cx.notify();
 
         // Resolving a virtual path can stat a slow/unavailable custom location.
@@ -5531,9 +5632,15 @@ impl Workbench {
                             // jump_seq 归一为落点消息的实际 seq——高亮按精确相等
                             // 渲染,不归一则命中被滤时滚动与高亮指向不同行
                             if let Some(seq) = detail.jump_seq {
-                                if let Some(ix) = messages.iter().position(|m| m.seq >= seq) {
+                                // 落点不落在折叠起来的系统内容上
+                                if let Some(ix) = messages
+                                    .iter()
+                                    .position(|m| m.seq >= seq && m.kind != MessageKind::Meta)
+                                {
                                     detail.jump_seq = Some(messages[ix].seq);
-                                    pin_list_row(&detail.msg_list, ix);
+                                    // 紧挨在落点前面的"已隐藏"卡一起露出来:钉它,落点紧跟在
+                                    // 下面,高亮仍在落点上
+                                    pin_list_row(&detail.msg_list, hidden_run_start(&messages, ix));
                                 }
                             }
                             detail.transcript = Rc::new(messages);
@@ -5895,9 +6002,10 @@ impl Workbench {
         }
     }
 
-    /// per-agent 记忆任何 App 点击都写(只影响本 agent,收敛到用户实际用的);
-    /// 全局 last_terminal 只在 explicit(下拉显式选择)时写——左段点的可能
-    /// 是回退值,写进全局会让一个 dsh 会话把 Kooky 偏好冲成 Terminal。
+    /// 下拉里显式选的(explicit)写 per-agent 记忆与全局 last_terminal;左段点击只补上这个
+    /// agent 还没有的记忆、不覆盖——左段显示的可能是回退值(记着的目标不在这条会话的列表里:
+    /// 带 CODEX_HOME 的 Codex 会话不列 Codex Desktop,#83;dsh 会话不列 Kooky),写进去就会
+    /// 把用户的选择冲成 Terminal。
     /// 非 App 目标(Copy SSH command)不进记忆:远程/本地列表不相交,记了
     /// 也没有可回放的场景。
     fn do_resume(
@@ -5909,15 +6017,21 @@ impl Workbench {
     ) {
         let Some(detail) = &self.detail else { return };
         if let terminal::ResumeTarget::App(term) = target {
-            self.preferred_terminal.insert(detail.meta.agent, term);
             if explicit {
+                self.preferred_terminal.insert(detail.meta.agent, term);
                 self.last_terminal = Some(term);
+            } else {
+                self.preferred_terminal
+                    .entry(detail.meta.agent)
+                    .or_insert(term);
             }
             self.save_open_in_prefs();
             cx.notify(); // split 按钮左段立即切到本次选择
         }
         let meta = detail.meta.clone();
-        let task = cx.background_spawn(async move { terminal::resume_target(&meta, target) });
+        let adapters = self.adapters.clone();
+        let task =
+            cx.background_spawn(async move { terminal::resume_target(&adapters, &meta, target) });
         Self::notify_when_done(window, cx, task, move |outcome| {
             if outcome.ok {
                 Notification::success(match target {
@@ -7133,10 +7247,32 @@ impl Workbench {
         {
             return div().into_any_element();
         }
+        // 连着的几条系统内容只在第一条的位置画一张"已隐藏 N 条"的折叠卡,后面几条不占高度
+        let hidden_run = if m.kind == MessageKind::Meta {
+            if hidden_run_start(&transcript, ix) < ix {
+                return div().into_any_element();
+            }
+            transcript[ix..]
+                .iter()
+                .take_while(|m| m.kind == MessageKind::Meta)
+                .count()
+        } else {
+            0
+        };
+        let last = ix + hidden_run.max(1) == total;
         // 搜索跳转的落点消息:淡 primary 底色保持高亮,直到换会话
         let is_jump_target = jump_seq == Some(m.seq);
 
-        let inner: AnyElement = if m.kind == MessageKind::CompactSummary {
+        let inner: AnyElement = if hidden_run > 0 {
+            hidden_panel(
+                ix,
+                &transcript[ix..ix + hidden_run],
+                detail.expanded_hidden.contains(&ix),
+                fold_toggle(ix, |detail| &mut detail.expanded_hidden, cx),
+                cx,
+            )
+            .into_any_element()
+        } else if m.kind == MessageKind::CompactSummary {
             centered_pill(t("Context compacted"), cx).into_any_element()
         } else {
             match m.role {
@@ -7185,13 +7321,7 @@ impl Workbench {
                             ix,
                             thinking,
                             thinking_open,
-                            cx.listener(move |this, _, _window, cx| {
-                                if let Some(detail) = &mut this.detail {
-                                    toggle_expanded_row(&mut detail.expanded_thinking, ix);
-                                    detail.msg_list.splice(ix..ix + 1, 1);
-                                }
-                                cx.notify();
-                            }),
+                            fold_toggle(ix, |detail| &mut detail.expanded_thinking, cx),
                             cx,
                         ));
                     }
@@ -7228,14 +7358,7 @@ impl Workbench {
                             &m.tool_calls,
                             tool_arg_cells,
                             tools_open,
-                            cx.listener(move |this, _, _window, cx| {
-                                if let Some(detail) = &mut this.detail {
-                                    toggle_expanded_row(&mut detail.expanded_tools, ix);
-                                    // 行高随展开变化,让 list 重测该行
-                                    detail.msg_list.splice(ix..ix + 1, 1);
-                                }
-                                cx.notify();
-                            }),
+                            fold_toggle(ix, |detail| &mut detail.expanded_tools, cx),
                             cx.entity(),
                             cx,
                         ));
@@ -7254,7 +7377,7 @@ impl Workbench {
             .px(SPACE_XXL)
             .py(SPACE_SM)
             .when(ix == 0, |d| d.pt(SPACE_LG))
-            .when(ix + 1 == total, |d| d.pb(SPACE_XXL))
+            .when(last, |d| d.pb(SPACE_XXL))
             .child(
                 div()
                     .w_full()
@@ -7889,12 +8012,8 @@ impl Workbench {
                     .into_any_element(),
             );
         }
-        // 放在父会话目录里的子代理不能单独恢复(`resumable`)
-        let resume_targets = if wake_core::adapters::resumable(&self.adapters, meta) {
-            terminal::resume_targets(meta)
-        } else {
-            Vec::new()
-        };
+        // 能不能单独恢复(子代理)、要不要带环境变量(#83)都由 resume_targets 问 roster
+        let resume_targets = terminal::resume_targets(&self.adapters, meta);
         let open_in: AnyElement = if resume_targets.is_empty() {
             // 没有 resume 形制的 agent(OpenClaw 的 TUI 只按 session
             // key 开会话):不画 Open In,别给一组点了才报错的死按钮
@@ -9693,17 +9812,18 @@ fn markdown_body(
     crate::markdown_links::with_session_links(view, host, project_path)
 }
 
-/// Thinking 折叠面板：收起是一行摘要，展开后显示完整原文。
-fn thinking_panel(
-    ix: usize,
-    text: &str,
+/// Thinking 与"已隐藏的系统内容"共用的折叠卡:标题行是 chevron + 标签,收起时接一行斜体摘要
+/// (摘要只在收起时算——隐藏内容动辄几十 KB),展开后由调用方接上正文
+fn fold_card(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    summary_of: &str,
     expanded: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> Div {
     let theme = cx.theme();
-    let summary = clip_display(&one_line(text, 400), 88);
-    let mut panel = v_flex()
+    v_flex()
         .w_full()
         .min_w_0()
         .rounded(theme.radius)
@@ -9712,7 +9832,7 @@ fn thinking_panel(
         .bg(theme.muted.opacity(0.45))
         .child(
             h_flex()
-                .id(("thinking", ix))
+                .id(id)
                 .w_full()
                 .min_w_0()
                 .items_center()
@@ -9731,7 +9851,7 @@ fn thinking_panel(
                             icon.rotate(gpui::Radians(std::f32::consts::FRAC_PI_2))
                         }),
                 )
-                .child(div().flex_shrink_0().font_medium().child(t("Thinking")))
+                .child(div().flex_shrink_0().font_medium().child(label.into()))
                 .when(!expanded, |header| {
                     header.child(
                         div()
@@ -9739,14 +9859,32 @@ fn thinking_panel(
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .italic()
-                            .child(summary),
+                            .child(clip_display(&one_line(summary_of, 400), 88)),
                     )
                 })
                 .on_click(on_toggle),
-        );
+        )
+}
 
-    if expanded {
-        panel = panel.child(
+/// Thinking 折叠面板：收起是一行摘要，展开后显示完整原文。
+fn thinking_panel(
+    ix: usize,
+    text: &str,
+    expanded: bool,
+    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Div {
+    let muted = cx.theme().muted_foreground;
+    fold_card(
+        ("thinking", ix),
+        t("Thinking"),
+        text,
+        expanded,
+        on_toggle,
+        cx,
+    )
+    .when(expanded, |panel| {
+        panel.child(
             div()
                 .w_full()
                 .min_w_0()
@@ -9756,12 +9894,56 @@ fn thinking_panel(
                 .whitespace_normal()
                 .text_size(FONT_MSG_THINKING)
                 .line_height(relative(1.7))
-                .text_color(theme.muted_foreground)
+                .text_color(muted)
                 .child(text.to_string()),
-        );
-    }
+        )
+    })
+}
 
-    panel
+/// 阅读视图里隐藏的系统内容(注入的上下文、hook 输出、桌面端垫在提问前面的状态等):与 Thinking
+/// 同一张折叠卡,收起时"已隐藏 N 条系统内容"加第一条的摘要,展开后逐条显示——与工具调用的输入
+/// 输出同一种段落(前 600 字、复制原文)。`run` 是连着的那一串,至少一条
+fn hidden_panel(
+    ix: usize,
+    run: &[TranscriptMessage],
+    expanded: bool,
+    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Div {
+    let label = crate::tp!(
+        "{} hidden system message",
+        "{} hidden system messages",
+        run.len()
+    );
+    let card = fold_card(("hidden", ix), label, &run[0].text, expanded, on_toggle, cx);
+    if !expanded {
+        return card;
+    }
+    let theme = cx.theme();
+    let mono = theme.mono_font_family.clone();
+    card.child(
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .border_t_1()
+            .border_color(theme.border)
+            .children(run.iter().enumerate().map(|(n, message)| {
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .px(SPACE_MD)
+                    .py(zpx(10.))
+                    .when(n > 0, |item| item.border_t_1().border_color(theme.border))
+                    .child(tool_section(
+                        format!("hidden-copy-{ix}-{n}").into(),
+                        t("System message"),
+                        &message.text,
+                        false,
+                        mono.clone(),
+                        cx,
+                    ))
+            })),
+    )
 }
 
 const TOOL_TEXT_PREVIEW_LIMIT: usize = 600;

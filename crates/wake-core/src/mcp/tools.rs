@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 
 use crate::adapters::{adapter_for, AgentAdapter};
 use crate::db::Store;
+use crate::links::{memory_ref, session_ref, WakeRef};
 use crate::models::*;
 use crate::services::context::{parse_since, resolve_project_paths};
 use crate::services::exporter::{fmt_time, render_compact, CompactOptions};
@@ -539,6 +540,7 @@ fn parse_agent(s: &str) -> Option<AgentId> {
             "opencode2" | "opencodenext" => Some(AgentId::Opencode),
             "craft" => Some(AgentId::CraftAgents),
             "mimo" => Some(AgentId::MimoCode),
+            "doubao" | "豆包" => Some(AgentId::DoubaoWork),
             _ => None,
         })
 }
@@ -719,46 +721,6 @@ fn clean_snippet(s: &str) -> String {
         .replace(HL_CLOSE, "**")
         .replace("****", "");
     one_line(&marked, 240)
-}
-
-fn session_ref(key: &str, seq: i64) -> String {
-    format!("wake://session/{key}#{seq}")
-}
-
-fn memory_ref(key: &str) -> String {
-    format!("wake://memory/{key}")
-}
-
-/// `wake_get_session` 的 `key` 参数认的三种形态:裸会话 key、`wake://session/<key>#<seq>`
-/// (seq 成为默认起点)、`wake://memory/<key>`(记忆文件,另一条读法)。写引用的
-/// `session_ref` / `memory_ref` 与读引用的 `parse` 放在一起,两边一起改。记忆 key
-/// 自身可含 `#`(SQLite 型虚拟路径 `<db>#<id>`),所以先认 scheme 再拆 seq
-#[derive(Debug, PartialEq, Eq)]
-enum WakeRef {
-    Session { key: String, seq: Option<i64> },
-    Memory { key: String },
-}
-
-impl WakeRef {
-    fn parse(raw: &str) -> Self {
-        let s = raw.trim();
-        if let Some(key) = s.strip_prefix("wake://memory/") {
-            return Self::Memory {
-                key: key.trim().to_string(),
-            };
-        }
-        let s = s.strip_prefix("wake://session/").unwrap_or(s);
-        match s.rsplit_once('#') {
-            Some((key, seq)) if seq.parse::<i64>().is_ok() => Self::Session {
-                key: key.to_string(),
-                seq: seq.parse().ok(),
-            },
-            _ => Self::Session {
-                key: s.to_string(),
-                seq: None,
-            },
-        }
-    }
 }
 
 // ---------------------------------------------------------------- 工具实现
@@ -1566,35 +1528,10 @@ mod tests {
         assert_eq!(parse_agent("mimo"), Some(AgentId::MimoCode));
         assert_eq!(parse_agent("MiMo Code"), Some(AgentId::MimoCode));
         assert_eq!(parse_agent("MiMoCode"), Some(AgentId::MimoCode));
+        assert_eq!(parse_agent("doubao"), Some(AgentId::DoubaoWork));
+        assert_eq!(parse_agent("Doubao Work"), Some(AgentId::DoubaoWork));
+        assert_eq!(parse_agent("豆包"), Some(AgentId::DoubaoWork));
         assert_eq!(parse_agent("chatgpt"), None);
-    }
-
-    #[test]
-    fn key_arg_accepts_wake_refs() {
-        let session = |key: &str, seq: Option<i64>| WakeRef::Session {
-            key: key.to_string(),
-            seq,
-        };
-        assert_eq!(
-            WakeRef::parse(&session_ref("claude-code:abc", 12)),
-            session("claude-code:abc", Some(12))
-        );
-        assert_eq!(
-            WakeRef::parse("codex:devbox:0195-xyz"),
-            session("codex:devbox:0195-xyz", None)
-        );
-        assert_eq!(
-            WakeRef::parse(" claude-code:abc "),
-            session("claude-code:abc", None)
-        );
-        // 记忆 key 自身带 `#`(SQLite 型虚拟路径)也不能被当成 seq 拆掉
-        let memory_key = "codex:/home/me/.codex/memories_1.sqlite#t-0001";
-        assert_eq!(
-            WakeRef::parse(&memory_ref(memory_key)),
-            WakeRef::Memory {
-                key: memory_key.to_string()
-            }
-        );
     }
 
     #[test]

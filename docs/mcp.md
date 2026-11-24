@@ -174,7 +174,7 @@ All five tools are read-only and return Markdown text (`content[0].text`). Param
 | Parameter | Type | Meaning |
 |---|---|---|
 | `project` | string | Scope to one project. Pass an absolute path — the agent's working directory is ideal — or a project name. Path matching is three-tier: an exact match of an indexed project path; otherwise the longest indexed project that contains the path (you are in a subdirectory) — your home folder and the filesystem root never count here, since sessions started there are not about the project you are in; otherwise every indexed project below the path (a monorepo root or a parent folder). A bare name matches the project name case-insensitively. When nothing matches, the reply lists the known projects instead of erroring. |
-| `agents` | string[] | Only these agents. Ids: `claude-code`, `codex`, `grok`, `grok-bot`, `dsh`, `cursor`, `opencode`, `pi`, `omp`, `kiro`, `kimi`, `gemini`, `copilot`, `antigravity`, `qoder`, `hermes`, `openclaw`, `codebuddy`, `workbuddy`, `zcode`, `craft-agents`, `devin`, `kilo`, `mimo-code`, `qwenwork`. Display names (`"Claude Code"`, `"Gemini CLI"`) and a few aliases (`claude`, `deepseek`, `opencode2`, `craft`, `mimo`) are accepted too. |
+| `agents` | string[] | Only these agents. Ids: `claude-code`, `codex`, `grok`, `grok-bot`, `dsh`, `cursor`, `opencode`, `pi`, `omp`, `kiro`, `kimi`, `gemini`, `copilot`, `antigravity`, `qoder`, `hermes`, `openclaw`, `codebuddy`, `workbuddy`, `zcode`, `craft-agents`, `devin`, `kilo`, `mimo-code`, `doubao-work`, `qwenwork`. Display names (`"Claude Code"`, `"Gemini CLI"`) and a few aliases (`claude`, `deepseek`, `opencode2`, `craft`, `mimo`, `doubao`) are accepted too. |
 | `since` | string | Only sessions updated at or after this time. Relative: `30m`, `24h`, `7d`, `2w`. Absolute: `2026-09-01`, `2026-09-01 09:30`, `2026-09-01T09:30:00Z`. Naive date-times are read in local time. |
 | `limit` | integer | Maximum items to return; values outside the allowed range are clamped. |
 
@@ -269,7 +269,8 @@ The memory files coding agents keep for themselves on this machine, read-only: C
 - Local sessions: `<agent>:<native id>`, for example `codex:0195c2a1-…`.
 - Sessions mirrored from a remote host: `<agent>:<host>:<native id>`.
 - References: `wake://session/<key>#<seq>` point at one message; `wake_get_session` accepts them as `key` and starts the page there.
-- Memory files: `wake://memory/<agent>:<path>` (with a host segment for mirrored hosts); `wake_get_session` accepts them as `key` and returns the file.
+- Memory files: `wake://memory/<agent>:<path>` (with a host segment for mirrored hosts; `%` and spaces in the path are percent-encoded); `wake_get_session` accepts them as `key` and returns the file.
+- Both are also links: opening one (clicking it in a terminal or a chat app, or `open 'wake://session/…'`) shows that session in Wake scrolled to that message, or that memory file on the Memory page. `wake://session/<key>` without `#<seq>` opens the session the way Wake usually does, at its latest messages. Other tools can build these links from a session key to send you straight to a session.
 
 The native id is the one the agent's own `--resume` flag expects.
 

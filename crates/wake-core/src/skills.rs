@@ -21,7 +21,7 @@
 //! - "读不出" ≠ "没有":目录或 SKILL.md 不存在(NotFound / 不是目录)就是没有;别的 I/O
 //!   错误记进 `SkillScan::errors`,界面照实提示,不当成空。
 
-use crate::adapters::parse_utils::{mtime_ms, project_name_of};
+use crate::adapters::parse_utils::{is_absent, mtime_ms, project_name_of};
 use crate::adapters::{self, AgentAdapter};
 use crate::models::AgentId;
 use crate::text;
@@ -384,7 +384,8 @@ fn user_dirs(agent: AgentId) -> Option<UserDirs> {
         AgentId::Devin => Fixed(Base::AppConfig, &["devin/skills"]),
         // app 内置与用户装的 skill 都落在这里(本机核对,每个子目录一份 SKILL.md)
         AgentId::QwenWork => Fixed(Base::Home, &[".qwenworkcn/skills"]),
-        AgentId::Kimi | AgentId::GrokBot | AgentId::Workbuddy => return None,
+        // 豆包工作:没核实过它读哪个 skill 目录
+        AgentId::Kimi | AgentId::GrokBot | AgentId::Workbuddy | AgentId::DoubaoWork => return None,
     })
 }
 
@@ -416,6 +417,7 @@ fn project_dirs(agent: AgentId) -> &'static [&'static str] {
         | AgentId::Kimi
         | AgentId::GrokBot
         | AgentId::Workbuddy
+        | AgentId::DoubaoWork
         | AgentId::QwenWork => &[],
     }
 }
@@ -468,11 +470,6 @@ fn join_rel(base: &Path, rel: &str) -> PathBuf {
         .fold(base.to_path_buf(), |p, seg| p.join(seg))
 }
 
-/// 读不读得出:不存在(含"中间某段不是目录")是没有,别的是读不出
-fn absent(e: &std::io::Error) -> bool {
-    matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory)
-}
-
 /// 一个待读的 skill 文件夹
 struct Location {
     owner: SkillOwner,
@@ -522,7 +519,7 @@ impl Plan {
         // canonicalize 只给真有的
         let meta = match std::fs::symlink_metadata(&dir) {
             Ok(meta) => meta,
-            Err(e) if absent(&e) => return,
+            Err(e) if is_absent(&e) => return,
             Err(e) => return self.errors.push(SkillError::new(&dir, e)),
         };
         let linked = meta.file_type().is_symlink();
@@ -532,7 +529,7 @@ impl Plan {
         let real = match std::fs::canonicalize(&dir) {
             Ok(real) if real.is_dir() => real,
             Ok(_) => return,
-            Err(e) if absent(&e) => return,
+            Err(e) if is_absent(&e) => return,
             Err(e) => return self.errors.push(SkillError::new(&dir, e)),
         };
         // 不是链接的文件夹,逻辑路径就是真实路径
@@ -573,7 +570,7 @@ impl Plan {
                     self.add(owner, SkillScope::User, join_rel(&parent.join(name), rest));
                 }
             }
-            Err(e) if absent(&e) => {}
+            Err(e) if is_absent(&e) => {}
             Err(e) => self.errors.push(SkillError::new(&parent, e)),
         }
     }
@@ -603,7 +600,7 @@ fn add_claude_plugins(plan: &mut Plan, home: &Path) {
     let index = home.join("plugins").join("installed_plugins.json");
     let text = match std::fs::read_to_string(&index) {
         Ok(text) => text,
-        Err(e) if absent(&e) => return,
+        Err(e) if is_absent(&e) => return,
         Err(e) => return plan.errors.push(SkillError::new(&index, e)),
     };
     let json: serde_json::Value = match serde_json::from_str(&text) {
@@ -657,7 +654,7 @@ fn plugin_skill_dirs(install: &Path, errors: &mut Vec<SkillError>) -> Vec<(PathB
         Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
             .map_err(|e| errors.push(SkillError::new(&manifest, e)))
             .ok(),
-        Err(e) if absent(&e) => None,
+        Err(e) if is_absent(&e) => None,
         Err(e) => {
             errors.push(SkillError::new(&manifest, e));
             None
@@ -818,7 +815,7 @@ impl Reader<'_> {
     ) {
         let names = match sorted_entries(dir) {
             Ok(names) => names,
-            Err(e) if absent(&e) => return,
+            Err(e) if is_absent(&e) => return,
             Err(e) => return self.errors.push(SkillError::new(dir, e)),
         };
         for (entry, entry_link) in names {
@@ -829,7 +826,7 @@ impl Reader<'_> {
             let real_path = if entry_link {
                 match std::fs::canonicalize(&path) {
                     Ok(real_path) => real_path,
-                    Err(e) if absent(&e) => continue,
+                    Err(e) if is_absent(&e) => continue,
                     Err(e) => {
                         self.errors.push(SkillError::new(&path, e));
                         continue;
@@ -858,7 +855,7 @@ impl Reader<'_> {
             Ok(meta) if meta.is_file() => meta,
             Ok(_) => return false,
             Err(e) if e.kind() == ErrorKind::NotFound => return true,
-            Err(e) if absent(&e) => return false,
+            Err(e) if is_absent(&e) => return false,
             Err(e) => {
                 self.errors.push(SkillError::new(&md, e));
                 return false;
@@ -867,7 +864,7 @@ impl Reader<'_> {
         let real_md = real_path.join(SKILL_MD);
         let parsed = match self.cache.get_or_read(&real_md, &meta) {
             Ok(parsed) => parsed,
-            Err(e) if absent(&e) => return false,
+            Err(e) if is_absent(&e) => return false,
             Err(e) => {
                 self.errors.push(SkillError::new(&md, e));
                 return false;

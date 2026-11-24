@@ -511,9 +511,6 @@ fn parse_qoder_jsonl(path: &Path, decode_images: bool) -> Result<QoderParse> {
         if typ == "user" {
             flush_assistant(&mut pending, &mut messages, &mut tool_index);
             let mut parsed_message = ParsedContent::default();
-            // 引擎注入的文本块(`<system-reminder>` 的时区、可用工具)与人打的字是同一条消息里
-            // 的两个块:分开收,有人打的字就只显示它,整条都是注入的才按注入内容收起来
-            let mut injected = ParsedContent::default();
             match message.get("content") {
                 Some(Value::String(text)) => parsed_message.push_text(text),
                 Some(Value::Array(blocks)) => {
@@ -521,11 +518,7 @@ fn parse_qoder_jsonl(path: &Path, decode_images: bool) -> Result<QoderParse> {
                         match block.get("type").and_then(Value::as_str) {
                             Some("text") => {
                                 if let Some(text) = block.get("text").and_then(Value::as_str) {
-                                    if is_injected_user_content(text) {
-                                        injected.push_text(text);
-                                    } else {
-                                        parsed_message.push_text(text);
-                                    }
+                                    parsed_message.push_text(text);
                                 }
                             }
                             _ if is_image_part(block) => {
@@ -558,32 +551,26 @@ fn parse_qoder_jsonl(path: &Path, decode_images: bool) -> Result<QoderParse> {
                 }
                 _ => {}
             }
-            if parsed_message.text.is_empty() {
-                parsed_message.text = injected.text;
-            }
-            let ParsedContent { text, images } = parsed_message;
-            // 千问办公把人打的那句原样另存在 humanInput.text,content 里则在它前面拼了一段
-            // `<system-reminder>`(时区、可用工具)——整条按 content 判会被当成注入内容收起来
-            let human_input = optional_string(row.pointer("/humanInput/text"));
-            let typed = human_input.is_some();
-            let text = human_input.unwrap_or(text);
+            let compact = row.get("isCompactSummary").and_then(Value::as_bool) == Some(true);
+            let row_meta = row.get("isMeta").and_then(Value::as_bool) == Some(true)
+                || row
+                    .get("isVisibleInTranscriptOnly")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                || row
+                    .pointer("/origin/kind")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind != "human");
+            // 垫在人说的话前面的 `<system-reminder>`:单独一条 Meta,话照常判(Claude 同款)
+            let ParsedContent { text, images } = if compact || row_meta || !from_human(&row) {
+                parsed_message
+            } else {
+                push_leading_context(parsed_message, ts, &mut messages)
+            };
             if text.is_empty() && images.is_empty() {
                 continue;
             }
-            let compact = row.get("isCompactSummary").and_then(Value::as_bool) == Some(true);
-            let meta = !typed
-                && (row.get("isMeta").and_then(Value::as_bool) == Some(true)
-                    || row
-                        .get("isVisibleInTranscriptOnly")
-                        .and_then(Value::as_bool)
-                        == Some(true)
-                    || row
-                        .pointer("/origin/kind")
-                        .and_then(Value::as_str)
-                        .is_some_and(|kind| kind != "human")
-                    || is_injected_user_content(&text)
-                    // 用户按停时引擎补写的那一行
-                    || text.starts_with("[Request interrupted by user"));
+            let meta = row_meta || is_injected_user_content(&text);
             let kind = if compact {
                 MessageKind::CompactSummary
             } else if meta {

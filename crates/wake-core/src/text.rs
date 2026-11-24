@@ -5,13 +5,23 @@
 use crate::models::{HL_CLOSE, HL_OPEN};
 
 /// 折成一行:空白压成单空格,超过 `max_chars` 个字符截断并加 `…`
-/// (按字符数计,CJK 安全)
+/// (按字符数计,CJK 安全)。够长就停,不先把整段压平——详情页每帧都拿几十 KB 的注入内容
+/// 取一行摘要
 pub fn one_line(s: &str, max_chars: usize) -> String {
-    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    match flat.char_indices().nth(max_chars) {
-        Some((ix, _)) => format!("{}…", &flat[..ix]),
-        None => flat,
+    let mut out = String::new();
+    let mut count = 0;
+    for word in s.split_whitespace() {
+        let separator = (!out.is_empty()).then_some(' ');
+        for c in separator.into_iter().chain(word.chars()) {
+            if count == max_chars {
+                out.push('…');
+                return out;
+            }
+            out.push(c);
+            count += 1;
+        }
     }
+    out
 }
 
 /// 英文复数后缀:1 → ""、其余 → "s"
@@ -201,6 +211,25 @@ mod tests {
         assert_eq!(one_line("  a\n\n b\tc ", 10), "a b c");
         assert_eq!(one_line("二维码扫描登录", 3), "二维码…");
         assert_eq!(one_line("abc", 3), "abc", "恰好等长不截");
+    }
+
+    /// 够长就停的写法与"先整段压平再按字符截"逐字一样:截在词中间、截在词间的空格上、
+    /// 恰好写满、空串、只有空白、上限为零
+    #[test]
+    fn one_line_matches_flatten_then_clip() {
+        let reference = |s: &str, max: usize| {
+            let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+            match flat.char_indices().nth(max) {
+                Some((ix, _)) => format!("{}…", &flat[..ix]),
+                None => flat,
+            }
+        };
+        let text = " <system-reminder>\n Linked  sessions now:\tdeploy = idle 看下部署成功没有 ";
+        for max in 0..=text.chars().count() + 1 {
+            for s in [text, "", "   \n\t", "abc def", "二维码 扫描"] {
+                assert_eq!(one_line(s, max), reference(s, max), "{s:?} {max}");
+            }
+        }
     }
 
     #[test]
