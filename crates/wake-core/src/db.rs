@@ -256,8 +256,11 @@ CREATE TABLE IF NOT EXISTS claimed_sessions (
 /// "23" = CodeBuddy / WorkBuddy 的用户行先剥开头的 IDE 上下文再判(提问不再跟着上下文成 Meta),
 ///       压缩摘要、队友汇报、hook 回灌、本地命令输出不算提问(PR #88 的发现),老行靠这轮重解析
 ///       写对。"20"–"22" 是没合入的 PR #88 分支各提交用过的值,跑过它的库可能戳着其中任一个,
-///       换代判据是精确不等,所以都跳过
-pub const FTS_FORMAT: &str = "23";
+///       换代判据是精确不等,所以都跳过;
+/// "24" = 垫在用户提问前面的 `<system-reminder>`(Claude 桌面端的 "Linked sessions now…"、Qoder 同款)
+///       切下来单独一条 Meta,提问不再跟着成 Meta、照常进搜索与提问数;CodeBuddy 改用同一个切法。
+///       "23" 推上 main 时还没有这条,所以另起一档
+pub const FTS_FORMAT: &str = "24";
 
 /// 正文里中日韩字符的两字组索引(issue #79):trigram 对两个字的词 MATCH 不出东西,而中文最常搜的
 /// 恰恰是两字词。只收有两个以上相连中日韩字符的行,文本是 `cjk_bigrams` 切好、空格隔开的两字组,

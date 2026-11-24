@@ -439,12 +439,8 @@ fn parse_qoder_jsonl(path: &Path, decode_images: bool) -> Result<QoderParse> {
                 }
                 _ => {}
             }
-            let ParsedContent { text, images } = parsed_message;
-            if text.is_empty() && images.is_empty() {
-                continue;
-            }
             let compact = row.get("isCompactSummary").and_then(Value::as_bool) == Some(true);
-            let meta = row.get("isMeta").and_then(Value::as_bool) == Some(true)
+            let row_meta = row.get("isMeta").and_then(Value::as_bool) == Some(true)
                 || row
                     .get("isVisibleInTranscriptOnly")
                     .and_then(Value::as_bool)
@@ -452,8 +448,17 @@ fn parse_qoder_jsonl(path: &Path, decode_images: bool) -> Result<QoderParse> {
                 || row
                     .pointer("/origin/kind")
                     .and_then(Value::as_str)
-                    .is_some_and(|kind| kind != "human")
-                || is_injected_user_content(&text);
+                    .is_some_and(|kind| kind != "human");
+            // 垫在人说的话前面的 `<system-reminder>`:单独一条 Meta,话照常判(Claude 同款)
+            let ParsedContent { text, images } = if compact || row_meta || !from_human(&row) {
+                parsed_message
+            } else {
+                push_leading_context(parsed_message, ts, &mut messages)
+            };
+            if text.is_empty() && images.is_empty() {
+                continue;
+            }
+            let meta = row_meta || is_injected_user_content(&text);
             let kind = if compact {
                 MessageKind::CompactSummary
             } else if meta {

@@ -989,6 +989,69 @@ fn claude_branches_fold_the_copied_history_and_nest_under_the_original() {
     assert_eq!(adapter.parent_links(), Some(Vec::new()));
 }
 
+/// Claude 桌面端在人说的话前面垫一段状态(`<system-reminder>` 的 "Linked sessions now…"),不管自成
+/// 一块还是和话写在同一个字符串里、有没有来源标记,都切下来单独一条 Meta,话照常是正文、进搜索、
+/// 当标题;isMeta 的行与桌面端自己合成的消息(来源 host_synthetic / sdk)开头也垫着它,整条照旧
+/// 是 Meta、不切。Qoder 是同一种行格式、同一个切法
+#[test]
+fn desktop_status_does_not_hide_the_question() {
+    setup();
+    let projects = fixture("claude-desktop/projects");
+    let path =
+        projects.join("-Users-tester-Github-wakefx/77777777-aaaa-bbbb-cccc-000000000007.jsonl");
+    use MessageKind::{Meta, Text};
+    let expected = [
+        (Role::User, Meta),
+        (Role::User, Text),
+        (Role::Assistant, Text),
+        (Role::User, Meta),
+        (Role::User, Text),
+        (Role::Assistant, Text),
+        (Role::User, Meta), // isMeta:整条一条
+        (Role::User, Meta), // 只有状态
+        (Role::User, Meta), // 桌面端合成(host_synthetic):整条一条
+        (Role::User, Meta), // 桌面端合成(sdk):整条一条
+        (Role::User, Meta), // 图片在前:扫描(不解码)与详情(解码)一样切
+        (Role::User, Text),
+    ];
+    for adapter in [
+        ClaudeAdapter::new().with_custom_root(projects.clone()),
+        QoderAdapter::new().with_custom_root(projects.clone()),
+    ] {
+        let r = adapter.file_ref(&path).unwrap();
+        let t = adapter.parse_transcript(&r).unwrap();
+        assert_seq_contract(adapter.as_ref(), &r);
+        assert_eq!(roles_kinds(&t.mainline), expected, "{:?}", r.agent);
+        assert!(t.mainline[0].text.starts_with("<system-reminder>"));
+        assert_eq!(t.mainline[1].text, "看下部署成功没有");
+        assert_eq!(t.mainline[4].text, "下一步做什么");
+        assert!(t.mainline[8].text.contains("Background (from the session"));
+        assert_eq!(t.mainline[11].text, "截图里这个按钮对吗");
+    }
+
+    let claude = ClaudeAdapter::new().with_custom_root(projects);
+    let s = claude
+        .parse_session(&claude.file_ref(&path).unwrap())
+        .unwrap();
+    assert_eq!(s.meta.title, "看下部署成功没有");
+    assert_eq!(s.meta.message_count, 5);
+    let indexed: String = s
+        .units
+        .iter()
+        .map(|u| u.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(indexed.contains("看下部署成功没有"));
+    assert!(indexed.contains("下一步做什么"));
+    for hidden in [
+        "Linked sessions",
+        "Background (from the session",
+        "side-sessions-event",
+    ] {
+        assert!(!indexed.contains(hidden), "{hidden} 不进搜索");
+    }
+}
+
 /// Claude Code 2.1 起命令行自己给会话起名(`ai-title`,#74):没有 custom-title 时它就是标题,
 /// 不算未知行;分支照抄原件的 AI 标题与 custom-title 一样不用;用户改过的名字照旧压过它
 #[test]
@@ -7921,6 +7984,7 @@ fn codebuddy_ide_context_and_internal_rows() {
             (Role::User, Text),           // 图片 + 话
             (Role::User, Text),           // 只有图片
             (Role::Assistant, Text),
+            (Role::User, Meta), // 带标记的队友汇报:开头垫着上下文也不切,整条一条
         ]
     );
     assert!(t.mainline[0].text.contains("QrCode.tsx open"), "上下文照留");
@@ -7959,6 +8023,7 @@ fn codebuddy_ide_context_and_internal_rows() {
         "stops on unmount",
         "Goal set",
         "image_local_path",
+        "second report",
     ] {
         assert!(!indexed.contains(hidden), "{hidden} 不该进搜索");
     }
@@ -7998,7 +8063,7 @@ fn codebuddy_blob_images_stay_inside_the_blob_store() {
     let outside = root.join("outside.png");
     fs::rename(&blob, &outside).unwrap();
     let t = adapter.parse_transcript(&r).unwrap();
-    assert_eq!(t.mainline.len(), 14);
+    assert_eq!(t.mainline.len(), 15);
     assert!(t.mainline[12].images.is_empty());
     assert_eq!(t.mainline[12].text, "[image]");
     #[cfg(unix)]

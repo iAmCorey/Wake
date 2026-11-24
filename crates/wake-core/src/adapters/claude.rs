@@ -756,7 +756,6 @@ fn parse_claude_jsonl(
             let Some(message) = message else { continue };
             let content = message.get("content");
             let mut parsed_message = ParsedContent::default();
-            let mut had_tool_result = false;
 
             match content {
                 Some(Value::String(s)) => parsed_message.push_text(s),
@@ -769,7 +768,6 @@ fn parse_claude_jsonl(
                                 }
                             }
                             Some("tool_result") => {
-                                had_tool_result = true;
                                 let id =
                                     b.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
                                 if let Some(&(mi, ti)) = tool_index.get(id) {
@@ -797,14 +795,17 @@ fn parse_claude_jsonl(
                 _ => {}
             }
 
-            let ParsedContent { text, images } = parsed_message;
-            if text.is_empty() && images.is_empty() {
-                let _ = had_tool_result;
-                continue;
-            }
-
             let is_meta = row.get("isMeta").and_then(|v| v.as_bool()) == Some(true);
             let is_compact = row.get("isCompactSummary").and_then(|v| v.as_bool()) == Some(true);
+            // 桌面端垫在人说的话前面的状态("Linked sessions now…"):单独一条 Meta,话照常判
+            let ParsedContent { text, images } = if is_meta || is_compact || !from_human(&row) {
+                parsed_message
+            } else {
+                push_leading_context(parsed_message, ts, &mut messages)
+            };
+            if text.is_empty() && images.is_empty() {
+                continue;
+            }
             let kind = if is_compact {
                 MessageKind::CompactSummary
             } else if is_meta || is_injected_user_content(&text) {

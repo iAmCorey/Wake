@@ -1540,6 +1540,78 @@ pub(crate) fn tag_inner(text: &str, tag: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// 开头那几段 `<system-reminder …>…</system-reminder>`(可以带属性)与其后的话,切成两截。
+/// 只切开头的,后面夹着的照旧留在话里;没有闭合标签的不切
+fn split_leading_reminders(text: &str) -> (&str, &str) {
+    const OPEN: &str = "<system-reminder";
+    const CLOSE: &str = "</system-reminder>";
+    let text = text.trim_start();
+    let mut rest = text;
+    while let Some(after) = rest.strip_prefix(OPEN) {
+        // 标签名到这里为止,后面是 `>` 或属性,不是名字更长的别的标签
+        if !after.starts_with(|c: char| c == '>' || c.is_whitespace()) {
+            break;
+        }
+        let Some(end) = after.find(CLOSE) else {
+            break;
+        };
+        rest = after[end + CLOSE.len()..].trim_start();
+    }
+    (text[..text.len() - rest.len()].trim_end(), rest)
+}
+
+/// 人说的话开头垫着的宿主状态与上下文(Claude 桌面端的 "Linked sessions now…"、CodeBuddy IDE 的
+/// 编辑器上下文,都是 `<system-reminder>`)。整条以 `<system-` 开头会被 `is_injected_user_content`
+/// 判成注入内容,话跟着不见——切下来单独推一条 Meta(内容照留)进 `messages`,交回剩下的再判;
+/// 图片的正文偏移随之平移。开头的图片占位先跳过(`after_image_placeholders`):不然图片在前时,扫描
+/// (不解码,图片是 `[image]`)不切、详情(解码,图片没有字)切,两边消息条数对不上、seq 错位。
+/// 宿主自己合成的消息开头也垫着它(桌面端的 "Background (from the session that started this
+/// one)…"),那种整条照旧是注入内容,调用方别对它调(Claude 系看 `from_human`)
+pub fn push_leading_context(
+    mut content: ParsedContent,
+    ts: i64,
+    messages: &mut Vec<TranscriptMessage>,
+) -> ParsedContent {
+    let rest = after_image_placeholders(&content.text);
+    let (lead, said) = split_leading_reminders(rest);
+    if lead.is_empty() {
+        return content;
+    }
+    let mut context = text_msg(Role::User, lead, ts);
+    context.kind = MessageKind::Meta;
+    messages.push(context);
+    let start = content.text.len() - rest.len();
+    let end = content.text.len() - said.len();
+    content.text.replace_range(start..end, "");
+    for image in &mut content.images {
+        image.text_offset = match image.text_offset {
+            offset if offset >= end => offset - (end - start),
+            offset => offset.min(start),
+        };
+    }
+    content
+}
+
+/// 跳过开头的图片占位。扫描不解码时图片是 `[image]`,详情解码时图片没有字:按开头判断的地方
+/// (分类、切上下文)两种解析要判成一样
+pub fn after_image_placeholders(text: &str) -> &str {
+    let mut text = text.trim_start();
+    while let Some(rest) = text.strip_prefix(IMAGE_PLACEHOLDER) {
+        text = rest.trim_start();
+    }
+    text
+}
+
+/// Claude Code 系转录(Claude、Qoder)的一行是不是人说的:`turnOrigin` / `origin.kind` 记了 human
+/// 以外的来源(桌面端合成的 host_synthetic、经 SDK 塞进来的 sdk)就不是;都没记的(老版本)算人说的
+pub fn from_human(row: &Value) -> bool {
+    ["/turnOrigin", "/origin/kind"].iter().all(|key| {
+        row.pointer(key)
+            .and_then(Value::as_str)
+            .is_none_or(|origin| origin == "human")
+    })
+}
+
 /// IDE/CLI 注入型"用户"消息:非用户手打,详情里应归 Meta 折叠,不参与标题推导。
 pub fn is_injected_user_content(text: &str) -> bool {
     let t = text.trim_start();
@@ -1750,6 +1822,114 @@ mod tests {
         // 到上限后不再拼接,也不再反复 clip
         merge_into_last_assistant(&mut messages, 4, content(""), "more");
         assert_eq!(messages[1].thinking.as_deref(), Some(thinking.as_str()));
+    }
+
+    #[test]
+    fn only_leading_reminders_are_split_off() {
+        let attr = "<system-reminder data-role=\"user-context\">open file</system-reminder>";
+        for (text, context, said) in [
+            (&*format!("{attr}\n问题\n  第二行"), attr, "问题\n  第二行"),
+            (
+                "<system-reminder>a</system-reminder> <system-reminder>b</system-reminder>x",
+                "<system-reminder>a</system-reminder> <system-reminder>b</system-reminder>",
+                "x",
+            ),
+            (
+                "<system-reminder>only</system-reminder>",
+                "<system-reminder>only</system-reminder>",
+                "",
+            ),
+            // 后面夹着的、没闭合的、名字更长的别的标签都不动
+            (
+                "问题 <system-reminder>c</system-reminder>",
+                "",
+                "问题 <system-reminder>c</system-reminder>",
+            ),
+            ("<system-reminder>unclosed", "", "<system-reminder>unclosed"),
+            (
+                "<system-reminders>x</system-reminders>",
+                "",
+                "<system-reminders>x</system-reminders>",
+            ),
+        ] {
+            assert_eq!(split_leading_reminders(text), (context, said), "{text}");
+        }
+    }
+
+    /// 切下来的上下文成一条 Meta,剩下的话交回、图片的正文偏移跟着平移;没有上下文时原样交回
+    #[test]
+    fn leading_context_becomes_its_own_meta_message() {
+        let mut content = ParsedContent::default();
+        content.push_text("<system-reminder>status</system-reminder>");
+        content.push_image(ImageAttachment {
+            media_type: "image/png".into(),
+            bytes: vec![1],
+            text_offset: 0,
+        });
+        content.push_text("看下部署成功没有");
+        let mut messages = Vec::new();
+        let said = push_leading_context(content, 7, &mut messages);
+        assert_eq!(said.text, "看下部署成功没有");
+        assert_eq!(said.images[0].text_offset, 0);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MessageKind::Meta);
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(
+            messages[0].text,
+            "<system-reminder>status</system-reminder>"
+        );
+        assert_eq!(messages[0].timestamp, Some(7));
+
+        let mut plain = ParsedContent::default();
+        plain.push_text("问题");
+        let said = push_leading_context(plain, 7, &mut messages);
+        assert_eq!(said.text, "问题");
+        assert_eq!(messages.len(), 1);
+    }
+
+    /// 图片在前:不解码(扫描,图片是 `[image]`)与解码(详情,图片没有字)切法一样,上下文都单独
+    /// 一条,剩下的话里图片占位或图片照留
+    #[test]
+    fn leading_context_ignores_leading_image_placeholders() {
+        let text = "<system-reminder>status</system-reminder>\n截图里这个按钮对吗";
+        let mut scanned = ParsedContent::default();
+        scanned.push_text(IMAGE_PLACEHOLDER);
+        scanned.push_text(text);
+        let mut shown = ParsedContent::default();
+        shown.push_image(ImageAttachment {
+            media_type: "image/png".into(),
+            bytes: vec![1],
+            text_offset: 0,
+        });
+        shown.push_text(text);
+
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        let scanned = push_leading_context(scanned, 1, &mut a);
+        let shown = push_leading_context(shown, 1, &mut b);
+        assert_eq!((a.len(), b.len()), (1, 1));
+        assert_eq!(a[0].text, b[0].text);
+        assert_eq!(scanned.text, "[image]\n\n截图里这个按钮对吗");
+        assert_eq!(shown.text, "截图里这个按钮对吗");
+        assert_eq!(shown.images[0].text_offset, 0);
+    }
+
+    #[test]
+    fn rows_are_human_unless_an_origin_says_otherwise() {
+        for (row, human) in [
+            (serde_json::json!({}), true),
+            (
+                serde_json::json!({"turnOrigin": "human", "origin": {"kind": "human"}}),
+                true,
+            ),
+            (serde_json::json!({"turnOrigin": "host_synthetic"}), false),
+            (serde_json::json!({"turnOrigin": "sdk"}), false),
+            (
+                serde_json::json!({"origin": {"kind": "task-notification"}}),
+                false,
+            ),
+        ] {
+            assert_eq!(from_human(&row), human, "{row}");
+        }
     }
 
     #[test]

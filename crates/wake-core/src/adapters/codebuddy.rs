@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 /// 同款:探到会话才采信)。
 ///
 /// 用户行不全是人打的字:IDE 上下文垫在提问前面(`row_content` 切开)、压缩摘要与各种内部
-/// 回灌也写成用户行(`internal_kind`);贴进来的图片按内容寻址存在 `<home>/blobs`(`blob_file`),
+/// 回灌也写成用户行(`flagged_kind` / `prefixed_kind`);贴进来的图片按内容寻址存在 `<home>/blobs`(`blob_file`),
 /// 没有 home 的根(只选了 projects 目录、远程镜像)照旧占位;只有元数据的文件不列
 /// (`has_conversation`)。
 ///
@@ -138,26 +138,6 @@ fn is_placeholder_title(text: &str) -> bool {
     text == "(No content)" || text == "/compact" || is_image_label(text)
 }
 
-/// 开头那几段 `<system-reminder …>…</system-reminder>`(可以带属性)与其后的话,切成两截。
-/// 只切开头的,后面夹着的照旧留在话里;没有闭合标签的不切,整块仍按注入内容算
-fn split_leading_reminders(text: &str) -> (&str, &str) {
-    const OPEN: &str = "<system-reminder";
-    const CLOSE: &str = "</system-reminder>";
-    let text = text.trim_start();
-    let mut rest = text;
-    while let Some(after) = rest.strip_prefix(OPEN) {
-        // 标签名到这里为止,后面是 `>` 或属性,不是名字更长的别的标签
-        if !after.starts_with(|c: char| c == '>' || c.is_whitespace()) {
-            break;
-        }
-        let Some(end) = after.find(CLOSE) else {
-            break;
-        };
-        rest = after[end + CLOSE.len()..].trim_start();
-    }
-    (text[..text.len() - rest.len()].trim_end(), rest)
-}
-
 fn is_blob(block: &Value) -> bool {
     block.get("type").and_then(Value::as_str) == Some("image_blob_ref")
 }
@@ -176,21 +156,14 @@ fn blob_file(block: &Value) -> Option<PathBuf> {
 }
 
 /// 一行的内容块。blob 里的图片按 id 在 `blobs` 里解(解不出来、不解码时 `content_parts` 照常
-/// 占位,两种解析的消息条数一样)。用户行(`user`)每块开头的 IDE 上下文切出来另交(调用方单独
-/// 记一条 Meta——上下文里可能有用户选中的代码,别丢),有 blob 时去掉旁边的路径标签
-fn row_content(
-    row: &Value,
-    decode_images: bool,
-    blobs: Option<&Path>,
-    user: bool,
-) -> (String, ParsedContent) {
+/// 占位,两种解析的消息条数一样),有 blob 时去掉旁边的路径标签
+fn row_content(row: &Value, decode_images: bool, blobs: Option<&Path>) -> ParsedContent {
     let blocks = match row.get("content").unwrap_or(&Value::Null) {
         Value::Array(blocks) => blocks.as_slice(),
         other => std::slice::from_ref(other),
     };
     let blobs = blobs.filter(|_| decode_images);
     let has_blob = blocks.iter().any(is_blob);
-    let mut context = String::new();
     let mut out = ParsedContent::default();
     for block in blocks {
         let decoded = match blobs {
@@ -203,48 +176,23 @@ fn row_content(
             out.push_image(image);
             continue;
         }
-        let mut part = content_parts(block, decode_images);
-        if user && part.images.is_empty() {
-            let (lead, said) = split_leading_reminders(&part.text);
-            if !lead.is_empty() {
-                if !context.is_empty() {
-                    context.push_str("\n\n");
-                }
-                context.push_str(lead);
-            }
-            if has_blob && is_image_label(said) {
-                continue;
-            }
-            if !lead.is_empty() {
-                part.text = said.to_string();
-            }
+        let part = content_parts(block, decode_images);
+        if !(has_blob && part.images.is_empty() && is_image_label(&part.text)) {
+            out.append(part);
         }
-        out.append(part);
     }
-    (context, out)
+    out
 }
 
-/// 分类看的话:跳过开头的图片占位——扫描时不解码,图片是 `[image]`;详情里解码,图片没有字。
-/// 两种解析要判成同一种
-fn after_images(text: &str) -> &str {
-    let mut text = text;
-    while let Some(rest) = text.strip_prefix(IMAGE_PLACEHOLDER) {
-        text = rest.trim_start();
-    }
-    text
-}
-
-/// 记成用户行、却不是人打的字:压缩摘要归 CompactSummary,队友(别的 agent)的汇报、hook 的
-/// 回灌、后台任务通知、本地命令的输出归 Meta。providerData 上的标记优先,其次看剥掉 IDE 上下文
-/// 之后的开头
-fn internal_kind(row: &Value, text: &str) -> Option<MessageKind> {
+/// 记成用户行、却不是人打的字,providerData 上有标记的:压缩摘要归 CompactSummary,队友(别的
+/// agent)的汇报、hook 的回灌、后台任务通知归 Meta。有标记的整行照它判,开头的上下文不切
+fn flagged_kind(row: &Value) -> Option<MessageKind> {
     let flag = |key: &str| {
         row.get("providerData")
             .and_then(|pd| pd.get(key))
             .is_some_and(|v| !v.is_null() && *v != Value::Bool(false))
     };
-    let starts = |prefixes: &[&str]| prefixes.iter().any(|p| text.starts_with(p));
-    if flag("isSummary") || starts(&["<cb_summary>", "<conversation_history_summary>"]) {
+    if flag("isSummary") {
         Some(MessageKind::CompactSummary)
     } else if [
         "isMeta",
@@ -254,13 +202,24 @@ fn internal_kind(row: &Value, text: &str) -> Option<MessageKind> {
     ]
     .into_iter()
     .any(flag)
-        || starts(&[
-            "<teammate-message",
-            "<local-command-stdout>",
-            "A session-scoped Stop hook",
-            "Stop hook feedback:",
-        ])
     {
+        Some(MessageKind::Meta)
+    } else {
+        None
+    }
+}
+
+/// 没有标记时看剥掉 IDE 上下文之后的开头:压缩摘要,队友汇报、本地命令输出、Stop hook 的反馈
+fn prefixed_kind(text: &str) -> Option<MessageKind> {
+    let starts = |prefixes: &[&str]| prefixes.iter().any(|p| text.starts_with(p));
+    if starts(&["<cb_summary>", "<conversation_history_summary>"]) {
+        Some(MessageKind::CompactSummary)
+    } else if starts(&[
+        "<teammate-message",
+        "<local-command-stdout>",
+        "A session-scoped Stop hook",
+        "Stop hook feedback:",
+    ]) {
         Some(MessageKind::Meta)
     } else {
         None
@@ -452,30 +411,35 @@ fn parse_codebuddy_jsonl(
                 match row.get("role").and_then(Value::as_str).unwrap_or("") {
                     "user" => {
                         flush_assistant(&mut pending, &mut out.messages, &mut tool_index);
-                        let (context, ParsedContent { text, images }) =
-                            row_content(&row, decode_images, blobs, true);
-                        let said = !text.is_empty() || !images.is_empty();
-                        if context.is_empty() && !said {
-                            continue;
-                        }
-                        if !context.is_empty() {
-                            // 垫在前面的 IDE 上下文:单独一条 Meta,不当提问、不进搜索,内容照留
-                            let mut msg = text_msg(Role::User, &context, ts);
-                            msg.kind = MessageKind::Meta;
-                            out.messages.push(msg);
-                        }
-                        if said {
-                            let lead = after_images(&text);
+                        let content = row_content(&row, decode_images, blobs);
+                        let flagged = flagged_kind(&row);
+                        let before = out.messages.len();
+                        // 垫在前面的 IDE 上下文:单独一条 Meta,不当提问、不进搜索,内容照留
+                        let ParsedContent { text, images } = match flagged {
+                            Some(_) => content,
+                            None => push_leading_context(content, ts, &mut out.messages),
+                        };
+                        if !text.is_empty() || !images.is_empty() {
+                            let lead = after_image_placeholders(&text);
                             let mut msg = text_msg(Role::User, &text, ts);
-                            msg.kind = internal_kind(&row, lead).unwrap_or_else(|| user_kind(lead));
+                            // 摘要优先:带 isCompactInternal 标记的 `<cb_summary>` 是压缩摘要
+                            let prefixed = prefixed_kind(lead);
+                            msg.kind = if [flagged, prefixed]
+                                .contains(&Some(MessageKind::CompactSummary))
+                            {
+                                MessageKind::CompactSummary
+                            } else {
+                                flagged.or(prefixed).unwrap_or_else(|| user_kind(lead))
+                            };
                             msg.images = images;
                             out.messages.push(msg);
+                        } else if out.messages.len() == before {
+                            continue;
                         }
                     }
                     "assistant" => {
                         let p = assistant_slot(&mut out, &mut pending, &mut tool_index, ts, &row);
-                        p.content
-                            .append(row_content(&row, decode_images, blobs, false).1);
+                        p.content.append(row_content(&row, decode_images, blobs));
                     }
                     "system" => {
                         // 系统行折叠为 Meta,不参与计数
@@ -732,38 +696,6 @@ impl AgentAdapter for CodebuddyAdapter {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn only_leading_reminders_are_split_off() {
-        let attr = "<system-reminder data-role=\"user-context\">open file</system-reminder>";
-        for (text, context, said) in [
-            (&*format!("{attr}\n问题\n  第二行"), attr, "问题\n  第二行"),
-            (
-                "<system-reminder>a</system-reminder> <system-reminder>b</system-reminder>x",
-                "<system-reminder>a</system-reminder> <system-reminder>b</system-reminder>",
-                "x",
-            ),
-            (
-                "<system-reminder>only</system-reminder>",
-                "<system-reminder>only</system-reminder>",
-                "",
-            ),
-            // 后面夹着的、没闭合的、名字更长的别的标签都不动
-            (
-                "问题 <system-reminder>c</system-reminder>",
-                "",
-                "问题 <system-reminder>c</system-reminder>",
-            ),
-            ("<system-reminder>unclosed", "", "<system-reminder>unclosed"),
-            (
-                "<system-reminders>x</system-reminders>",
-                "",
-                "<system-reminders>x</system-reminders>",
-            ),
-        ] {
-            assert_eq!(split_leading_reminders(text), (context, said), "{text}");
-        }
-    }
 
     #[test]
     fn image_labels_are_whole_blocks_only() {

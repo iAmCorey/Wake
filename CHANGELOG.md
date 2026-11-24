@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- New: The transcript shows where system messages such as injected context and hook output were hidden; open the note to read them
+- Fix: Questions you sent from the Claude app's Code tab no longer disappear when the app puts a status note in front of them; they show in the transcript, search and Insights again
 - Fix: CodeBuddy Code no longer hides a question that arrives with editor context in front of it, and no longer counts teammate reports, hook follow-ups or compaction summaries as your messages (#88, thanks @XYZliang)
 - Fix: CodeBuddy Code shows the images you pasted, and sessions where nothing was said are no longer listed (#88, thanks @XYZliang)
 

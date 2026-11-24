@@ -12,3 +12,4 @@
 {"type": "context-usage", "id": "cu-0001", "timestamp": 1781200009100}
 {"type": "request-recovery", "id": "rr-0001", "timestamp": 1781200009200}
 {"id": "n-0011", "timestamp": 1781200010000, "type": "message", "role": "assistant", "providerData": {"agent": "cli", "model": "hy3", "rawUsage": {"prompt_tokens": 900, "completion_tokens": 50}}, "status": "completed", "content": [{"type": "output_text", "text": "按钮样式我再对一下。"}]}
+{"id": "n-0012", "timestamp": 1781200011000, "type": "message", "role": "user", "providerData": {"agent": "cli", "teammateMessage": {"teammateId": "worker"}}, "content": [{"type": "input_text", "text": "<system-reminder>ctx</system-reminder>\n<teammate-message teammate_id=\"worker\">second report</teammate-message>"}]}

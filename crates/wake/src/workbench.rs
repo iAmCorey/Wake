@@ -2017,16 +2017,23 @@ fn load_visible_transcript(
         )
     })?;
 
+    // 系统内容(Meta)也留着:阅读视图在原位置画"已隐藏 N 条系统内容"的折叠卡(render_msg_row)。
+    // 卡里只有文字,它们的图片不解码、不占图片预算
     Ok(transcript
         .mainline
         .into_iter()
+        .map(|mut message| {
+            if message.kind == MessageKind::Meta {
+                message.images.clear();
+            }
+            message
+        })
         .filter(|message| {
-            message.kind != MessageKind::Meta
-                && (!message.text.trim().is_empty()
-                    || !message.tool_calls.is_empty()
-                    || message.thinking.is_some()
-                    || !message.images.is_empty()
-                    || message.kind == MessageKind::CompactSummary)
+            !message.text.trim().is_empty()
+                || !message.tool_calls.is_empty()
+                || message.thinking.is_some()
+                || !message.images.is_empty()
+                || message.kind == MessageKind::CompactSummary
         })
         .collect())
 }
@@ -2035,6 +2042,31 @@ fn toggle_expanded_row(rows: &mut HashSet<usize>, ix: usize) {
     if !rows.insert(ix) {
         rows.remove(&ix);
     }
+}
+
+/// 折叠卡(工具簇、Thinking、隐藏的系统内容)的点击:翻转这一行的展开状态,行高随之变化,让 list
+/// 重测这一行
+fn fold_toggle<'a>(
+    ix: usize,
+    expanded: fn(&mut DetailState) -> &mut HashSet<usize>,
+    cx: &'a mut Context<Workbench>,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static + use<'a> {
+    cx.listener(move |this, _, _window, cx| {
+        if let Some(detail) = &mut this.detail {
+            toggle_expanded_row(expanded(detail), ix);
+            detail.msg_list.splice(ix..ix + 1, 1);
+        }
+        cx.notify();
+    })
+}
+
+/// 紧挨在下标 `ix` 前面的那一串隐藏的系统内容(Meta)从哪条开始,前面不是隐藏的就是 `ix` 本身。
+/// 折叠卡画在一串的第一条:渲染按它判断这一行画卡还是不占高度,搜索跳转按它把卡一起露出来
+fn hidden_run_start(rows: &[TranscriptMessage], ix: usize) -> usize {
+    rows[..ix]
+        .iter()
+        .rposition(|m| m.kind != MessageKind::Meta)
+        .map_or(0, |prev| prev + 1)
 }
 
 struct DetailState {
@@ -2055,6 +2087,8 @@ struct DetailState {
     expanded_tools: HashSet<usize>,
     /// 展开的 Thinking。与工具簇分开存，避免其中一个把另一个一起展开。
     expanded_thinking: HashSet<usize>,
+    /// 展开的"已隐藏的系统内容"(按那一串里第一条的下标)
+    expanded_hidden: HashSet<usize>,
     /// 搜索跳转目标(FTS seq,契约=消息 seq);解析完成后滚到该消息并保持高亮
     jump_seq: Option<i64>,
     /// 与 transcript 同下标；原始字节只保留在 Arc<Image> 内，避免双份内存。
@@ -2083,6 +2117,7 @@ impl DetailState {
             msg_list: gpui::ListState::new(0, gpui::ListAlignment::Bottom, zpx(512.)),
             expanded_tools: HashSet::new(),
             expanded_thinking: HashSet::new(),
+            expanded_hidden: HashSet::new(),
             jump_seq,
             images: Vec::new(),
             zoom: None,
@@ -5597,9 +5632,15 @@ impl Workbench {
                             // jump_seq 归一为落点消息的实际 seq——高亮按精确相等
                             // 渲染,不归一则命中被滤时滚动与高亮指向不同行
                             if let Some(seq) = detail.jump_seq {
-                                if let Some(ix) = messages.iter().position(|m| m.seq >= seq) {
+                                // 落点不落在折叠起来的系统内容上
+                                if let Some(ix) = messages
+                                    .iter()
+                                    .position(|m| m.seq >= seq && m.kind != MessageKind::Meta)
+                                {
                                     detail.jump_seq = Some(messages[ix].seq);
-                                    pin_list_row(&detail.msg_list, ix);
+                                    // 紧挨在落点前面的"已隐藏"卡一起露出来:钉它,落点紧跟在
+                                    // 下面,高亮仍在落点上
+                                    pin_list_row(&detail.msg_list, hidden_run_start(&messages, ix));
                                 }
                             }
                             detail.transcript = Rc::new(messages);
@@ -7206,10 +7247,32 @@ impl Workbench {
         {
             return div().into_any_element();
         }
+        // 连着的几条系统内容只在第一条的位置画一张"已隐藏 N 条"的折叠卡,后面几条不占高度
+        let hidden_run = if m.kind == MessageKind::Meta {
+            if hidden_run_start(&transcript, ix) < ix {
+                return div().into_any_element();
+            }
+            transcript[ix..]
+                .iter()
+                .take_while(|m| m.kind == MessageKind::Meta)
+                .count()
+        } else {
+            0
+        };
+        let last = ix + hidden_run.max(1) == total;
         // 搜索跳转的落点消息:淡 primary 底色保持高亮,直到换会话
         let is_jump_target = jump_seq == Some(m.seq);
 
-        let inner: AnyElement = if m.kind == MessageKind::CompactSummary {
+        let inner: AnyElement = if hidden_run > 0 {
+            hidden_panel(
+                ix,
+                &transcript[ix..ix + hidden_run],
+                detail.expanded_hidden.contains(&ix),
+                fold_toggle(ix, |detail| &mut detail.expanded_hidden, cx),
+                cx,
+            )
+            .into_any_element()
+        } else if m.kind == MessageKind::CompactSummary {
             centered_pill(t("Context compacted"), cx).into_any_element()
         } else {
             match m.role {
@@ -7258,13 +7321,7 @@ impl Workbench {
                             ix,
                             thinking,
                             thinking_open,
-                            cx.listener(move |this, _, _window, cx| {
-                                if let Some(detail) = &mut this.detail {
-                                    toggle_expanded_row(&mut detail.expanded_thinking, ix);
-                                    detail.msg_list.splice(ix..ix + 1, 1);
-                                }
-                                cx.notify();
-                            }),
+                            fold_toggle(ix, |detail| &mut detail.expanded_thinking, cx),
                             cx,
                         ));
                     }
@@ -7301,14 +7358,7 @@ impl Workbench {
                             &m.tool_calls,
                             tool_arg_cells,
                             tools_open,
-                            cx.listener(move |this, _, _window, cx| {
-                                if let Some(detail) = &mut this.detail {
-                                    toggle_expanded_row(&mut detail.expanded_tools, ix);
-                                    // 行高随展开变化,让 list 重测该行
-                                    detail.msg_list.splice(ix..ix + 1, 1);
-                                }
-                                cx.notify();
-                            }),
+                            fold_toggle(ix, |detail| &mut detail.expanded_tools, cx),
                             cx.entity(),
                             cx,
                         ));
@@ -7327,7 +7377,7 @@ impl Workbench {
             .px(SPACE_XXL)
             .py(SPACE_SM)
             .when(ix == 0, |d| d.pt(SPACE_LG))
-            .when(ix + 1 == total, |d| d.pb(SPACE_XXL))
+            .when(last, |d| d.pb(SPACE_XXL))
             .child(
                 div()
                     .w_full()
@@ -9762,17 +9812,18 @@ fn markdown_body(
     crate::markdown_links::with_session_links(view, host, project_path)
 }
 
-/// Thinking 折叠面板：收起是一行摘要，展开后显示完整原文。
-fn thinking_panel(
-    ix: usize,
-    text: &str,
+/// Thinking 与"已隐藏的系统内容"共用的折叠卡:标题行是 chevron + 标签,收起时接一行斜体摘要
+/// (摘要只在收起时算——隐藏内容动辄几十 KB),展开后由调用方接上正文
+fn fold_card(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    summary_of: &str,
     expanded: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> Div {
     let theme = cx.theme();
-    let summary = clip_display(&one_line(text, 400), 88);
-    let mut panel = v_flex()
+    v_flex()
         .w_full()
         .min_w_0()
         .rounded(theme.radius)
@@ -9781,7 +9832,7 @@ fn thinking_panel(
         .bg(theme.muted.opacity(0.45))
         .child(
             h_flex()
-                .id(("thinking", ix))
+                .id(id)
                 .w_full()
                 .min_w_0()
                 .items_center()
@@ -9800,7 +9851,7 @@ fn thinking_panel(
                             icon.rotate(gpui::Radians(std::f32::consts::FRAC_PI_2))
                         }),
                 )
-                .child(div().flex_shrink_0().font_medium().child(t("Thinking")))
+                .child(div().flex_shrink_0().font_medium().child(label.into()))
                 .when(!expanded, |header| {
                     header.child(
                         div()
@@ -9808,14 +9859,32 @@ fn thinking_panel(
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .italic()
-                            .child(summary),
+                            .child(clip_display(&one_line(summary_of, 400), 88)),
                     )
                 })
                 .on_click(on_toggle),
-        );
+        )
+}
 
-    if expanded {
-        panel = panel.child(
+/// Thinking 折叠面板：收起是一行摘要，展开后显示完整原文。
+fn thinking_panel(
+    ix: usize,
+    text: &str,
+    expanded: bool,
+    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Div {
+    let muted = cx.theme().muted_foreground;
+    fold_card(
+        ("thinking", ix),
+        t("Thinking"),
+        text,
+        expanded,
+        on_toggle,
+        cx,
+    )
+    .when(expanded, |panel| {
+        panel.child(
             div()
                 .w_full()
                 .min_w_0()
@@ -9825,12 +9894,56 @@ fn thinking_panel(
                 .whitespace_normal()
                 .text_size(FONT_MSG_THINKING)
                 .line_height(relative(1.7))
-                .text_color(theme.muted_foreground)
+                .text_color(muted)
                 .child(text.to_string()),
-        );
-    }
+        )
+    })
+}
 
-    panel
+/// 阅读视图里隐藏的系统内容(注入的上下文、hook 输出、桌面端垫在提问前面的状态等):与 Thinking
+/// 同一张折叠卡,收起时"已隐藏 N 条系统内容"加第一条的摘要,展开后逐条显示——与工具调用的输入
+/// 输出同一种段落(前 600 字、复制原文)。`run` 是连着的那一串,至少一条
+fn hidden_panel(
+    ix: usize,
+    run: &[TranscriptMessage],
+    expanded: bool,
+    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Div {
+    let label = crate::tp!(
+        "{} hidden system message",
+        "{} hidden system messages",
+        run.len()
+    );
+    let card = fold_card(("hidden", ix), label, &run[0].text, expanded, on_toggle, cx);
+    if !expanded {
+        return card;
+    }
+    let theme = cx.theme();
+    let mono = theme.mono_font_family.clone();
+    card.child(
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .border_t_1()
+            .border_color(theme.border)
+            .children(run.iter().enumerate().map(|(n, message)| {
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .px(SPACE_MD)
+                    .py(zpx(10.))
+                    .when(n > 0, |item| item.border_t_1().border_color(theme.border))
+                    .child(tool_section(
+                        format!("hidden-copy-{ix}-{n}").into(),
+                        t("System message"),
+                        &message.text,
+                        false,
+                        mono.clone(),
+                        cx,
+                    ))
+            })),
+    )
 }
 
 const TOOL_TEXT_PREVIEW_LIMIT: usize = 600;
