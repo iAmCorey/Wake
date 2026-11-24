@@ -6,7 +6,7 @@ use super::{
     cli_not_found_error, percent_encode, pipe_to, resolve_cli, resume_args, session_bin, sh_quote,
     spawn_and_reap, ResumeOutcome,
 };
-use crate::adapters::claude_desktop;
+use crate::adapters::{claude_desktop, EnvVar};
 use crate::models::{AgentId, SessionMeta};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -136,9 +136,13 @@ impl TerminalApp {
 
 /// 深链类目标整锅接管 resume(不经 agent CLI)。新增非 shell 目标在此
 /// 声明,mod.rs 的 resume_session_in 无需加旁路。
-pub(super) fn deep_link_resume(meta: &SessionMeta, term: TerminalApp) -> Option<ResumeOutcome> {
+pub(super) fn deep_link_resume(
+    meta: &SessionMeta,
+    term: TerminalApp,
+    env: &[EnvVar],
+) -> Option<ResumeOutcome> {
     match term {
-        TerminalApp::Kooky => Some(launch_kooky(meta)),
+        TerminalApp::Kooky => Some(launch_kooky(meta, env)),
         TerminalApp::ClaudeDesktop => Some(launch_claude_desktop(meta)),
         TerminalApp::CodexDesktop => Some(launch_desktop_id(&meta.id, "codex://threads/", term)),
         _ => None,
@@ -247,22 +251,29 @@ const KOOKY_ROSTER: &[AgentId] = &[
     AgentId::Kimi,
 ];
 
-/// Kooky 能否打开该 agent 的会话:roster 内走 resume 深链(旧版 kooky 也认,
-/// 不依赖 CLI 副本);名单外靠 kooky-cli 传命令文本,没有 CLI 副本就不列 Kooky
-fn kooky_speaks(agent: AgentId) -> bool {
-    KOOKY_ROSTER.contains(&agent) || kooky_cli_path().is_some()
+/// 这条会话走不走 kooky://resume 深链:agent 在 kooky 的名单里、又不用设环境变量(深链带
+/// 不进去)。列不列 Kooky(kooky_speaks)与怎么开(launch_kooky)共用这一个判据
+fn kooky_deep_link(agent: AgentId, env: &[EnvVar]) -> bool {
+    env.is_empty() && KOOKY_ROSTER.contains(&agent)
+}
+
+/// Kooky 能否打开这条会话:走深链的不依赖 CLI 副本(旧版 kooky 也认);其余靠 kooky-cli
+/// 传命令文本,没有 CLI 副本就不列 Kooky
+fn kooky_speaks(agent: AgentId, env: &[EnvVar]) -> bool {
+    kooky_deep_link(agent, env) || kooky_cli_path().is_some()
 }
 
 /// 某会话可用的恢复目标(Kooky 按 agent 过滤见 kooky_speaks;两家 desktop
-/// 只认自家 agent 的会话——深链 id 命名空间互不相通)
-pub fn terminals_for(agent: AgentId) -> Vec<TerminalApp> {
+/// 只认自家 agent 的会话——深链 id 命名空间互不相通——也只认自己的数据目录,
+/// 要设环境变量的会话不列)
+pub fn terminals_for(agent: AgentId, env: &[EnvVar]) -> Vec<TerminalApp> {
     installed_terminals()
         .iter()
         .copied()
         .filter(|t| match t {
-            TerminalApp::Kooky => kooky_speaks(agent),
-            TerminalApp::ClaudeDesktop => agent == AgentId::ClaudeCode,
-            TerminalApp::CodexDesktop => agent == AgentId::Codex,
+            TerminalApp::Kooky => kooky_speaks(agent, env),
+            TerminalApp::ClaudeDesktop => env.is_empty() && agent == AgentId::ClaudeCode,
+            TerminalApp::CodexDesktop => env.is_empty() && agent == AgentId::Codex,
             _ => true,
         })
         .collect()
@@ -451,9 +462,10 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
 }
 
 /// KOOKY_ROSTER 之外的 agent 在 kooky 里点名会被拒——改走 kooky-cli 的哑管道:
-/// `open --cwd <项目> -e "<命令>"`,与 Terminal/iTerm 收命令文本同级。
-/// 命令从 session_bin + resume_args 拼(与真终端路径同一来源),cd 由 --cwd 承担
-fn launch_kooky_cli(meta: &SessionMeta) -> ResumeOutcome {
+/// `open --cwd <项目> -e "<命令>"`,与 Terminal/iTerm 收命令文本同级。要设环境变量的
+/// 会话(深链带不进去)也走这里。命令从 session_bin + resume_args 拼(与真终端路径
+/// 同一来源),cd 由 --cwd 承担
+fn launch_kooky_cli(meta: &SessionMeta, env: &[EnvVar]) -> ResumeOutcome {
     let fail = |command: String, error: String| ResumeOutcome {
         ok: false,
         command,
@@ -480,7 +492,7 @@ fn launch_kooky_cli(meta: &SessionMeta) -> ResumeOutcome {
     let Some(exe) = resolve_cli(bin) else {
         return fail(String::new(), cli_not_found_error(meta.agent, bin));
     };
-    let cmd = super::sh_command_line(exe.as_str(), &args, None);
+    let cmd = super::sh_command_line(exe.as_str(), &args, None, env);
     let shown = format!(
         "kooky-cli open --cwd {} -e {}",
         sh_quote(&meta.project_path),
@@ -492,6 +504,7 @@ fn launch_kooky_cli(meta: &SessionMeta) -> ResumeOutcome {
         exe.as_str(),
         &args,
         cwd_ok.then_some(meta.project_path.as_str()),
+        env,
     );
     let bail = |reason: String| {
         fail(
@@ -531,9 +544,9 @@ fn launch_kooky_cli(meta: &SessionMeta) -> ResumeOutcome {
 /// Kooky 深链恢复(kooky://resume,约定见 kooky 的 DeepLink.swift):
 /// id 校验与 kooky 端同规则;深链失败(未发布的旧版没注册 scheme)退回激活应用。
 /// 不依赖 agent CLI——kooky 自己会起 agent。
-fn launch_kooky(meta: &SessionMeta) -> ResumeOutcome {
-    if !KOOKY_ROSTER.contains(&meta.agent) {
-        return launch_kooky_cli(meta);
+fn launch_kooky(meta: &SessionMeta, env: &[EnvVar]) -> ResumeOutcome {
+    if !kooky_deep_link(meta.agent, env) {
+        return launch_kooky_cli(meta, env);
     }
     if super::is_resume_id(&meta.id) {
         let mut url = format!(
@@ -753,7 +766,8 @@ mod tests {
             pinned: false,
         };
         for term in [TerminalApp::ClaudeDesktop, TerminalApp::CodexDesktop] {
-            let outcome = deep_link_resume(&meta, term).expect("desktop targets are deep-link");
+            let outcome =
+                deep_link_resume(&meta, term, &[]).expect("desktop targets are deep-link");
             assert!(!outcome.ok);
             assert!(
                 outcome.command.is_empty(),

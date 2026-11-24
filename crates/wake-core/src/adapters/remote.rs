@@ -158,6 +158,11 @@ impl AgentAdapter for RemoteAdapter {
         Vec::new()
     }
 
+    fn resume_env(&self) -> Vec<super::EnvVar> {
+        // 远程会话只给复制 ssh 命令;inner 的 home 是本机缓存目录,远端用不上
+        Vec::new()
+    }
+
     fn memory_sources(&self) -> Vec<MemorySource> {
         // inner 按缓存挂载点构造,它报的路径已经是缓存内的
         self.inner.memory_sources()

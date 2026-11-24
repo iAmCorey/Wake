@@ -5895,9 +5895,10 @@ impl Workbench {
         }
     }
 
-    /// per-agent 记忆任何 App 点击都写(只影响本 agent,收敛到用户实际用的);
-    /// 全局 last_terminal 只在 explicit(下拉显式选择)时写——左段点的可能
-    /// 是回退值,写进全局会让一个 dsh 会话把 Kooky 偏好冲成 Terminal。
+    /// 下拉里显式选的(explicit)写 per-agent 记忆与全局 last_terminal;左段点击只补上这个
+    /// agent 还没有的记忆、不覆盖——左段显示的可能是回退值(记着的目标不在这条会话的列表里:
+    /// 带 CODEX_HOME 的 Codex 会话不列 Codex Desktop,#83;dsh 会话不列 Kooky),写进去就会
+    /// 把用户的选择冲成 Terminal。
     /// 非 App 目标(Copy SSH command)不进记忆:远程/本地列表不相交,记了
     /// 也没有可回放的场景。
     fn do_resume(
@@ -5909,15 +5910,21 @@ impl Workbench {
     ) {
         let Some(detail) = &self.detail else { return };
         if let terminal::ResumeTarget::App(term) = target {
-            self.preferred_terminal.insert(detail.meta.agent, term);
             if explicit {
+                self.preferred_terminal.insert(detail.meta.agent, term);
                 self.last_terminal = Some(term);
+            } else {
+                self.preferred_terminal
+                    .entry(detail.meta.agent)
+                    .or_insert(term);
             }
             self.save_open_in_prefs();
             cx.notify(); // split 按钮左段立即切到本次选择
         }
         let meta = detail.meta.clone();
-        let task = cx.background_spawn(async move { terminal::resume_target(&meta, target) });
+        let adapters = self.adapters.clone();
+        let task =
+            cx.background_spawn(async move { terminal::resume_target(&adapters, &meta, target) });
         Self::notify_when_done(window, cx, task, move |outcome| {
             if outcome.ok {
                 Notification::success(match target {
@@ -7889,12 +7896,8 @@ impl Workbench {
                     .into_any_element(),
             );
         }
-        // 放在父会话目录里的子代理不能单独恢复(`resumable`)
-        let resume_targets = if wake_core::adapters::resumable(&self.adapters, meta) {
-            terminal::resume_targets(meta)
-        } else {
-            Vec::new()
-        };
+        // 能不能单独恢复(子代理)、要不要带环境变量(#83)都由 resume_targets 问 roster
+        let resume_targets = terminal::resume_targets(&self.adapters, meta);
         let open_in: AnyElement = if resume_targets.is_empty() {
             // 没有 resume 形制的 agent(OpenClaw 的 TUI 只按 session
             // key 开会话):不画 Open In,别给一组点了才报错的死按钮

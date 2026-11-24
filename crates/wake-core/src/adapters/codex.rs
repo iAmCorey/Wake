@@ -215,6 +215,17 @@ fn is_rollout_store(dir: &Path) -> bool {
             .unwrap_or(false)
 }
 
+/// 恢复会话要设的 CODEX_HOME(#83):`codex resume <id>` 只在 CODEX_HOME 里找会话,用的也是
+/// 那里的登录与配置。本实例确认过的 home 就是 Codex 的默认目录时不设,命令保持原样;只选了
+/// sessions 目录、裸 rollout 拷贝的 location 没有 home,也不设(没有哪个 CODEX_HOME 装着它)。
+/// 不是 UTF-8 的路径也不设:Codex 用 std::env::var 读 CODEX_HOME,本来就认不了
+fn codex_home_env(home: Option<&Path>, default: Option<&Path>) -> Vec<super::EnvVar> {
+    home.filter(|home| Some(*home) != default)
+        .and_then(Path::to_str)
+        .map(|home| vec![("CODEX_HOME", home.to_string())])
+        .unwrap_or_default()
+}
+
 /// 各家归一化的 codex 实现(mod.rs 静态分派,**不依赖 roster 在场**):
 /// 直选数据目录且父目录呈 home 形态 → 存父目录,state DB 与两个数据根全部
 /// 找回。"数据目录"认两种证据:内容形态(rollout 存储),或目录名本身就是
@@ -1415,6 +1426,13 @@ impl AgentAdapter for CodexAdapter {
         self.home.iter().cloned().collect()
     }
 
+    fn resume_env(&self) -> Vec<super::EnvVar> {
+        // Codex 只按 CODEX_HOME 找会话与配置,没设就是 `~/.codex`。默认目录按**真实**家目录算
+        // (与 Codex 自己的 find_codex_home 同一个),不走认 WAKE_HOME 的 super::home_dir()
+        let default = dirs::home_dir().map(|h| h.join(".codex"));
+        codex_home_env(self.home.as_deref(), default.as_deref())
+    }
+
     fn memory_sources(&self) -> Vec<MemorySource> {
         // memories/ 与 memories_1.sqlite(agent 记的)、AGENTS.md 与 rules/*.rules(用户
         // 写的指令)都是 CODEX_HOME 直属;只选了 sessions 目录或裸 rollout 拷贝的自定义
@@ -1517,6 +1535,18 @@ impl AgentAdapter for CodexAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #83:只有确认过的 home、又不是 Codex 默认目录的,恢复时才设 CODEX_HOME
+    #[test]
+    fn codex_home_env_only_for_homes_other_than_the_default() {
+        let default = Path::new("/Users/me/.codex");
+        assert_eq!(
+            codex_home_env(Some(Path::new("/Users/me/.codex-api")), Some(default)),
+            vec![("CODEX_HOME", "/Users/me/.codex-api".to_string())]
+        );
+        assert!(codex_home_env(Some(Path::new("/Users/me/.codex/")), Some(default)).is_empty());
+        assert!(codex_home_env(None, Some(default)).is_empty());
+    }
 
     #[test]
     fn raw_review_json_is_formatted_instead_of_exposed() {

@@ -11,6 +11,7 @@
 //! pwsh / Windows PowerShell / wt 默认 profile 粘贴均可跑。
 
 use super::{resolve_cli, resolve_clis, spawn_and_reap, ResumeOutcome};
+use crate::adapters::EnvVar;
 use crate::models::{AgentId, SessionMeta};
 use std::collections::HashMap;
 use std::os::windows::process::CommandExt;
@@ -133,10 +134,21 @@ pub(super) fn probe_clis(missing: &[&str]) -> HashMap<String, String> {
     found
 }
 
-/// PowerShell 单引号字面量:唯一转义是 ' → ''。`$`、反引号、反斜杠全是
-/// 普通字符,且命令行经 CreateProcessW 以 UTF-16 直达,无 codepage 折损
+/// PowerShell 单引号字面量:唯一转义是单引号字符写两遍。PowerShell 把 `'` 与弯引号
+/// `‘ ’ ‚ ‛` 都当单引号(about_Quoting_Rules),只转义 ASCII 的那个,路径里的 `’` 会
+/// 提前结束字符串、后面的内容成了命令(Codex review 2026-11-24)。`$`、反引号、反斜杠
+/// 全是普通字符,且命令行经 CreateProcessW 以 UTF-16 直达,无 codepage 折损
 fn ps_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+    let mut quoted = String::with_capacity(s.len() + 2);
+    quoted.push('\'');
+    for c in s.chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            quoted.push(c);
+        }
+        quoted.push(c);
+    }
+    quoted.push('\'');
+    quoted
 }
 
 /// PowerShell 方言:`Set-Location -LiteralPath 'dir' -ErrorAction Stop;
@@ -146,8 +158,8 @@ fn ps_quote(s: &str) -> String {
 /// 起 agent——落进错误的工作目录且 Wake 已报成功(dsh 的 workspace 完全
 /// 由启动目录决定,后果尤重)。加了它才与 POSIX 的 `cd X && cmd`、
 /// cmd 宿主的 `cd /d X && …` 同为失败即止(2026-08-25 review)。
-fn ps_line(cli: &str, args: &[String], cwd: Option<&str>) -> String {
-    let core = ps_call(cli, args);
+fn ps_line(cli: &str, args: &[String], cwd: Option<&str>, env: &[EnvVar]) -> String {
+    let core = ps_call(cli, args, env);
     match cwd {
         Some(dir) => format!(
             "Set-Location -LiteralPath {} -ErrorAction Stop; {core}",
@@ -168,18 +180,23 @@ pub(super) fn compose_command(
     cli: &str,
     args: &[String],
     cwd: Option<&str>,
+    env: &[EnvVar],
 ) -> anyhow::Result<String> {
     match term {
-        TerminalApp::Cmd => super::cmd::command_line(cli, args, cwd),
-        _ => Ok(ps_line(cli, args, cwd)),
+        TerminalApp::Cmd => super::cmd::command_line(cli, args, cwd, env),
+        _ => Ok(ps_line(cli, args, cwd, env)),
     }
 }
 
-/// 纯调用段(无 cd、无分号):`& 'cli' 'args…'`。wt 宿主用它配合 `-d`
-/// 传工作目录——wt 对命令行做无视引号的 `;` 分面板切分,脚本里带分号
-/// 必被腰斩,cd 只能交给 wt 自己的 -d。
-fn ps_call(cli: &str, args: &[String]) -> String {
-    let mut core = format!("& {}", ps_quote(cli));
+/// 调用段(无 cd):`& 'cli' 'args…'`,要设环境变量时前面加 `$env:NAME = '值'; `
+/// (`AgentAdapter::resume_env`)。wt 宿主用它配合 `-d` 传工作目录——wt 对命令行做
+/// 无视引号的 `;` 分面板切分,cd 交给 wt 自己的 -d,环境变量那句的分号靠 wt_escape 转义。
+fn ps_call(cli: &str, args: &[String], env: &[EnvVar]) -> String {
+    let mut core: String = env
+        .iter()
+        .map(|(name, value)| format!("$env:{name} = {}; ", ps_quote(value)))
+        .collect();
+    core.push_str(&format!("& {}", ps_quote(cli)));
     for a in args {
         core.push(' ');
         core.push_str(&ps_quote(a));
@@ -200,7 +217,11 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 /// Windows 无深链类恢复目标(Kooky 仅 macOS),全部走 shell 命令
-pub(super) fn deep_link_resume(_meta: &SessionMeta, _term: TerminalApp) -> Option<ResumeOutcome> {
+pub(super) fn deep_link_resume(
+    _meta: &SessionMeta,
+    _term: TerminalApp,
+    _env: &[EnvVar],
+) -> Option<ResumeOutcome> {
     None
 }
 
@@ -223,7 +244,7 @@ pub fn installed_terminals() -> &'static [TerminalApp] {
 /// 只是宿主、内部还要装一个 PowerShell 会话——两个 PowerShell 都不在 PATH
 /// 时它们同样起不来,得跟着藏掉(macOS 用同一个钩子藏 Kooky)。否则用户点
 /// 下去只能拿到 "PowerShell not found" 加一条自己没有 shell 去跑的命令
-pub fn terminals_for(_agent: AgentId) -> Vec<TerminalApp> {
+pub fn terminals_for(_agent: AgentId, _env: &[EnvVar]) -> Vec<TerminalApp> {
     // 这里挂在每个会话行的 render 上,不能调 powershell_bin:
     // CLI miss 不缓存后,没装 pwsh 的机器会每帧重扫 PATH × PATHEXT。
     // 已安装终端清单本就是启动期快照,用它判断即可;真正点击
@@ -259,6 +280,7 @@ pub(super) fn launch_shell(
     cli: &str,
     args: &[String],
     cwd: Option<&str>,
+    env: &[EnvVar],
     command: &str,
 ) -> anyhow::Result<()> {
     let bin = term.id();
@@ -275,14 +297,15 @@ pub(super) fn launch_shell(
             cmd.args(PS_SESSION).arg(command);
         }
         TerminalApp::WindowsTerminal => {
-            // wt 装 PowerShell 会话。工作目录走 wt 自己的 -d,脚本只剩纯调用
-            // 段(见 ps_call);所有透传参数过 wt_escape——wt 的 `;` 切分
-            // 无视引号,不转义的分号会把命令行腰斩成两个面板
+            // wt 装 PowerShell 会话。工作目录走 wt 自己的 -d,脚本只剩调用段
+            // (见 ps_call;要设环境变量时前面多一句赋值);所有透传参数过 wt_escape
+            // ——wt 的 `;` 切分无视引号,不转义的分号会把命令行腰斩成两个面板
             if let Some(dir) = cwd {
                 cmd.args(["-d", &wt_escape(dir)]);
             }
             cmd.arg(wt_escape(&powershell_bin()?));
-            cmd.args(PS_SESSION).arg(wt_escape(&ps_call(cli, args)));
+            cmd.args(PS_SESSION)
+                .arg(wt_escape(&ps_call(cli, args, env)));
         }
         TerminalApp::Alacritty | TerminalApp::WezTerm => {
             // 第三方宿主装 PowerShell 会话:脚本全单引号、无内层双引号,经
@@ -474,9 +497,11 @@ mod tests {
     #[test]
     fn cmd_rejects_unsafe_input_before_clipboard_fallback() {
         for value in [r#"x" & echo BREAKOUT_MARKER & rem"#, "%COMSPEC%"] {
-            assert!(compose_command(TerminalApp::Cmd, "claude", &[value.into()], None).is_err());
-            assert!(compose_command(TerminalApp::Cmd, value, &[], None).is_err());
-            assert!(compose_command(TerminalApp::Cmd, "claude", &[], Some(value)).is_err());
+            assert!(
+                compose_command(TerminalApp::Cmd, "claude", &[value.into()], None, &[]).is_err()
+            );
+            assert!(compose_command(TerminalApp::Cmd, value, &[], None, &[]).is_err());
+            assert!(compose_command(TerminalApp::Cmd, "claude", &[], Some(value), &[]).is_err());
         }
     }
 
@@ -488,9 +513,48 @@ mod tests {
                 r"C:\Tools\agent.cmd",
                 &["--resume".into(), "abc-123".into()],
                 Some(r"D:\O'Brien\100%"),
+                &[],
             )
             .unwrap(),
             r"Set-Location -LiteralPath 'D:\O''Brien\100%' -ErrorAction Stop; & 'C:\Tools\agent.cmd' '--resume' 'abc-123'"
+        );
+    }
+
+    /// 恢复要带的环境变量(#83):PowerShell 用 `$env:` 赋值、单引号照常转义,赋值只在
+    /// 切到项目目录之后、调用之前
+    #[test]
+    fn powershell_sets_resume_environment_before_the_call() {
+        assert_eq!(
+            compose_command(
+                TerminalApp::Pwsh,
+                "codex",
+                &["resume".into(), "abc-123".into()],
+                Some(r"D:\work"),
+                &[("CODEX_HOME", r"C:\Users\O'Brien\.codex-api".into())],
+            )
+            .unwrap(),
+            r"Set-Location -LiteralPath 'D:\work' -ErrorAction Stop; $env:CODEX_HOME = 'C:\Users\O''Brien\.codex-api'; & 'codex' 'resume' 'abc-123'"
+        );
+    }
+
+    /// 弯引号也是 PowerShell 的单引号,同样写两遍:不然 `’` 会提前结束字符串,
+    /// 后面的 `; Write-Output INJECTED` 就成了一条命令(Codex review 2026-11-24)
+    #[test]
+    fn powershell_doubles_every_single_quote_character() {
+        assert_eq!(
+            compose_command(
+                TerminalApp::Pwsh,
+                "codex",
+                &["resume".into(), "abc-123".into()],
+                Some("D:\\O\u{2018}Brien\u{201A}\u{201B}"),
+                &[(
+                    "CODEX_HOME",
+                    "C:\\data\\codex\u{2019}; Write-Output INJECTED; #".into(),
+                )],
+            )
+            .unwrap(),
+            "Set-Location -LiteralPath 'D:\\O\u{2018}\u{2018}Brien\u{201A}\u{201A}\u{201B}\u{201B}' -ErrorAction Stop; \
+             $env:CODEX_HOME = 'C:\\data\\codex\u{2019}\u{2019}; Write-Output INJECTED; #'; & 'codex' 'resume' 'abc-123'"
         );
     }
 }

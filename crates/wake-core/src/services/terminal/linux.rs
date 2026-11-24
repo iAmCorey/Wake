@@ -7,6 +7,7 @@
 //! mod.rs 的剪贴板兜底接住(命令已拼好,粘进任何终端都能跑)。
 
 use super::{percent_encode, pipe_to, resolve_cli, resolve_clis, spawn_and_reap, ResumeOutcome};
+use crate::adapters::EnvVar;
 use crate::models::{AgentId, SessionMeta};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -95,7 +96,11 @@ impl TerminalApp {
 }
 
 /// Linux 无深链类恢复目标(Kooky 仅 macOS),全部走 shell 命令
-pub(super) fn deep_link_resume(_meta: &SessionMeta, _term: TerminalApp) -> Option<ResumeOutcome> {
+pub(super) fn deep_link_resume(
+    _meta: &SessionMeta,
+    _term: TerminalApp,
+    _env: &[EnvVar],
+) -> Option<ResumeOutcome> {
     None
 }
 
@@ -113,8 +118,9 @@ pub fn installed_terminals() -> &'static [TerminalApp] {
     })
 }
 
-/// 某会话可用的恢复目标(Linux 无 Kooky 这类按 agent 过滤的目标,一律全量)
-pub fn terminals_for(_agent: AgentId) -> Vec<TerminalApp> {
+/// 某会话可用的恢复目标(Linux 无 Kooky 这类按 agent 过滤的目标,一律全量;
+/// 终端都跑 shell 命令,环境变量带得进去)
+pub fn terminals_for(_agent: AgentId, _env: &[EnvVar]) -> Vec<TerminalApp> {
     installed_terminals().to_vec()
 }
 

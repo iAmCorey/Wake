@@ -6850,7 +6850,7 @@ fn openclaw_parse_contract() {
     assert!(t.mainline[3].text.contains("useEffect 泄漏"));
 
     // OpenClaw 没有 resume 形制:详情页不该给任何 Open In 目标
-    assert!(wake_core::services::terminal::resume_targets(&s.meta).is_empty());
+    assert!(wake_core::services::terminal::resume_targets(&[], &s.meta).is_empty());
 
     // 自定义 location:状态目录、agents 目录都整形到 agents 层
     let state = env
@@ -7396,6 +7396,37 @@ fn adapter_ix_for_routes_to_owning_instance() {
     );
 }
 
+/// #83:恢复命令要带的 CODEX_HOME 跟着会话所在的 location 走——另一个 Codex 目录带上它,
+/// 只选了 sessions 目录的(没有哪个 CODEX_HOME 装着它)不带。默认实例在测试的假 HOME 下,
+/// 不是 Codex 真正的默认目录,路由错到它也会带出一个不对的值
+#[test]
+fn codex_resume_env_follows_the_owning_location() {
+    setup();
+    let dir = tempfile::tempdir().unwrap();
+    let api = dir.path().join(".codex-api");
+    let copy = dir.path().join("backup").join("sessions");
+    fs::create_dir_all(api.join("sessions")).unwrap();
+    fs::create_dir_all(&copy).unwrap();
+    let roster = wake_core::adapters::create_adapters_with(
+        &[
+            (AgentId::Codex, api.clone()),
+            (AgentId::Codex, copy.clone()),
+        ],
+        &[],
+    );
+    let session = |file: PathBuf| SessionMeta {
+        agent: AgentId::Codex,
+        file_path: file.to_string_lossy().into_owned(),
+        ..common::meta("codex:abc", "")
+    };
+    let rollout = "rollout-2026-11-24T00-00-00-abc.jsonl";
+    assert_eq!(
+        wake_core::adapters::resume_env(&roster, &session(api.join("sessions").join(rollout))),
+        vec![("CODEX_HOME", api.to_string_lossy().into_owned())]
+    );
+    assert!(wake_core::adapters::resume_env(&roster, &session(copy.join(rollout))).is_empty());
+}
+
 // ---------------------------------------------------------------- 远程装饰器
 
 /// 远程实例 = 各家 with_custom_root(缓存内挂载点) 包 RemoteAdapter。
@@ -7868,7 +7899,7 @@ fn workbuddy_is_a_codebuddy_twin() {
     assert_eq!(meta.key, "workbuddy:cb000001-aaaa-bbbb-cccc-000000000001");
     assert_eq!(meta.title, "QR effect cleanup");
     assert!(
-        wake_core::services::terminal::resume_targets(&meta).is_empty(),
+        wake_core::services::terminal::resume_targets(&[], &meta).is_empty(),
         "没有 CLI 的 agent 不画 Open In"
     );
 }
