@@ -9,8 +9,11 @@ use super::{
 use crate::adapters::claude_desktop;
 use crate::models::{AgentId, SessionMeta};
 use std::collections::HashMap;
-use std::path::Path;
+use std::fs::OpenOptions;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// AppleScript 双引号字符串转义
 fn applescript_quote(s: &str) -> String {
@@ -340,24 +343,107 @@ fn launch_ghostty(command: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Warp 无命令注入 CLI,走官方 Launch Configuration:写临时 yaml 再
-/// open warp://launch/<path>。exec 用 yaml 块标量,免转义。
+/// Wake 写进 Warp 启动配置目录的文件都以它开头,清理只认这个前缀
+const WARP_CONFIG_PREFIX: &str = "wake-resume-";
+/// 一份配置留多久:打开后过这么久删掉;写新配置时顺手清掉比这更旧的
+/// (Wake 在那之前退出了,没删成)。Warp 冷启动也只要几秒
+const WARP_CONFIG_TTL: Duration = Duration::from_secs(60);
+
+/// Warp 没有注入命令的 CLI,走它的 Launch Configuration(#84,按 Warp
+/// 0.2026.10.21 的源码与本机实测):`warp://launch/<名字>` 只在启动配置目录里
+/// 按 YAML 的 `name` 找(不分大小写、第一个命中),以 `/` 开头的路径一律拒收——
+/// 原先给的是临时目录的绝对路径,在现在的 Warp 上打不开;pane 的 `cwd` 是必填项,缺了
+/// 整份配置解析失败;找不到只写日志,`open` 照样退 0。Warp 在 `open` 返回之后
+/// 才去读文件、读完也没有信号,所以每次写一份新名字的配置(连点两个会话不会互相
+/// 覆盖),不论打没打开都过一会儿再删
 fn launch_warp(command: &str) -> anyhow::Result<()> {
-    if command.contains('\n') {
-        anyhow::bail!("multi-line command");
-    }
-    let yaml = format!(
-        "name: Wake Resume\nwindows:\n  - tabs:\n      - layout:\n          commands:\n            - exec: |-\n                {command}\n"
-    );
-    let path = std::env::temp_dir().join("wake-warp-resume.yaml");
-    std::fs::write(&path, yaml)?;
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+    let (name, path) = write_warp_config(&home, command, SystemTime::now())?;
+    std::thread::spawn(move || {
+        std::thread::sleep(WARP_CONFIG_TTL);
+        let _ = std::fs::remove_file(&path);
+    });
     let status = Command::new("open")
-        .arg(format!("warp://launch/{}", path.display()))
+        .arg(format!("warp://launch/{name}"))
         .status()?;
     if !status.success() {
         anyhow::bail!("open warp:// failed");
     }
     Ok(())
+}
+
+/// 在 `home` 下 Warp 的启动配置目录里写一份新配置,返回 (name, 路径)。pane 的
+/// `cwd` 也写 `home`,只为满足 Warp 的必填项:命令自己带着 `cd <项目> &&`。
+/// name 就是文件名主干,只有字母、数字与连字符:Warp 对链接做表单式解码(`+` 变
+/// 空格、`&` `=` 切参数),哪天它改成按文件名找也照样对得上
+fn write_warp_config(
+    home: &Path,
+    command: &str,
+    now: SystemTime,
+) -> anyhow::Result<(String, PathBuf)> {
+    if command.contains('\n') {
+        anyhow::bail!("multi-line command");
+    }
+    let cwd = home
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("home directory isn't valid UTF-8"))?;
+    let dir = home.join(".warp").join("launch_configurations");
+    std::fs::create_dir_all(&dir)?;
+    let now_ms = now
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    prune_warp_configs(&dir, now_ms);
+    for n in now_ms..now_ms + 100 {
+        let name = format!("{WARP_CONFIG_PREFIX}{n}");
+        let path = dir.join(format!("{name}.yaml"));
+        let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        };
+        if let Err(e) = file.write_all(warp_config_yaml(&name, cwd, command).as_bytes()) {
+            let _ = std::fs::remove_file(&path);
+            return Err(e.into());
+        }
+        return Ok((name, path));
+    }
+    anyhow::bail!("no free launch configuration name in {}", dir.display())
+}
+
+/// 启动配置的 YAML。`cwd` 写成 YAML 单引号串(里面的单引号写两遍);命令放进
+/// 块标量 `|-`,原样保留、不用转义(调用方保证只有一行)
+fn warp_config_yaml(name: &str, cwd: &str, command: &str) -> String {
+    let cwd = cwd.replace('\'', "''");
+    format!(
+        "name: {name}\nwindows:\n  - tabs:\n      - layout:\n          cwd: '{cwd}'\n          commands:\n            - exec: |-\n                {command}\n"
+    )
+}
+
+/// 清掉 Wake 自己留下的、早于 WARP_CONFIG_TTL 的配置(写下的时刻就在文件名里)。
+/// 只认 `wake-resume-<数字>.yaml`,用户自己的配置不碰
+fn prune_warp_configs(dir: &Path, now_ms: u128) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let written = entry.file_name().to_str().and_then(wake_warp_config_ms);
+        if written.is_some_and(|ms| now_ms.saturating_sub(ms) >= WARP_CONFIG_TTL.as_millis()) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// `wake-resume-<毫秒>.yaml` 写下的时刻;不是 Wake 写的配置给 None
+fn wake_warp_config_ms(file_name: &str) -> Option<u128> {
+    let digits = file_name
+        .strip_prefix(WARP_CONFIG_PREFIX)?
+        .strip_suffix(".yaml")?;
+    // 整数的 parse 也认前导 `+`
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 pub(super) fn copy_to_clipboard(text: &str) -> bool {
@@ -627,6 +713,7 @@ pub(super) fn reveal_path(path: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn uuid_gate_matches_desktop_handlers() {
@@ -677,6 +764,72 @@ mod tests {
                 .as_deref()
                 .is_some_and(|e| e.contains(term.display_name())));
         }
+    }
+
+    /// `cwd` 是 Warp 的必填项(缺了整份配置解析失败,#84)
+    #[test]
+    fn warp_config_names_itself_and_sets_the_required_cwd() {
+        let yaml = warp_config_yaml(
+            "wake-resume-1",
+            "/Users/o'neil/My Home",
+            "cd '/tmp/a b' && codex resume abc",
+        );
+        assert_eq!(
+            yaml,
+            "name: wake-resume-1\nwindows:\n  - tabs:\n      - layout:\n          cwd: '/Users/o''neil/My Home'\n          commands:\n            - exec: |-\n                cd '/tmp/a b' && codex resume abc\n"
+        );
+    }
+
+    #[test]
+    fn warp_configs_get_fresh_names_and_only_old_wake_files_are_pruned() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".warp").join("launch_configurations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = SystemTime::now();
+        let now_ms = now.duration_since(UNIX_EPOCH).unwrap().as_millis();
+        let old = format!("wake-resume-{}.yaml", now_ms - 600_000); // Wake 留下的旧配置
+        let recent = format!("wake-resume-{}.yaml", now_ms - 5_000); // 刚打开,Warp 可能还没读
+        let others = ["wake-resume-notes.yaml", "mine.yaml"]; // 名字像的、用户自己的
+        for name in others
+            .iter()
+            .copied()
+            .chain([old.as_str(), recent.as_str()])
+        {
+            std::fs::File::create(dir.join(name)).unwrap();
+        }
+        let (first, first_path) = write_warp_config(home.path(), "echo hi", now).unwrap();
+        let (second, second_path) = write_warp_config(home.path(), "echo hi", now).unwrap();
+        assert_ne!(first, second, "同一毫秒点两次也不能写进同一个文件");
+        for (name, path) in [(&first, &first_path), (&second, &second_path)] {
+            let file_name = format!("{name}.yaml");
+            assert_eq!(path, &dir.join(&file_name));
+            assert!(
+                wake_warp_config_ms(&file_name).is_some(),
+                "清理要认得出 Wake 自己写的文件"
+            );
+            let yaml = std::fs::read_to_string(path).unwrap();
+            assert!(yaml.starts_with(&format!("name: {name}\n")), "{yaml}");
+        }
+        let left: BTreeSet<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        let mut expected =
+            BTreeSet::from([format!("{first}.yaml"), format!("{second}.yaml"), recent]);
+        expected.extend(others.map(String::from));
+        assert_eq!(left, expected);
+    }
+
+    #[test]
+    fn warp_config_creates_its_directory_and_refuses_multi_line_commands() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(write_warp_config(home.path(), "echo a\necho b", SystemTime::now()).is_err());
+        assert!(
+            !home.path().join(".warp").exists(),
+            "多行命令不该留下任何东西"
+        );
+        let (_, path) = write_warp_config(home.path(), "echo hi", SystemTime::now()).unwrap();
+        assert!(path.is_file());
     }
 
     #[test]
