@@ -91,6 +91,15 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>Wake uses automation to reopen sessions in your terminal and to move session files to the Trash.</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSHumanReadableCopyright</key><string>© 2026 Corey Chiu · MIT License</string>
+    <!-- wake://session/<key> 与 wake://memory/<key> 链接(#82):系统把它们交给 Wake,
+         MCP 与 wake-cli 输出的引用因此点一下就能打开 -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key><string>dev.corey.wake</string>
+            <key>CFBundleURLSchemes</key><array><string>wake</string></array>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST

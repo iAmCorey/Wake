@@ -673,6 +673,12 @@ impl IndexLock {
         }
     }
 
+    /// 有没有一个活着的 Wake 窗口用着这个库:只探 `.lock.app`,不碰主锁、不写自述。Windows /
+    /// Linux 上点开的 `wake://` 链接据此决定交给它还是自己起(`links`);探不出来按没有算
+    pub fn app_running(db: &Path) -> bool {
+        Self::app_lock_is_held(&Self::path_for(db)).unwrap_or(false)
+    }
+
     /// 等着拿(GUI 启动用,阻塞调用方,放在开窗之前):持有者是 CLI 写命令就隔 100ms
     /// 再试直到 `timeout`——它几秒到几十秒就完;是另一个 GUI 立刻放弃,它不会让。
     /// 用轮询不用阻塞的 `File::lock`:阻塞版认不出持有者中途从 CLI 换成了 GUI,

@@ -10,6 +10,7 @@ mod assets;
 mod format;
 mod i18n;
 mod index_lock;
+mod links;
 mod main_window;
 mod markdown_links;
 mod prefs;
@@ -21,10 +22,12 @@ mod update;
 mod workbench;
 
 use assets::Assets;
+use futures::StreamExt;
 use gpui::*;
 use gpui_component::Root;
 use i18n::t;
 use main_window::MainWindow;
+use wake_core::links::WakeRef;
 use workbench::{
     OpenAbout, OpenSettings, OpenUpdates, PaletteDown, PaletteNextTab, PalettePrevTab, PaletteUp,
     RefreshSessions, ToggleSearch, Workbench, KEY_CONTEXT, PALETTE_CONTEXT,
@@ -142,8 +145,8 @@ fn activate_main(handle: WindowHandle<Root>, cx: &mut App) -> Option<Entity<Work
         .flatten()
 }
 
-/// 主窗还在就拉到前台,否则重建;随后在主窗的 Workbench 上执行 `then`(无窗时
-/// 菜单里点 Settings/About 就靠它转发)。整段推迟到下一轮前台任务里跑,两个
+/// 主窗还在就拉到前台,否则重建;随后在主窗里、对它的 Workbench 执行 `then`(无窗时
+/// 菜单里点 Settings/About、打开 wake:// 链接都靠它转发)。整段推迟到下一轮前台任务里跑,两个
 /// 原因:①全局 action 监听器是在派发它的那扇窗口的 update 期间被调用的,此刻
 /// 该窗口已被借出,再 update 它必失败(gpui 不重入)——同步判断会把活着的主窗
 /// 误判成已关;②不能用 `cx.defer`:Dock 的 `on_reopen` 回调是裸 `borrow_mut`,
@@ -152,7 +155,7 @@ fn activate_main(handle: WindowHandle<Root>, cx: &mut App) -> Option<Entity<Work
 /// 那条路必然 flush,内层的 defer 也在同一轮里处理
 fn show_main_window(
     cx: &mut App,
-    then: impl FnOnce(&mut Workbench, &mut Context<Workbench>) + 'static,
+    then: impl FnOnce(&mut Workbench, &mut Window, &mut Context<Workbench>) + 'static,
 ) {
     cx.spawn(async move |cx| {
         cx.update(|cx| show_main_window_now(cx, then));
@@ -163,12 +166,12 @@ fn show_main_window(
 /// `show_main_window` 的正文。要在 `App::update` 里、且没有窗口被借出时调用
 fn show_main_window_now(
     cx: &mut App,
-    then: impl FnOnce(&mut Workbench, &mut Context<Workbench>) + 'static,
+    then: impl FnOnce(&mut Workbench, &mut Window, &mut Context<Workbench>) + 'static,
 ) {
     let handle = cx.try_global::<MainWindow>().map(|main| main.0);
     if let Some(workbench) = handle.and_then(|handle| activate_main(handle, cx)) {
         cx.activate(true);
-        workbench.update(cx, then);
+        run_in_main(workbench, then, cx);
         return;
     }
     // 主窗已关。Settings 允许比主窗活得久(它持有 Workbench,事件泵跟
@@ -184,9 +187,26 @@ fn show_main_window_now(
         let handle = open_main_window_or_exit(cx, "reopen");
         cx.activate(true);
         if let Some(workbench) = activate_main(handle, cx) {
-            workbench.update(cx, then);
+            run_in_main(workbench, then, cx);
         }
     });
+}
+
+/// 在主窗(`MainWindow` 全局,开窗时登记)里、带着它的 window 对 Workbench 跑 `then`
+/// (打开会话要 window)
+fn run_in_main(
+    workbench: Entity<Workbench>,
+    then: impl FnOnce(&mut Workbench, &mut Window, &mut Context<Workbench>),
+    cx: &mut App,
+) {
+    let Some(handle) = cx.try_global::<MainWindow>().map(|main| main.0) else {
+        return;
+    };
+    handle
+        .update(cx, |_, window, cx| {
+            workbench.update(cx, |workbench, cx| then(workbench, window, cx))
+        })
+        .ok();
 }
 
 /// 窗口级操作(关/最小化/缩放/全屏)从全局监听器发起时,目标窗口正处在派发
@@ -327,11 +347,28 @@ pub(crate) fn app_menus() -> Vec<Menu> {
 }
 
 fn main() {
+    // wake:// 链接(#82):Windows / Linux 从命令行参数来——已经有一个 Wake 窗口在用同一个库,
+    // 就交给它、自己不起;macOS 由系统交给 on_open_urls(冷启动也是)
+    if !links::startup_links().is_empty()
+        && links::forward_to_running(&wake_core::db::default_db_path())
+    {
+        return;
+    }
+    let (link_tx, mut link_rx) = futures::channel::mpsc::unbounded::<String>();
+    for url in links::startup_links() {
+        let _ = link_tx.unbounded_send(url.clone());
+    }
     let app = gpui_platform::application().with_assets(Assets);
+    let opened = link_tx.clone();
+    app.on_open_urls(move |urls| {
+        for url in urls {
+            let _ = opened.unbounded_send(url);
+        }
+    });
     // macOS:用户关掉最后一个窗后进程仍留 Dock,点 Dock 图标走 NSApplication 的
     // applicationShouldHandleReopen → gpui Platform::on_reopen(只在系统认为
     // 没有可见窗口时触发)。与 Window → Main Window 同一条路
-    app.on_reopen(|cx| show_main_window(cx, |_, _| {}));
+    app.on_reopen(|cx| show_main_window(cx, |_, _, _| {}));
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
         // 必须在 set_menus 与开任何窗之前:两者的文案都在构造那一刻求值
@@ -357,19 +394,45 @@ fn main() {
         cx.on_action(|_: &Hide, cx| cx.hide());
         cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
         cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
-        cx.on_action(|_: &ShowMainWindow, cx| show_main_window(cx, |_, _| {}));
+        cx.on_action(|_: &ShowMainWindow, cx| show_main_window(cx, |_, _, _| {}));
         ui_zoom::register(cx);
         // 无窗时的菜单兜底:有窗时这些 action 由 Workbench/Settings 的视图
         // 消费(元素级监听器默认截断传播,不会走到这);全部窗口关掉后菜单项
         // 只认全局监听器,没有就置灰——先把主窗拉回来再转发
-        cx.on_action(|_: &OpenSettings, cx| show_main_window(cx, Workbench::open_settings));
-        cx.on_action(|_: &OpenAbout, cx| show_main_window(cx, Workbench::open_about));
-        cx.on_action(|_: &OpenUpdates, cx| show_main_window(cx, Workbench::open_updates));
+        cx.on_action(|_: &OpenSettings, cx| {
+            show_main_window(cx, |workbench, _, cx| workbench.open_settings(cx))
+        });
+        cx.on_action(|_: &OpenAbout, cx| {
+            show_main_window(cx, |workbench, _, cx| workbench.open_about(cx))
+        });
+        cx.on_action(|_: &OpenUpdates, cx| {
+            show_main_window(cx, |workbench, _, cx| workbench.open_updates(cx))
+        });
 
         cx.bind_keys(key_bindings());
         cx.set_menus(app_menus());
 
         open_main_window_or_exit(cx, "open");
         cx.activate(true);
+
+        // 开窗之后(主窗在了、索引锁拿到了)才收链接:Windows / Linux 监听收件箱,别的
+        // Wake 进程转来的链接从那里来;Windows 每次启动把 wake: 协议指向自己
+        #[cfg(not(target_os = "macos"))]
+        links::listen(&wake_core::db::default_db_path(), link_tx);
+        #[cfg(windows)]
+        std::thread::spawn(wake_core::links::register_scheme);
+        // 主窗没开就先开,再交给主窗里的 Workbench(这里已在 AsyncApp::update 里,直接走正文)
+        cx.spawn(async move |cx| {
+            while let Some(url) = link_rx.next().await {
+                if let Some(link) = WakeRef::from_link(&url) {
+                    cx.update(|cx| {
+                        show_main_window_now(cx, move |workbench, window, cx| {
+                            workbench.open_link(link, window, cx)
+                        })
+                    });
+                }
+            }
+        })
+        .detach();
     });
 }

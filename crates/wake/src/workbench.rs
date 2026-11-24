@@ -52,6 +52,7 @@ use wake_core::adapters::{
     AgentAdapter,
 };
 use wake_core::db::Store;
+use wake_core::links::WakeRef;
 use wake_core::models::Role as MessageRole;
 use wake_core::models::*;
 use wake_core::scanner::{run_scan, ScanEvents, ScanProgress};
@@ -2568,6 +2569,9 @@ pub struct Workbench {
     /// 新根不收录、被移根不出清,要等手动 ⌘R(2026-08-24 Codex review)。
     /// 终态事件到达后由 on_bg_event 消费,用新 roster 补一轮增量
     pending_rescan: bool,
+    /// 打开时还没进索引的 wake:// 链接(#82)在等扫描收尾:终态事件发一下,`open_link` 起的
+    /// 那个任务再找一次。新链接替掉旧的,旧任务收到 Canceled 作罢
+    link_after_scan: Option<futures::channel::oneshot::Sender<()>>,
     /// rsync 线程正在同步的 host(空 = 空闲);与 scan 正交。侧栏文案与
     /// Sync now 的 busy 态都从这个**事实**派生,render 现算文案——不变量 6
     /// 的教训:别把展示句存成状态
@@ -3069,6 +3073,7 @@ impl Workbench {
             },
             refreshing: false,
             pending_rescan: false,
+            link_after_scan: None,
             syncing_hosts,
             pending_sync: Vec::new(),
             bg_tx,
@@ -5046,6 +5051,10 @@ impl Workbench {
                 if !self.scan.scanning {
                     self.reload_page(cx);
                     self.drain_pending_memory_sync(cx);
+                    // 等着这轮扫描收尾的 wake:// 链接:再找一次(`open_link`)
+                    if let Some(scanned) = self.link_after_scan.take() {
+                        let _ = scanned.send(());
+                    }
                 }
                 cx.notify();
                 note
@@ -5366,7 +5375,7 @@ impl Workbench {
         };
         window.close_dialog(cx);
         match target {
-            PaletteTarget::Session { key, seq } => self.open_detail(&key, Some(seq), window, cx),
+            PaletteTarget::Session { key, seq } => self.reveal_session(&key, Some(seq), window, cx),
             PaletteTarget::Memory(key) => self.reveal_memory(key, cx),
             PaletteTarget::Skill { name, dir } => self.reveal_skill(&name, dir, cx),
         }
@@ -5427,6 +5436,71 @@ impl Workbench {
         cx.notify();
     }
 
+    /// 打开一条 `wake://` 链接(#82):会话就打开它、带序号就跳到那条消息(与 ⌘K 打开搜索命中
+    /// 同一条路),记忆就落到 Memory 页选中它。刚开始的会话、刚写下的记忆可能还没进索引:等
+    /// 正在跑的那轮(没有就补一轮)增量扫描收尾(`on_bg_event` 的终态)再找一次,还没有就说一声。
+    /// 新链接(在不在索引里都一样)顶掉还在等的旧链接:进门先丢掉旧的发送端,那份等待收到
+    /// Canceled 就此作罢——不然扫描收尾时会跳回旧链接,或弹一句过期的"找不到"
+    pub(crate) fn open_link(&mut self, link: WakeRef, window: &mut Window, cx: &mut Context<Self>) {
+        self.link_after_scan = None;
+        if self.link_indexed(&link) {
+            self.show_link(link, window, cx);
+            return;
+        }
+        let (scanned, scan_done) = futures::channel::oneshot::channel();
+        self.link_after_scan = Some(scanned);
+        if !self.scan.scanning {
+            self.kick_incremental_scan(cx);
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            if scan_done.await.is_err() {
+                return;
+            }
+            this.update_in(cx, |this, window, cx| {
+                if this.link_indexed(&link) {
+                    this.show_link(link, window, cx);
+                } else {
+                    let missing = match link {
+                        WakeRef::Session { .. } => t("Wake couldn't find that session"),
+                        WakeRef::Memory { .. } => t("Wake couldn't find that memory file"),
+                    };
+                    window.push_notification(Notification::warning(missing), cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn link_indexed(&self, link: &WakeRef) -> bool {
+        match link {
+            WakeRef::Session { key, .. } => matches!(self.store.get_session(key), Ok(Some(_))),
+            WakeRef::Memory { key } => matches!(self.store.get_memory(key), Ok(Some(_))),
+        }
+    }
+
+    fn show_link(&mut self, link: WakeRef, window: &mut Window, cx: &mut Context<Self>) {
+        match link {
+            WakeRef::Session { key, seq } => self.reveal_session(&key, seq, window, cx),
+            WakeRef::Memory { key } => self.reveal_memory(key, cx),
+        }
+    }
+
+    /// 从别处跳到一条会话(⌘K 的搜索命中、wake:// 链接):离开清理模式——要在打开之前,离开时
+    /// 会把进入清理前的那条会话恢复回来——打开它,落回会话页、在中栏列表里选中并滚到可见。
+    /// 列表里点的只走 open_detail:List 点击自带选中,再滚会跳视口
+    fn reveal_session(
+        &mut self,
+        key: &str,
+        seq: Option<i64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.leave_cleanup(cx);
+        self.open_detail(key, seq, window, cx);
+        self.sync_list_selection(key, window, cx);
+    }
+
     fn open_detail(
         &mut self,
         key: &str,
@@ -5434,9 +5508,6 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if jump_seq.is_some() {
-            self.leave_cleanup(cx);
-        }
         let Ok(Some(meta)) = self.store.get_session(key) else {
             return;
         };
@@ -5446,11 +5517,6 @@ impl Workbench {
             .map(|parent| (parent.key, parent.title.into()));
         let load_id = detail.load_id;
         self.detail = Some(detail);
-        // 搜索路径:中栏列表同步选中并滚到该会话。
-        // 列表点击路径(jump=None)不走——List 点击自带选中,再滚会跳视口
-        if jump_seq.is_some() {
-            self.sync_list_selection(key, window, cx);
-        }
         cx.notify();
 
         // Resolving a virtual path can stat a slow/unavailable custom location.

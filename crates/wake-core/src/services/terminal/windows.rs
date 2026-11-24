@@ -211,8 +211,8 @@ fn wt_escape(s: &str) -> String {
 }
 
 /// NUL 结尾的 UTF-16(*W 系 API 的入参形制;NUL 是防越界读的护栏,
-/// 所有 Win32 宽字符串都走这一份)
-fn wide(s: &str) -> Vec<u16> {
+/// 所有 Win32 宽字符串都走这一份,`links` 的注册表登记也用它)
+pub(crate) fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 

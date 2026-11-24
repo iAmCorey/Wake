@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - New: Doubao Work tasks you run on your computer are indexed from the Doubao desktop app (`Doubao/<profile>/.doubao/agent_mode/workspace/.sessions`, read-only), with every request you made and the agent's tool calls. The organizer and helpers a task hands work to are listed under it, and the tool call that started one opens it. Tasks and helpers that run on Doubao's cloud computer aren't stored on your computer, so they aren't listed. There is no Open In, since Doubao Work has no command line, and deleting a session in Wake only hides it (#86, thanks @WingSky2022)
+- New: `wake://session/<key>` links open that session in Wake, so other tools can send you straight to it; add `#<seq>` to jump to a message, and `wake://memory/<key>` opens a memory file. The references Wake's MCP server and `wake-cli` print are these links, so you can click them. A link opened while Wake is running goes to the open window (#82, thanks @suiyun08)
 - Fix: Open In → Warp resumes the session in a new Warp window instead of doing nothing (#84, thanks @adnabb)
 - Fix: Open In resumes Codex sessions from another Codex folder you added in Session locations (one you start Codex with through `CODEX_HOME`) using that folder, instead of Codex not finding them. Codex Desktop isn't offered for these sessions, since it only opens its own folder (#83, thanks @adnabb)
 - Fix: On Windows, Open In no longer breaks on folder names with a curly apostrophe (’) when it opens PowerShell

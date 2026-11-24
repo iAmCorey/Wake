@@ -332,6 +332,8 @@
   "Version {}": "版本 {}",
   "View Update": "查看更新",
   "Wake Settings": "Wake 设置",
+  "Wake couldn't find that memory file": "Wake 里找不到这份记忆文件",
+  "Wake couldn't find that session": "Wake 里找不到这条会话",
   "Wake couldn't open or rebuild its index at {}. {}": "Wake 无法在 {} 打开或重建索引。{}",
   "Wake couldn't open its index at {}: another process is using it ({}). Wait for it to finish or quit it, then open Wake again.": "Wake 无法打开 {} 的索引：另一个进程正在使用它（{}）。请等它结束或退出它，再重新打开 Wake。",
   "Wake couldn't {} its window: {}": "Wake 无法{}窗口:{}",

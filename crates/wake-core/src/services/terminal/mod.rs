@@ -45,6 +45,9 @@ mod windows;
 use windows as platform;
 #[cfg(target_os = "windows")]
 use windows::{compose_command, probe_clis};
+// Win32 宽字符串的唯一实现,`links` 的注册表登记经这里取用
+#[cfg(target_os = "windows")]
+pub(crate) use windows::wide;
 
 // 新平台必须给出自己的模块并接上 probe_clis / compose_command /
 // launch_shell 三个接缝(windows.rs 是完整先例)——POSIX 共享层是正向

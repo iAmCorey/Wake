@@ -401,6 +401,7 @@ Numeric options outside their range are clamped, not rejected: `--limit 999` on 
 - Local sessions: `<agent>:<native id>`, for example `codex:0195c2a1-…`.
 - Sessions mirrored from a remote host: `<agent>:<host>:<native id>`.
 - References: `wake://session/<key>#<seq>` point at one message; `show` accepts them and starts the page there.
+- References are also links: opening one (clicking it in a terminal, or `open 'wake://session/…'`) shows that session in Wake scrolled to that message. `wake://session/<key>` without `#<seq>` opens it at its latest messages, and `wake://memory/…` opens a memory file.
 
 The native id is the one the agent's own `--resume` flag expects.
 

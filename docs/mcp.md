@@ -269,7 +269,8 @@ The memory files coding agents keep for themselves on this machine, read-only: C
 - Local sessions: `<agent>:<native id>`, for example `codex:0195c2a1-…`.
 - Sessions mirrored from a remote host: `<agent>:<host>:<native id>`.
 - References: `wake://session/<key>#<seq>` point at one message; `wake_get_session` accepts them as `key` and starts the page there.
-- Memory files: `wake://memory/<agent>:<path>` (with a host segment for mirrored hosts); `wake_get_session` accepts them as `key` and returns the file.
+- Memory files: `wake://memory/<agent>:<path>` (with a host segment for mirrored hosts; `%` and spaces in the path are percent-encoded); `wake_get_session` accepts them as `key` and returns the file.
+- Both are also links: opening one (clicking it in a terminal or a chat app, or `open 'wake://session/…'`) shows that session in Wake scrolled to that message, or that memory file on the Memory page. `wake://session/<key>` without `#<seq>` opens the session the way Wake usually does, at its latest messages. Other tools can build these links from a session key to send you straight to a session.
 
 The native id is the one the agent's own `--resume` flag expects.
 
