@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.10.4] — 2026-11-25
 
 - New: Qwen Work (千问办公) sessions are indexed from `~/.qwenworkcn/projects`, together with the ones its predecessor QoderWork CN left in `~/.qoderworkcn/projects`; a session that exists in both is listed once. Prompts and titles show what you typed, not the system reminder the app puts in front of it, and the app's background memory-compaction and command-check runs are left out. No Open In, since it has no command line (#81, thanks @245678000000)
 - New: Tasks you ran in the Qoder IDE or Qoder CN (`~/.qoder/projects/*/transcript`) are listed under Qoder (formerly Qoder CLI) with their full messages and tool calls (#81, thanks @245678000000)
