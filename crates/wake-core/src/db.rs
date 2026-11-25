@@ -259,8 +259,10 @@ CREATE TABLE IF NOT EXISTS claimed_sessions (
 ///       换代判据是精确不等,所以都跳过;
 /// "24" = 垫在用户提问前面的 `<system-reminder>`(Claude 桌面端的 "Linked sessions now…"、Qoder 同款)
 ///       切下来单独一条 Meta,提问不再跟着成 Meta、照常进搜索与提问数;CodeBuddy 改用同一个切法。
-///       "23" 推上 main 时还没有这条,所以另起一档
-pub const FTS_FORMAT: &str = "24";
+///       "23" 推上 main 时还没有这条,所以另起一档;
+/// "25" = 用户按停时补写的 `[Request interrupted by user…]` 不算提问(Claude Code 等;原先当用户消息
+///       显示、计数);Qoder 收进 IDE / Qoder CN 的任务转录(PR #81)。"24" 已推上 main,所以另起一档
+pub const FTS_FORMAT: &str = "25";
 
 /// 正文里中日韩字符的两字组索引(issue #79):trigram 对两个字的词 MATCH 不出东西,而中文最常搜的
 /// 恰恰是两字词。只收有两个以上相连中日韩字符的行,文本是 `cjk_bigrams` 切好、空格隔开的两字组,

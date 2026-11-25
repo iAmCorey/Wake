@@ -5,7 +5,7 @@ use anyhow::Result;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufReader, Read};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 /// Qoder CLI:`~/.qoder/projects/<project-key>/<session-id>.jsonl`。
@@ -28,6 +28,9 @@ pub struct QoderAdapter {
     home: Option<PathBuf>,
     /// 同家两个实例都有同一会话时谁胜出(`dedup_rank`,小者胜)
     rank: u8,
+    /// 每个文件是不是引擎的内部轮次(`read_internal_run`),按文件 (mtime, size) 缓存:每轮全量
+    /// 扫描都要把所有文件列一遍
+    heads: StampCache<bool>,
 }
 
 impl QoderAdapter {
@@ -60,7 +63,28 @@ impl QoderAdapter {
             root: home.join("projects"),
             home: Some(home),
             rank,
+            heads: StampCache::default(),
         }
+    }
+
+    /// 会话或子代理(子代理是 agent 派出去的,标题取边车记的任务说明)
+    fn parse(&self, r: &SessionFileRef, decode_images: bool) -> Result<(SessionMeta, QoderParse)> {
+        let path = Path::new(&r.file_path);
+        let parsed = parse_qoder_jsonl(path, decode_images)?;
+        let mut meta = build_meta(self.agent, r, &parsed);
+        mark_subagent(&mut meta, path);
+        Ok((meta, parsed))
+    }
+
+    /// 读不出当不是:半写入、一时打不开的真实会话不能消失(这次不记,下次再读)
+    fn is_internal_run(&self, r: &SessionFileRef) -> bool {
+        self.heads
+            .get(
+                Path::new(&r.file_path),
+                Some((r.mtime_ms, r.size)),
+                read_internal_run,
+            )
+            .is_ok_and(|internal| *internal)
     }
 }
 
@@ -93,44 +117,44 @@ fn is_task_transcript(root: &Path, path: &Path) -> bool {
 
 /// 引擎在后台跑的内部轮次也写成普通会话文件,首条用户消息是引擎拼好的任务说明:记忆整理
 /// (`Target file this round: MEMORY.md` / `USER.md`)与 shell 命令的安全判定
-/// (`# Input\nCommand: …`)。没有一句是人写的,app 自己的会话列表也不列它们。按行里
-/// JSON 转义后的原样比对
-const INTERNAL_RUN_PREFIXES: &[&[u8]] = &[br"Target file this round: ", br"# Input\nCommand: "];
+/// (`# Input\nCommand: …`)。没有一句是人写的,app 自己的会话列表也不列它们
+const INTERNAL_RUN_PREFIXES: &[&str] = &["Target file this round: ", "# Input\nCommand: "];
 
-/// 判据只读文件头一段:首条 user 行前面只有几行短元数据,前缀就在那一行开头附近。
-/// 读不出、头里没有 user 行一律保守放行——半写入的真实会话不能消失
-const INTERNAL_RUN_PROBE: u64 = 16 * 1024;
-
-fn is_internal_run(path: &Path) -> bool {
-    let mut head = Vec::new();
-    let read =
-        fs::File::open(path).and_then(|file| file.take(INTERNAL_RUN_PROBE).read_to_end(&mut head));
-    if read.is_err() {
-        return false;
-    }
-    // 不靠键序:块的 type 只有 text / tool_result 一类,`"type":"user"` 只会是行本身的
-    let Some(line) = head
-        .split(|byte| *byte == b'\n')
-        .find(|line| find_bytes(line, br#""type":"user""#).is_some())
-    else {
-        return false;
-    };
-    // 首个文本:content 是字符串时紧跟 `"content":"`,是块数组时在首个 `"text":"` 之后
-    let text_start = [&br#""content":""#[..], &br#""text":""#[..]]
-        .iter()
-        .filter_map(|key| find_bytes(line, key).map(|at| at + key.len()))
-        .min();
-    text_start.is_some_and(|at| {
-        INTERNAL_RUN_PREFIXES
-            .iter()
-            .any(|prefix| line[at..].starts_with(prefix))
-    })
+/// 判内部轮次只要每行的 type 与首条 user 行的正文
+#[derive(serde::Deserialize)]
+struct HeadRow {
+    #[serde(rename = "type", default)]
+    typ: String,
+    #[serde(default)]
+    message: Option<HeadMessage>,
 }
 
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
+#[derive(serde::Deserialize)]
+struct HeadMessage {
+    #[serde(default)]
+    content: Value,
+}
+
+/// 首条 user 行的话是不是引擎的任务说明,与解析同一个取法(正文拼起来、跳过开头的图片占位与
+/// `<system-reminder>`)。还没有 user 行的(刚建、只写了元数据)不是;追加之后戳变了会重读
+fn read_internal_run(path: &Path) -> std::io::Result<bool> {
+    for row in jsonl_rows::<HeadRow, _>(BufReader::new(fs::File::open(path)?)) {
+        let Some(row) = row? else {
+            continue;
+        };
+        if row.typ != "user" {
+            continue;
+        }
+        let text = row
+            .message
+            .map(|message| content_parts(&message.content, false).text)
+            .unwrap_or_default();
+        let said = after_leading_context(&text);
+        return Ok(INTERNAL_RUN_PREFIXES
+            .iter()
+            .any(|prefix| said.starts_with(prefix)));
+    }
+    Ok(false)
 }
 
 #[derive(Clone)]
@@ -368,8 +392,6 @@ fn parse_qoder_jsonl(path: &Path, decode_images: bool) -> Result<QoderParse> {
     let mut worktree_branch: Option<String> = None;
     let mut runtime_model: Option<String> = None;
     let mut unknown = 0u32;
-    // 消息行带 parentUuid 键(首条为 null)就是消息树;任务转录一个都不带
-    let mut linked = false;
 
     for row in jsonl_values(reader) {
         let Some(row) = row? else {
@@ -432,7 +454,6 @@ fn parse_qoder_jsonl(path: &Path, decode_images: bool) -> Result<QoderParse> {
                     unknown += 1;
                     continue;
                 };
-                linked |= row.get("parentUuid").is_some() || row.get("logicalParentUuid").is_some();
                 let parent = optional_string(row.get("logicalParentUuid"))
                     .or_else(|| optional_string(row.get("parentUuid")));
                 if !nodes.contains_key(&uuid) {
@@ -445,13 +466,16 @@ fn parse_qoder_jsonl(path: &Path, decode_images: bool) -> Result<QoderParse> {
         }
     }
 
+    // 任务转录没有 parentUuid 与 active-leaf:文件顺序就是对话。连成了树的才按 active-leaf 回溯
+    let linked = !matches!(active_leaf, ActiveLeaf::Missing)
+        || nodes.values().any(|node| node.parent.is_some());
     let chain = if linked {
         active_chain(&nodes, &order, &active_leaf, &mut unknown)
     } else {
         order
             .iter()
-            .filter_map(|id| nodes.get(id))
-            .map(|node| node.row.clone())
+            .filter_map(|id| nodes.remove(id))
+            .map(|node| node.row)
             .collect()
     };
     let mut messages = Vec::new();
@@ -702,23 +726,15 @@ fn build_meta(agent: AgentId, r: &SessionFileRef, parsed: &QoderParse) -> Sessio
         .into_iter()
         .map(clean_title_candidate)
         .find(|title| !title.is_empty());
-    let last_prompt = || Some(clean_title_candidate(&parsed.last_prompt)).filter(|t| !t.is_empty());
-    // 千问办公的会话列表用 app 自己起的名字(不在转录里),last-prompt 只是最近一句
-    // ("继续"、"好"),拿首条提问当标题更像那个名字;Qoder CLI 的 resume 列表显示的就是 last-prompt
-    let title = if agent == AgentId::QwenWork {
-        let asked = parsed
-            .messages
-            .iter()
-            .filter(|m| m.role == Role::User && m.kind == MessageKind::Text)
-            .map(|m| clean_title_candidate(&qwenwork_title_text(&m.text)))
-            .find(|title| !title.is_empty());
-        named.or(asked).or_else(last_prompt)
-    } else {
-        named
-            .or_else(last_prompt)
-            .or_else(|| title_from_messages(&parsed.messages))
-    }
-    .unwrap_or_else(|| UNTITLED.to_string());
+    // 没起过名字的:Qoder CLI 取 last-prompt(它的 resume 列表显示的就是这句);千问办公的会话列表用
+    // app 自己起的名字(不在转录里),last-prompt 只是最近一句("继续"、"好"),首条提问更像那个名字
+    let title = named.unwrap_or_else(|| {
+        session_title(
+            &parsed.last_prompt,
+            agent == AgentId::QwenWork,
+            &parsed.messages,
+        )
+    });
     SessionMeta {
         key: format!("{}:{}", agent.as_str(), r.native_id),
         host: String::new(),
@@ -751,54 +767,6 @@ fn build_meta(agent: AgentId, r: &SessionFileRef, parsed: &QoderParse) -> Sessio
     }
 }
 
-/// 千问办公在人打的字前后拼的东西,标题里换掉:贴的图片只剩 `<user-pasted-image file=… />`
-/// 占位,去掉;贴的长文本包在 `<user-pasted-text …>` 里,留里面的字;从技能面板发起的任务
-/// 前面垫着一段固定的"必须用某个 skill 完成"的指令,只留技能名
-fn qwenwork_title_text(raw: &str) -> String {
-    const SKILL_LEAD: &str = "This request must be fulfilled using the \"";
-    const SKILL_TAIL: &str = "Do NOT claim this capability is unavailable.";
-    // 一次选了几个技能就垫几段
-    let mut skills = Vec::new();
-    let mut text = raw.trim_start();
-    while let Some(rest) = text.strip_prefix(SKILL_LEAD) {
-        let (Some(name_end), Some(tail)) = (rest.find('"'), rest.find(SKILL_TAIL)) else {
-            break;
-        };
-        skills.push(&rest[..name_end]);
-        text = rest[tail + SKILL_TAIL.len()..].trim_start();
-    }
-    let text = if skills.is_empty() {
-        text.to_string()
-    } else {
-        format!("{} · {text}", skills.join(" + "))
-    };
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text.as_str();
-    while let Some(start) = rest.find("<user-pasted-") {
-        out.push_str(&rest[..start]);
-        let Some(end) = rest[start..].find('>') else {
-            rest = "";
-            break;
-        };
-        rest = &rest[start + end + 1..];
-    }
-    out.push_str(rest);
-    out.replace("</user-pasted-text>", " ")
-}
-
-/// 会话或子代理(子代理是 agent 派出去的,标题取边车记的任务说明)
-fn parse(
-    agent: AgentId,
-    r: &SessionFileRef,
-    decode_images: bool,
-) -> Result<(SessionMeta, QoderParse)> {
-    let path = Path::new(&r.file_path);
-    let parsed = parse_qoder_jsonl(path, decode_images)?;
-    let mut meta = build_meta(agent, r, &parsed);
-    mark_subagent(&mut meta, path);
-    Ok((meta, parsed))
-}
-
 impl AgentAdapter for QoderAdapter {
     fn agent(&self) -> AgentId {
         self.agent
@@ -807,7 +775,11 @@ impl AgentAdapter for QoderAdapter {
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         let mut refs = list_project_tree_refs(&self.root, self.agent);
         refs.extend(task_transcript_refs(&self.root, self.agent));
-        refs.retain(|r| !is_internal_run(Path::new(&r.file_path)));
+        {
+            let listed: HashSet<&Path> = refs.iter().map(|r| Path::new(&r.file_path)).collect();
+            self.heads.retain(|path| listed.contains(&path));
+        }
+        refs.retain(|r| !self.is_internal_run(r));
         refs.sort_by(|a, b| a.file_path.cmp(&b.file_path));
         Ok(refs)
     }
@@ -818,7 +790,7 @@ impl AgentAdapter for QoderAdapter {
         } else {
             project_tree_file_ref(&self.root, self.agent, path)
         }?;
-        (!is_internal_run(path)).then_some(r)
+        (!self.is_internal_run(&r)).then_some(r)
     }
 
     fn dedup_rank(&self, _path: &str) -> u8 {
@@ -826,7 +798,7 @@ impl AgentAdapter for QoderAdapter {
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
-        let (meta, parsed) = parse(self.agent, r, false)?;
+        let (meta, parsed) = self.parse(r, false)?;
         Ok(ParsedSession::derive(
             meta,
             &parsed.messages,
@@ -835,7 +807,7 @@ impl AgentAdapter for QoderAdapter {
     }
 
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript> {
-        let (meta, parsed) = parse(self.agent, r, true)?;
+        let (meta, parsed) = self.parse(r, true)?;
         Ok(transcript_with_subagents(
             r,
             meta,
@@ -864,15 +836,10 @@ impl AgentAdapter for QoderAdapter {
             return subagent_paths(&meta.file_path);
         }
         let mut paths = vec![meta.file_path.clone()];
-        if let Some(mut parent) = Path::new(&meta.file_path).parent() {
-            // 任务转录的边车(工具结果)不在 transcript/ 里,而在上一层的 project-key 目录
-            if parent.file_name().is_some_and(|n| n == TASK_TRANSCRIPT_DIR) {
-                parent = parent.parent().unwrap_or(parent);
-            }
-            let sidecar = parent.join(&meta.id);
-            if sidecar.is_dir() {
-                paths.push(sidecar.to_string_lossy().to_string());
-            }
+        // 任务转录的同名目录(工具结果)不在 transcript/ 里,`session_dir_of` 认这一层
+        let sidecar = session_dir_of(Path::new(&meta.file_path), &meta.id);
+        if sidecar.is_dir() {
+            paths.push(sidecar.to_string_lossy().to_string());
         }
         paths
     }
@@ -892,6 +859,7 @@ impl AgentAdapter for QoderAdapter {
             root,
             home,
             rank: 0,
+            heads: StampCache::default(),
         })
     }
 

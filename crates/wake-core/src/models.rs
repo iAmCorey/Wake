@@ -134,7 +134,8 @@ impl AgentId {
         match self {
             AgentId::ClaudeCode => "Claude Code",
             AgentId::Codex => "Codex",
-            AgentId::Qoder => "Qoder CLI",
+            // 2026-11-24 起也读 Qoder IDE / Qoder CN 的任务转录,不再只是命令行(Antigravity 先例)
+            AgentId::Qoder => "Qoder",
             AgentId::Copilot => "Copilot CLI",
             AgentId::Cursor => "Cursor",
             AgentId::Opencode => "OpenCode",
@@ -157,8 +158,9 @@ impl AgentId {
             AgentId::GrokBot => "Grok Bot",
             AgentId::MimoCode => "MiMo Code",
             AgentId::DoubaoWork => "Doubao Work",
-            // 阿里的桌面 agent,app 在各语言下都只叫这个名字(Info.plist 的本地化显示名)
-            AgentId::QwenWork => "千问办公",
+            // 阿里的桌面 agent,app 里显示的名字是「千问办公」;与别家一样用拉丁字母,取包名
+            // QwenWorkCN 的写法(Doubao Work 先例)。中文名在 parse_agent 里当别名认
+            AgentId::QwenWork => "Qwen Work",
         }
     }
 

@@ -1242,11 +1242,9 @@ impl AgentAdapter for ClaudeAdapter {
         }
         let mut v = vec![meta.file_path.clone()];
         // <projects>/<dir>/<id>/ 边车目录(subagents 等)随会话一并删
-        if let Some(dir) = Path::new(&meta.file_path).parent() {
-            let sidecar = dir.join(&meta.id);
-            if sidecar.is_dir() {
-                v.push(sidecar.to_string_lossy().to_string());
-            }
+        let sidecar = session_dir_of(Path::new(&meta.file_path), &meta.id);
+        if sidecar.is_dir() {
+            v.push(sidecar.to_string_lossy().to_string());
         }
         v
     }

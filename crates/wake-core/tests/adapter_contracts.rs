@@ -1014,6 +1014,7 @@ fn desktop_status_does_not_hide_the_question() {
         (Role::User, Meta), // 桌面端合成(sdk):整条一条
         (Role::User, Meta), // 图片在前:扫描(不解码)与详情(解码)一样切
         (Role::User, Text),
+        (Role::User, Meta), // 用户按停时补写的 `[Request interrupted by user]`
     ];
     for adapter in [
         ClaudeAdapter::new().with_custom_root(projects.clone()),
@@ -1048,6 +1049,7 @@ fn desktop_status_does_not_hide_the_question() {
         "Linked sessions",
         "Background (from the session",
         "side-sessions-event",
+        "Request interrupted",
     ] {
         assert!(!indexed.contains(hidden), "{hidden} 不进搜索");
     }
@@ -8154,8 +8156,8 @@ fn qwenwork_is_a_qoder_twin() {
     fs::create_dir_all(&slug).unwrap();
     let reminder =
         "<system-reminder>\nUser environment — Timezone: Asia/Shanghai.\n</system-reminder>";
-    let user = |uuid: &str, parent: Option<&str>, typed: Option<&str>, text: &str| {
-        let mut row = serde_json::json!({
+    let user = |uuid: &str, parent: Option<&str>, text: &str| {
+        serde_json::json!({
             "type": "user", "uuid": uuid, "parentUuid": parent,
             "timestamp": "2026-09-30T07:23:59.387Z", "cwd": "/Users/tester/.qwenworkcn/workspace/abc",
             "origin": {"kind": "human"},
@@ -8163,11 +8165,7 @@ fn qwenwork_is_a_qoder_twin() {
                 {"type": "text", "text": reminder},
                 {"type": "text", "text": text}
             ]}
-        });
-        if let Some(typed) = typed {
-            row["humanInput"] = serde_json::json!({"text": typed, "mode": "prompt"});
-        }
-        row
+        })
     };
     let assistant = |uuid: &str, parent: &str| {
         serde_json::json!({
@@ -8181,27 +8179,19 @@ fn qwenwork_is_a_qoder_twin() {
         slug.join("aaaaaaaa-0000-0000-0000-000000000001.jsonl"),
         jsonl(&[
             serde_json::json!({"type": "runtime-config", "model": "qwork-advanced"}),
-            user(
-                "u1",
-                None,
-                Some("整理一下这周的会议纪要"),
-                "整理一下这周的会议纪要",
-            ),
+            user("u1", None, "整理一下这周的会议纪要"),
             assistant("a1", "u1"),
-            user("u2", Some("a1"), Some("继续"), "继续"),
+            user("u2", Some("a1"), "继续"),
             assistant("a2", "u2"),
             serde_json::json!({"type": "last-prompt", "lastPrompt": "继续"}),
             serde_json::json!({"type": "active-leaf", "leafUuid": "a2"}),
         ]),
     )
     .unwrap();
-    // 前身 QoderWork 写的:没有 humanInput,人打的字是 `<system-reminder>` 后面那一块
+    // 没有 last-prompt 与 active-leaf 的:标题照样取首条提问,消息树照样回溯
     fs::write(
         slug.join("aaaaaaaa-0000-0000-0000-000000000002.jsonl"),
-        jsonl(&[
-            user("u1", None, None, "总结一下这篇文章"),
-            assistant("a1", "u1"),
-        ]),
+        jsonl(&[user("u1", None, "总结一下这篇文章"), assistant("a1", "u1")]),
     )
     .unwrap();
     let internal = dir.path().join("-Users-tester");
@@ -8229,6 +8219,18 @@ fn qwenwork_is_a_qoder_twin() {
         })]),
     )
     .unwrap();
+    // 前面垫着 `<system-reminder>` 的也认得出(与解析同一个切法)
+    let reminded_run = internal.join("aaaaaaaa-0000-0000-0000-000000000005.jsonl");
+    fs::write(
+        &reminded_run,
+        jsonl(&[serde_json::json!({
+            "type": "user", "uuid": "r1", "parentUuid": null, "origin": {"kind": "human"},
+            "message": {"role": "user", "content": [
+                {"type": "text", "text": reminder},
+                {"type": "text", "text": "Target file this round: USER.md"}]}
+        })]),
+    )
+    .unwrap();
 
     let rooted = twin.with_custom_root(dir.path().to_path_buf());
     assert_eq!(rooted.agent(), AgentId::QwenWork);
@@ -8245,6 +8247,7 @@ fn qwenwork_is_a_qoder_twin() {
     );
     assert!(rooted.file_ref(&memory_run).is_none());
     assert!(rooted.file_ref(&command_check).is_none());
+    assert!(rooted.file_ref(&reminded_run).is_none());
 
     let s = rooted.parse_session(&refs[0]).unwrap();
     assert_eq!(s.meta.key, "qwenwork:aaaaaaaa-0000-0000-0000-000000000001");

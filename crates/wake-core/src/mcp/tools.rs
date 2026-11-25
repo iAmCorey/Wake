@@ -541,6 +541,7 @@ fn parse_agent(s: &str) -> Option<AgentId> {
             "craft" => Some(AgentId::CraftAgents),
             "mimo" => Some(AgentId::MimoCode),
             "doubao" | "豆包" => Some(AgentId::DoubaoWork),
+            "千问办公" => Some(AgentId::QwenWork),
             _ => None,
         })
 }
@@ -1531,6 +1532,9 @@ mod tests {
         assert_eq!(parse_agent("doubao"), Some(AgentId::DoubaoWork));
         assert_eq!(parse_agent("Doubao Work"), Some(AgentId::DoubaoWork));
         assert_eq!(parse_agent("豆包"), Some(AgentId::DoubaoWork));
+        assert_eq!(parse_agent("Qwen Work"), Some(AgentId::QwenWork));
+        assert_eq!(parse_agent("千问办公"), Some(AgentId::QwenWork));
+        assert_eq!(parse_agent("Qoder"), Some(AgentId::Qoder));
         assert_eq!(parse_agent("chatgpt"), None);
     }
 

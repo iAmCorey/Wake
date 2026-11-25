@@ -351,6 +351,8 @@ fn user_dirs(agent: AgentId) -> Option<UserDirs> {
         AgentId::ClaudeCode
         | AgentId::Codex
         | AgentId::Qoder
+        // 千问办公内置与用户装的都在这里(PR #81 作者本机核对)
+        | AgentId::QwenWork
         | AgentId::Cursor
         | AgentId::Codebuddy
         | AgentId::Grok
@@ -382,8 +384,6 @@ fn user_dirs(agent: AgentId) -> Option<UserDirs> {
         // 同样);它还读 `skill/` 单数与 `~/.mimocode`,常用的是这一处
         AgentId::MimoCode => Fixed(Base::Config, &["mimocode/skills"]),
         AgentId::Devin => Fixed(Base::AppConfig, &["devin/skills"]),
-        // app 内置与用户装的 skill 都落在这里(本机核对,每个子目录一份 SKILL.md)
-        AgentId::QwenWork => Fixed(Base::Home, &[".qwenworkcn/skills"]),
         // 豆包工作:没核实过它读哪个 skill 目录
         AgentId::Kimi | AgentId::GrokBot | AgentId::Workbuddy | AgentId::DoubaoWork => return None,
     })
