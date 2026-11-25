@@ -351,6 +351,8 @@ fn user_dirs(agent: AgentId) -> Option<UserDirs> {
         AgentId::ClaudeCode
         | AgentId::Codex
         | AgentId::Qoder
+        // 千问办公内置与用户装的都在这里(PR #81 作者本机核对)
+        | AgentId::QwenWork
         | AgentId::Cursor
         | AgentId::Codebuddy
         | AgentId::Grok
@@ -415,7 +417,8 @@ fn project_dirs(agent: AgentId) -> &'static [&'static str] {
         | AgentId::Kimi
         | AgentId::GrokBot
         | AgentId::Workbuddy
-        | AgentId::DoubaoWork => &[],
+        | AgentId::DoubaoWork
+        | AgentId::QwenWork => &[],
     }
 }
 

@@ -317,10 +317,17 @@ pub fn collapse_inherited(messages: &mut Vec<TranscriptMessage>, cut: usize, par
 
 /// 会话的同名目录(`<projects>/<slug>/<id>/`,子代理转录等边车在里面)
 pub fn session_dir(r: &SessionFileRef) -> std::path::PathBuf {
-    std::path::Path::new(&r.file_path)
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .join(&r.native_id)
+    session_dir_of(std::path::Path::new(&r.file_path), &r.native_id)
+}
+
+/// 会话文件的同名目录。Qoder IDE / Qoder CN 的任务转录在 `<slug>/transcript/<id>.jsonl`,它的同名
+/// 目录(工具结果、子代理)仍在 `<slug>/<id>/`
+pub fn session_dir_of(file: &std::path::Path, id: &str) -> std::path::PathBuf {
+    let mut parent = file.parent().unwrap_or(std::path::Path::new("."));
+    if parent.file_name().is_some_and(|name| name == "transcript") {
+        parent = parent.parent().unwrap_or(parent);
+    }
+    parent.join(id)
 }
 
 /// 子代理转录所在会话的目录(目录名就是派它的会话的 id):Task / Agent 派的在
@@ -1446,11 +1453,15 @@ pub fn clean_prompt_line(raw: &str) -> String {
 /// 命令名)
 fn clean_user_text(raw: &str, whole_command: bool) -> String {
     let raw = codex_ide_request(raw).unwrap_or(raw);
-    let mut s = strip_tag_block(raw, "system-reminder");
+    let raw = skill_panel_request(raw);
+    let mut s = strip_tag_block(&raw, "system-reminder");
     s = strip_tag_block(&s, "local-command-caveat");
     s = strip_tag_block(&s, "local-command-stdout");
     // Kimi 派出去的 explore 子代理收到的任务前面垫着仓库现状
     s = strip_tag_block(&s, "git-context");
+    // 千问办公贴的图片与长文本(`<user-pasted-image file=… />`、`<user-pasted-text …>`)带着文件路径
+    // 一类长属性,下面去残余短标签那一遍剥不掉;只剥标签,贴的字留着
+    s = strip_open_tags(&s, "<user-pasted-");
 
     let args = extract_tag(&s, "command-args");
     let name = extract_tag(&s, "command-name");
@@ -1500,6 +1511,43 @@ fn codex_ide_request(text: &str) -> Option<&str> {
         .strip_prefix("# Context from my IDE setup:")?
         .split_once("## My request for Codex:")?;
     Some(request)
+}
+
+/// 千问办公从技能面板发起的任务:人打的字前面垫着一段固定的"必须用某个 skill 完成"的指令,选了几个
+/// 技能就垫几段。标题与交接只留技能名,写成 `技能 · 那句话`;正文原样保留
+fn skill_panel_request(text: &str) -> std::borrow::Cow<'_, str> {
+    const LEAD: &str = "This request must be fulfilled using the \"";
+    const TAIL: &str = "Do NOT claim this capability is unavailable.";
+    let mut skills = Vec::new();
+    let mut rest = text.trim_start();
+    while let Some(after) = rest.strip_prefix(LEAD) {
+        let (Some(name_end), Some(tail)) = (after.find('"'), after.find(TAIL)) else {
+            break;
+        };
+        skills.push(&after[..name_end]);
+        rest = after[tail + TAIL.len()..].trim_start();
+    }
+    if skills.is_empty() {
+        std::borrow::Cow::Borrowed(text)
+    } else {
+        std::borrow::Cow::Owned(format!("{} · {rest}", skills.join(" + ")))
+    }
+}
+
+/// 去掉以 `prefix` 开头、到下一个 `>` 为止的标签(长度不限),标签外的字留着
+fn strip_open_tags(s: &str, prefix: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find(prefix) {
+        out.push_str(&rest[..start]);
+        out.push(' ');
+        let Some(end) = rest[start..].find('>') else {
+            return out;
+        };
+        rest = &rest[start + end + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn strip_tag_block(s: &str, tag: &str) -> String {
@@ -1594,6 +1642,11 @@ pub fn push_leading_context(
 
 /// 跳过开头的图片占位。扫描不解码时图片是 `[image]`,详情解码时图片没有字:按开头判断的地方
 /// (分类、切上下文)两种解析要判成一样
+/// 开头的图片占位与 `<system-reminder>` 之后,人说的那段话(`push_leading_context` 同一个切法)
+pub fn after_leading_context(text: &str) -> &str {
+    split_leading_reminders(after_image_placeholders(text)).1
+}
+
 pub fn after_image_placeholders(text: &str) -> &str {
     let mut text = text.trim_start();
     while let Some(rest) = text.strip_prefix(IMAGE_PLACEHOLDER) {
@@ -1635,6 +1688,9 @@ pub fn is_injected_user_content(text: &str) -> bool {
         // Claude Code 的后台任务(子代理、后台命令)结束时以 user 行注入的通知,不是人打的字;
         // 不认它的话它会当成提问进 Insights、给分支会话起出 "b69tgbuwc toolu_…" 这种标题
         "<task-notification",
+        // 用户按停时 Claude Code(与同一套转录格式的 Qoder、千问办公)补写的那一行:
+        // `[Request interrupted by user]` / `… for tool use]`,不带 isMeta,也不是人打的字
+        "[Request interrupted by user",
         // Codex 的 subagent / 分支线程:父会话的整段 transcript 被打包成
         // 一条 role=user 消息喂进来,里面含父会话的 assistant 输出。不认它
         // 的话,父会话里 AI 说的话会显示成这个会话里用户发的
@@ -1740,6 +1796,62 @@ mod tests {
         assert!(!is_injected_user_content(
             "为什么 <task-notification> 会被当成提问?"
         ));
+    }
+
+    /// 用户按停时补写的那一行不是提问;正文里引用到它的照算人话
+    #[test]
+    fn interrupt_markers_are_injected_content() {
+        assert!(is_injected_user_content("[Request interrupted by user]"));
+        assert!(is_injected_user_content(
+            "[Request interrupted by user for tool use]"
+        ));
+        assert!(!is_injected_user_content(
+            "为什么会出现 [Request interrupted by user]?"
+        ));
+    }
+
+    /// 千问办公:技能面板垫的指令在标题与交接里只留技能名,贴的图片与长文本只剥标签(标签带着长路径,
+    /// 去残余短标签那一遍剥不掉)
+    #[test]
+    fn qwen_work_wrappers_are_trimmed_from_titles() {
+        let skill = |name: &str| {
+            format!("This request must be fulfilled using the \"{name}\" skill. Load it first. Do NOT claim this capability is unavailable.\n\n")
+        };
+        assert_eq!(
+            clean_title_candidate(&format!("{}把这份合同翻译成英文", skill("pdf"))),
+            "pdf · 把这份合同翻译成英文"
+        );
+        assert_eq!(
+            clean_prompt_line(&format!("{}{}合并成一份", skill("pdf"), skill("docx"))),
+            "pdf + docx · 合并成一份"
+        );
+        let long = "a".repeat(80);
+        assert_eq!(
+            clean_title_candidate(&format!(
+                "看看这张图 <user-pasted-image file=\"/Users/tester/{long}.png\" /> 哪里不对"
+            )),
+            "看看这张图 哪里不对"
+        );
+        assert_eq!(
+            clean_title_candidate(&format!(
+                "<user-pasted-text id=\"{long}\">粘贴的长文本</user-pasted-text> 总结一下"
+            )),
+            "粘贴的长文本 总结一下"
+        );
+    }
+
+    /// 任务转录在 `transcript/` 里,同名目录在上一层;别的会话文件旁边就是
+    #[test]
+    fn task_transcripts_keep_their_folder_one_level_up() {
+        let p = std::path::Path::new;
+        assert_eq!(
+            session_dir_of(p("/q/projects/-Users-x/transcript/task-1.jsonl"), "task-1"),
+            p("/q/projects/-Users-x/task-1")
+        );
+        assert_eq!(
+            session_dir_of(p("/q/projects/-Users-x/abc.jsonl"), "abc"),
+            p("/q/projects/-Users-x/abc")
+        );
     }
 
     #[test]

@@ -40,7 +40,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex` and many other fo
 |---|---|---|---|
 | Claude Code | `~/.claude/projects/**/*.jsonl` | ✅ | — |
 | Codex CLI | `~/.codex/sessions/**/*.jsonl[.zst]` + `state_5.sqlite` | ✅ | ✅ |
-| Qoder CLI | `~/.qoder/projects/*/*.jsonl` | ✅ | — |
+| Qoder | `~/.qoder/projects/*/*.jsonl` + Qoder IDE / Qoder CN tasks in `projects/*/transcript/*.jsonl` | ✅ | — |
 | Copilot CLI | `~/.copilot/session-store.db` | — | — |
 | Cursor | `~/.cursor/projects/**/agent-transcripts` + Cursor's `state.vscdb` (IDE chats) | ✅ | — |
 | OpenCode | `~/.local/share/opencode/opencode.db` | ✅ | — |
@@ -64,6 +64,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex` and many other fo
 | Grok Bot | the desktop app's cache (`Grok Bot/sand-client-persistence`) | — | — |
 | MiMo Code | `~/.local/share/mimocode/mimocode.db` | ✅ | — |
 | Doubao Work | the Doubao desktop app's agent mode (`Doubao/<profile>/.doubao/agent_mode/workspace/.sessions`) | — | — |
+| Qwen Work (千问办公) | `~/.qwenworkcn/projects/*/*.jsonl` + the QoderWork CN folder it migrated from (`~/.qoderworkcn/projects`) | ✅ | — |
 
 Agents' own environment variables (`CODEX_HOME`, `XDG_DATA_HOME`, …) are respected, and Settings → Session locations adds folders anywhere else.
 
@@ -74,6 +75,7 @@ Agents' own environment variables (`CODEX_HOME`, `XDG_DATA_HOME`, …) are respe
 - **Craft Agents** — on a Claude connection, Wake shows the Craft session and hides the duplicate Claude Code copy
 - **Kilo Code** — the new extension, CLI and JetBrains plugin share `kilo.db`; tasks from the legacy extension are listed too
 - **Grok Bot** — conversations live in Grok Bot's cloud; Wake reads the latest messages the desktop app keeps on this computer, a conversation it no longer keeps stays listed with its last message, and deleting one in Wake only hides it
+- **Qwen Work** — runs the Qoder engine; its background memory-compaction and command-check runs are skipped, and sessions are titled by the first thing you typed
 - **MiMo Code** — a session imported from Claude Code, Codex or OpenCode is listed once you continue it in MiMo Code, without the imported part
 - **Doubao Work** — tasks run on your computer are indexed, with the helpers they hand work to listed under them; tasks and helpers that run on Doubao's cloud computer aren't stored locally. Deleting one in Wake only hides it
 

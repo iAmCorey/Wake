@@ -303,6 +303,7 @@ pub fn stage_dir_fixtures(home: &Path) {
         ("pi", ".pi"),
         ("pi", ".omp"),
         ("qoder", ".qoder"),
+        ("qoder", ".qwenworkcn"),
         ("codebuddy", ".codebuddy"),
         ("codebuddy", ".workbuddy"),
         ("craft-agents", ".craft-agent"),

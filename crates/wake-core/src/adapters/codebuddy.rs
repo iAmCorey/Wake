@@ -658,10 +658,10 @@ impl AgentAdapter for CodebuddyAdapter {
             if meta_file.is_file() {
                 paths.push(meta_file.to_string_lossy().to_string());
             }
-            let sidecar = parent.join(&meta.id);
-            if sidecar.is_dir() {
-                paths.push(sidecar.to_string_lossy().to_string());
-            }
+        }
+        let sidecar = session_dir_of(Path::new(&meta.file_path), &meta.id);
+        if sidecar.is_dir() {
+            paths.push(sidecar.to_string_lossy().to_string());
         }
         paths
     }

@@ -2,7 +2,10 @@
 
 ## [Unreleased]
 
+- New: Qwen Work (千问办公) sessions are indexed from `~/.qwenworkcn/projects`, together with the ones its predecessor QoderWork CN left in `~/.qoderworkcn/projects`; a session that exists in both is listed once. Prompts and titles show what you typed, not the system reminder the app puts in front of it, and the app's background memory-compaction and command-check runs are left out. No Open In, since it has no command line (#81, thanks @245678000000)
+- New: Tasks you ran in the Qoder IDE or Qoder CN (`~/.qoder/projects/*/transcript`) are listed under Qoder (formerly Qoder CLI) with their full messages and tool calls (#81, thanks @245678000000)
 - New: The transcript shows where system messages such as injected context and hook output were hidden; open the note to read them
+- Fix: The `[Request interrupted by user]` line Claude Code writes when you stop it no longer shows as a question you asked or counts in Insights (#81, thanks @245678000000)
 - Fix: Questions you sent from the Claude app's Code tab no longer disappear when the app puts a status note in front of them; they show in the transcript, search and Insights again
 - Fix: CodeBuddy Code no longer hides a question that arrives with editor context in front of it, and no longer counts teammate reports, hook follow-ups or compaction summaries as your messages (#88, thanks @XYZliang)
 - Fix: CodeBuddy Code shows the images you pasted, and sessions where nothing was said are no longer listed (#88, thanks @XYZliang)

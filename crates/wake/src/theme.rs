@@ -132,6 +132,9 @@ pub fn agent_series_color(agent: wake_core::models::AgentId) -> u32 {
         // 标志的蓝、青、紫三色在色板里都有近邻(CodeBuddy 8.6、WorkBuddy 6.2、Oh My Pi 5.4);
         // 取标志的青色压深一档,离最近的 Cursor ΔE00 20.0
         DoubaoWork => 0x367B7D,
+        // app 图标的品牌绿 #00CB5E 离 Qoder 绿只有 ΔE00 6.1,压深一档:最近的 Qoder、Copilot
+        // 都是 14.1
+        QwenWork => 0x0B8A4C,
     }
 }
 

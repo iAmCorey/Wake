@@ -71,6 +71,7 @@ brands!(
     "mimo-code",
     "mimo-code-light",
     "doubao-work",
+    "qwenwork",
 );
 
 fn lookup_product(path: &str) -> Option<&'static [u8]> {

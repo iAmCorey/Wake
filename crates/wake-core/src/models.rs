@@ -31,13 +31,14 @@ pub enum AgentId {
     Kilo,
     MimoCode,
     DoubaoWork,
+    QwenWork,
 }
 
 impl AgentId {
     /// 全部 agent,**枚举声明序**(= Ord = 用户钉的侧栏展示序;面板成组、
     /// 表单下拉共用同一顺序)。曾误抄 create_adapters 的构造序,下拉与侧栏
     /// 排序当场对不上——契约测试现在卡它与 Ord 一致
-    pub const ALL: [AgentId; 25] = [
+    pub const ALL: [AgentId; 26] = [
         AgentId::ClaudeCode,
         AgentId::Codex,
         AgentId::Grok,
@@ -63,6 +64,7 @@ impl AgentId {
         AgentId::Kilo,
         AgentId::MimoCode,
         AgentId::DoubaoWork,
+        AgentId::QwenWork,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -92,6 +94,7 @@ impl AgentId {
             AgentId::GrokBot => "grok-bot",
             AgentId::MimoCode => "mimo-code",
             AgentId::DoubaoWork => "doubao-work",
+            AgentId::QwenWork => "qwenwork",
         }
     }
 
@@ -122,6 +125,7 @@ impl AgentId {
             "grok-bot" => Some(AgentId::GrokBot),
             "mimo-code" => Some(AgentId::MimoCode),
             "doubao-work" => Some(AgentId::DoubaoWork),
+            "qwenwork" => Some(AgentId::QwenWork),
             _ => None,
         }
     }
@@ -130,7 +134,8 @@ impl AgentId {
         match self {
             AgentId::ClaudeCode => "Claude Code",
             AgentId::Codex => "Codex",
-            AgentId::Qoder => "Qoder CLI",
+            // 2026-11-24 起也读 Qoder IDE / Qoder CN 的任务转录,不再只是命令行(Antigravity 先例)
+            AgentId::Qoder => "Qoder",
             AgentId::Copilot => "Copilot CLI",
             AgentId::Cursor => "Cursor",
             AgentId::Opencode => "OpenCode",
@@ -153,6 +158,9 @@ impl AgentId {
             AgentId::GrokBot => "Grok Bot",
             AgentId::MimoCode => "MiMo Code",
             AgentId::DoubaoWork => "Doubao Work",
+            // 阿里的桌面 agent,app 里显示的名字是「千问办公」;与别家一样用拉丁字母,取包名
+            // QwenWorkCN 的写法(Doubao Work 先例)。中文名在 parse_agent 里当别名认
+            AgentId::QwenWork => "Qwen Work",
         }
     }
 
@@ -269,6 +277,8 @@ impl AgentId {
             }
             // lobe-icons 的 Doubao 彩色标志(蓝、青、紫三瓣,豆包 app 与官网同一个),两模式通用
             AgentId::DoubaoWork => "brands/doubao-work.png",
+            // 官方 app 图标(QwenWorkCN.app 的 icon.icns),两模式通用,ZCode 同款
+            AgentId::QwenWork => "brands/qwenwork.png",
         }
     }
 }
