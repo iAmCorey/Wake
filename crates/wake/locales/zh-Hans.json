@@ -551,5 +551,19 @@
   "Matches the titles and text of the notes your agents keep.": "匹配 agent 记下的笔记的标题与正文。",
   "Search installed skills": "搜索已装的技能",
   "Matches skill names and descriptions.": "匹配技能的名字与说明。",
-  "Other tabs have results. Press Tab to switch.": "别的栏有结果,按 Tab 切过去。"
+  "Other tabs have results. Press Tab to switch.": "别的栏有结果,按 Tab 切过去。",
+  "Startup": "启动",
+  "Start with Windows": "开机自启动",
+  "Launch Wake automatically when you sign in.": "登录 Windows 时自动运行 Wake。",
+  "Run Wake when you sign in": "登录时运行 Wake",
+  "Silent start": "静默启动",
+  "Skip the main window at sign-in and stay in the tray.": "登录时不打开主窗口，只在托盘运行。",
+  "Start without showing the main window": "启动时不显示主窗口",
+  "Close to tray": "关闭时最小化到托盘",
+  "Keep Wake in the tray when you close the window.": "关闭主窗口时让 Wake 留在托盘。",
+  "Close the window to the tray": "关闭窗口到托盘",
+  "Global hotkey": "全局快捷键",
+  "Bring Wake back from anywhere.": "在任意界面唤出 Wake。",
+  "Language and how Wake starts up.": "语言与 Wake 的启动方式。",
+  "Couldn't save startup settings: {}": "无法保存启动设置：{}"
 }

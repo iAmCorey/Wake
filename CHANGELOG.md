@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.10.5] — 2026-11-28
+
+- New (Windows): Settings → General adds startup options — start with Windows, start silently in the tray when launched at sign-in, close the main window to the tray, and a configurable global hotkey (default Ctrl+Shift+W) to bring Wake back
+- New (Windows): Wake now runs as a system-tray app; the tray menu offers Show Wake and Quit Wake, and closing the main window quits the app only when "Close to tray" is off
+
 ## [0.10.4] — 2026-11-25
 
 - New: Qwen Work (千问办公) sessions are indexed from `~/.qwenworkcn/projects`, together with the ones its predecessor QoderWork CN left in `~/.qoderworkcn/projects`; a session that exists in both is listed once. Prompts and titles show what you typed, not the system reminder the app puts in front of it, and the app's background memory-compaction and command-check runs are left out. No Open In, since it has no command line (#81, thanks @245678000000)

@@ -296,6 +296,8 @@ pub(crate) struct SettingsView {
     focus_handle: FocusHandle,
     workbench: Entity<Workbench>,
     appearance: AppearancePreference,
+    /// Startup 页的偏好快照：每次改动都落盘，render 里只读这个字段，不在每帧读文件
+    startup: crate::startup::StartupPrefs,
     show_unavailable: bool,
     connect: ConnectInfo,
     /// Connect 页里展开了代码片段的行(按 snippets 下标);Settings 重开即复位
@@ -389,6 +391,7 @@ impl SettingsView {
             focus_handle: cx.focus_handle(),
             workbench,
             appearance: theme::appearance_preference(),
+            startup: crate::startup::load(),
             show_unavailable: false,
             connect: ConnectInfo::probe(),
             connect_shown: Default::default(),
@@ -724,17 +727,134 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// 改动任一 startup 偏好：先落盘（注册表/热键也在里面同步），成功才更新快照。
+    fn set_startup(
+        &mut self,
+        change: impl FnOnce(&mut crate::startup::StartupPrefs),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut prefs = self.startup.clone();
+        change(&mut prefs);
+        match crate::startup::save(&prefs) {
+            Ok(()) => {
+                self.startup = prefs;
+                cx.notify();
+            }
+            Err(error) => window.push_notification(
+                gpui_component::notification::Notification::error(crate::tf!(
+                    "Couldn't save startup settings: {}",
+                    error
+                )),
+                cx,
+            ),
+        }
+    }
+
     fn render_general(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let rows = [Self::setting_row(
-            t("Language"),
-            t("Follow the system language, or pick one."),
-            self.language_control(),
-            cx,
-        )];
+        let autostart = Switch::new("settings-startup-autostart")
+            .checked(self.startup.autostart)
+            .small()
+            .tooltip(t("Run Wake when you sign in"))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.set_startup(|prefs| prefs.autostart = !prefs.autostart, window, cx)
+            }));
+        let silent = Switch::new("settings-startup-silent")
+            .checked(self.startup.silent_start)
+            .small()
+            .tooltip(t("Start without showing the main window"))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.set_startup(|prefs| prefs.silent_start = !prefs.silent_start, window, cx)
+            }));
+        let to_tray = Switch::new("settings-startup-to-tray")
+            .checked(self.startup.minimize_to_tray)
+            .small()
+            .tooltip(t("Close the window to the tray"))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.set_startup(
+                    |prefs| prefs.minimize_to_tray = !prefs.minimize_to_tray,
+                    window,
+                    cx,
+                )
+            }));
+
+        // 下拉的 on_click 拿到的是 &mut App 而非 Context<Self>，所以捕获实体句柄，
+        // 在回调里 update 回 SettingsView 的快照。
+        let entity = cx.entity();
+        let current_hotkey = self.startup.hotkey.clone();
+        let hotkey_control = select_control(
+            "settings-startup-hotkey",
+            current_hotkey.clone(),
+            Zpx(160.),
+            move |mut menu| {
+                for option in crate::startup::HOTKEY_OPTIONS {
+                    let target = entity.clone();
+                    let spec = option.to_string();
+                    let selected = *option == current_hotkey;
+                    menu = menu.item(
+                        PopupMenuItem::new(*option).checked(selected).on_click(
+                            move |_, window, cx| {
+                                let mut prefs = crate::startup::load();
+                                prefs.hotkey = spec.clone();
+                                match crate::startup::save(&prefs) {
+                                    Ok(()) => {
+                                        target.update(cx, |this, cx| {
+                                            this.startup = prefs;
+                                            cx.notify();
+                                        });
+                                    }
+                                    Err(error) => window.push_notification(
+                                        gpui_component::notification::Notification::error(
+                                            crate::tf!("Couldn't save startup settings: {}", error),
+                                        ),
+                                        cx,
+                                    ),
+                                }
+                            },
+                        ),
+                    );
+                }
+                menu
+            },
+        );
+
+        let rows: Vec<AnyElement> = vec![
+            Self::setting_row(
+                t("Language"),
+                t("Follow the system language, or pick one."),
+                self.language_control(),
+                cx,
+            ),
+            section_title(t("Startup"), cx).pt(SPACE_MD).into_any_element(),
+            Self::setting_row(
+                t("Start with Windows"),
+                t("Launch Wake automatically when you sign in."),
+                autostart,
+                cx,
+            ),
+            Self::setting_row(
+                t("Silent start"),
+                t("Skip the main window at sign-in and stay in the tray."),
+                silent,
+                cx,
+            ),
+            Self::setting_row(
+                t("Close to tray"),
+                t("Keep Wake in the tray when you close the window."),
+                to_tray,
+                cx,
+            ),
+            Self::setting_row(
+                t("Global hotkey"),
+                t("Bring Wake back from anywhere."),
+                hotkey_control,
+                cx,
+            ),
+        ];
         Self::rows_page(
             "settings-general-scroll",
             t("General"),
-            t("Choose the language Wake uses."),
+            t("Language and how Wake starts up."),
             SPACE_MD,
             rows,
             cx,

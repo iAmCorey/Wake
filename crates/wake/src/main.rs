@@ -15,6 +15,7 @@ mod main_window;
 mod markdown_links;
 mod prefs;
 mod settings;
+mod startup;
 mod theme;
 mod ui;
 mod ui_zoom;
@@ -358,6 +359,12 @@ fn main() {
     for url in links::startup_links() {
         let _ = link_tx.unbounded_send(url.clone());
     }
+    // 托盘/自启偏好在开窗前就要读到：静默启动决定要不要开窗，托盘线程与事件循环
+    // 一起起。手动双击不受 silent_start 影响，只有 --autostart 那次才静默。
+    let startup_prefs = startup::load();
+    let silent_launch = startup::launched_at_boot() && startup_prefs.silent_start;
+    let (tray_tx, mut tray_rx) = futures::channel::mpsc::unbounded::<startup::TrayEvent>();
+
     let app = gpui_platform::application().with_assets(Assets);
     let opened = link_tx.clone();
     app.on_open_urls(move |urls| {
@@ -370,6 +377,13 @@ fn main() {
     // 没有可见窗口时触发)。与 Window → Main Window 同一条路
     app.on_reopen(|cx| show_main_window(cx, |_, _, _| {}));
     app.run(move |cx: &mut App| {
+        // GPUI 默认在 Windows/Linux 上"最后一个窗口关闭即退出",macOS 才是显式退出。
+        // 关窗到托盘需要进程在零窗口时继续活着(托盘线程持有图标与热键),所以改成
+        // 只由显式 quit 结束:关窗到托盘开启时关窗只销毁窗口;关闭该选项时
+        // should_close 会主动调用 quit,行为不变。
+        #[cfg(windows)]
+        cx.set_quit_mode(QuitMode::Explicit);
+
         gpui_component::init(cx);
         // 必须在 set_menus 与开任何窗之前:两者的文案都在构造那一刻求值
         i18n::init();
@@ -412,8 +426,26 @@ fn main() {
         cx.bind_keys(key_bindings());
         cx.set_menus(app_menus());
 
-        open_main_window_or_exit(cx, "open");
-        cx.activate(true);
+        // 托盘与热键跑在自己的线程上，事件转回 GPUI 走既有的开窗/退出路径。
+        startup::start(&startup_prefs, tray_tx);
+        cx.spawn(async move |cx| {
+            while let Some(event) = tray_rx.next().await {
+                match event {
+                    startup::TrayEvent::Show => {
+                        let _ = cx.update(|cx| show_main_window(cx, |_, _, _| {}));
+                    }
+                    startup::TrayEvent::Quit => {
+                        let _ = cx.update(|cx| main_window::quit(cx));
+                    }
+                }
+            }
+        })
+        .detach();
+
+        if !silent_launch {
+            open_main_window_or_exit(cx, "open");
+            cx.activate(true);
+        }
 
         // 开窗之后(主窗在了、索引锁拿到了)才收链接:Windows / Linux 监听收件箱,别的
         // Wake 进程转来的链接从那里来;Windows 每次启动把 wake: 协议指向自己
