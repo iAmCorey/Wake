@@ -188,14 +188,16 @@ pub fn flush(cx: &mut App) {
     }
 }
 
-/// Linux 的主窗关闭即退出;从属窗口以及其他平台仍走普通关窗。
+/// 主窗关闭即退出的平台( Linux;Windows 上未开启"关窗到托盘"时同样退出 );
+/// 从属窗口与"关窗到托盘"开启时的主窗走普通关窗——GPUI 的 Windows 循环不随
+/// 最后一个窗口关闭退出,托盘线程还在,热键/点击能把主窗拉回来。
 /// 返回 false 保留主窗,交给事件循环退出后的 GPUI shutdown 统一释放,
 /// 不在正在派发关闭事件的窗口回调里销毁它。
 pub fn should_close(window: &mut Window, cx: &mut App) -> bool {
     let is_main = cx
         .try_global::<MainWindow>()
         .is_some_and(|main| AnyWindowHandle::from(main.0) == window.window_handle());
-    if cfg!(target_os = "linux") && is_main {
+    if is_main && crate::startup::close_quits_app() {
         quit(cx);
         false
     } else {
